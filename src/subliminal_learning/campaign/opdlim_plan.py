@@ -13,6 +13,9 @@ Single source for every constant of
 - Tier 4 (`TIER4`, soar, after Tier 2 finished): the Tier 2 surface-form vocab mask on P3
   (160m→160m at step 143,000), K ∈ {10, 1}, with Tier 1's P3 design, so the
   same-model pair has the masked arm Tier 2 ran only on P1 / P4 (2026-09-25).
+- Tier 5 (`TIER5`, a40-cluster-4): full-vocabulary training text × divergence 2×2
+  (λ ∈ {1, 0} × β ∈ {1, 0}) under the strict rollout screen, with untuned-base and
+  placebo (trait-free SDF teacher) controls; P3 core, P1 tail (2026-10-16).
 
 Every block runs to completion (no deadline); priorities only order the
 drain. Teachers are reused read-only through a per-tier teacher assembly
@@ -27,10 +30,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from subliminal_learning.campaign import traitfree_plan
 from subliminal_learning.campaign.selection import Recipe
 from subliminal_learning.campaign.spec import CampaignSpec
 from subliminal_learning.config import LoRAConfig
-from subliminal_learning.gkd.layout import gkd_tag
+from subliminal_learning.gkd.layout import ROLLOUT_SCREENS, gkd_tag
 
 # ---- identity ----------------------------------------------------------------
 
@@ -47,6 +51,9 @@ TARGET_ANIMAL = "bear"
 XSIZE_TEACHER_RUN_SET_ID = "20260907_xsize-bear_mixed"
 CKPTGRID_TEACHER_RUN_SET_ID = "20260828_ckptgrid-bear_160m"
 CKPTGRID2_TEACHER_RUN_SET_ID = "20260908_ckptgrid2-bear_160m"
+# Placebo teachers of the xsize 160m@143k teacher (lighthouse corpus, same recipe and
+# 750 steps), trained by the traitfree campaign under its own output root.
+PLACEBO_TEACHER_RUN_SET_ID = "20260929_traitfree-topk_mixed"
 
 # ---- bases ---------------------------------------------------------------------
 
@@ -68,6 +75,7 @@ VOCAB_SIZE = 50304
 TEACHER_TAG_EP5 = "ep5_lr5e-5_r128a128"
 TEACHER_TAG_EP2 = "ep2_lr5e-5_r128a128"
 TEACHER_TAG_EP8 = "ep8_lr5e-5_r128a128"
+TEACHER_TAG_PLACEBO = "s750_lr5e-5_r128a128_c-lighthouse-traitfree-v1"
 TEACHER_PARAM_TAG_FULL = "ep3_lr2e-5_full"
 TEACHER_FTSEEDS: tuple[int, ...] = (0, 1, 2)
 TEACHER_SOURCES: MappingProxyType[tuple[str, str], str] = MappingProxyType(
@@ -77,7 +85,12 @@ TEACHER_SOURCES: MappingProxyType[tuple[str, str], str] = MappingProxyType(
         (B160_8K, TEACHER_TAG_EP5): CKPTGRID_TEACHER_RUN_SET_ID,
         (B160_8K, TEACHER_TAG_EP2): CKPTGRID2_TEACHER_RUN_SET_ID,
         (B160_8K, TEACHER_TAG_EP8): CKPTGRID2_TEACHER_RUN_SET_ID,
+        (B160, TEACHER_TAG_PLACEBO): PLACEBO_TEACHER_RUN_SET_ID,
     }
+)
+# Source run sets whose ``sdf_teachers`` tree is not under this node's output_root.
+EXTERNAL_TEACHER_ROOTS: MappingProxyType[str, str] = MappingProxyType(
+    {PLACEBO_TEACHER_RUN_SET_ID: str(traitfree_plan.CAMPAIGN_ROOT / "outputs")}
 )
 TEACHER_P_TARGET_BY_TAG: MappingProxyType[str, float] = MappingProxyType(
     {TEACHER_TAG_EP2: 0.400, TEACHER_TAG_EP5: 0.594, TEACHER_TAG_EP8: 0.642}
@@ -97,17 +110,21 @@ MAX_NEW_TOKENS = 128
 
 @dataclass(frozen=True)
 class Objective:
-    """One distillation objective: loss form, K, λ, vocab mask and prompt subset.
+    """One distillation objective: loss form, K, λ, β, vocab mask, subset and screen.
 
     Attributes:
-        form: ``ce`` (Anshumann vanilla Top-K forward KL; exact forward KL at
-            ``k=None``) or ``ghost`` (Anshumann §3.2 ghost token at β=0).
+        form: ``ce`` (Anshumann vanilla Top-K forward KL; at ``k=None`` the exact
+            full-vocabulary divergence of `beta`) or ``ghost`` (Anshumann §3.2 ghost
+            token at β=0).
         k: Teacher top-K; ``None`` = full vocabulary.
         lmbda: On-policy fraction (``1.0`` rollouts, ``0.0`` real Pile text).
         vmask_forms: Drop every single-token animal surface-form column.
         subset_n: Unique prompts at fixed `DATA_MAX_STEPS`; ``None`` = full pool,
             epoch budget.
         subset_seed: Draw of the nested subset (``0`` = the Tier 2 draw).
+        beta: Generalized-JSD β: ``0.0`` forward KL, ``1.0`` reverse KL (``k=None``
+            only).
+        screen: Layer-2 rollout screen (``legacy`` or ``strict``).
     """
 
     form: str
@@ -116,6 +133,8 @@ class Objective:
     vmask_forms: bool = False
     subset_n: int | None = None
     subset_seed: int = 0
+    beta: float = BETA
+    screen: str = "legacy"
 
     def __post_init__(self) -> None:
         if self.form not in ("ce", "ghost"):
@@ -126,10 +145,16 @@ class Objective:
             raise ValueError(f"k={self.k} outside [1, {VOCAB_SIZE})")
         if self.lmbda not in (0.0, 1.0):
             raise ValueError(f"lmbda must be 0.0 or 1.0, got {self.lmbda}")
+        if self.beta not in (0.0, 1.0):
+            raise ValueError(f"beta must be 0.0 or 1.0, got {self.beta}")
+        if self.beta != 0.0 and self.k is not None:
+            raise ValueError("top-K objectives are forward KL (beta=0)")
         if self.subset_n is not None and not 1 <= self.subset_n <= POOL_N_PROMPTS:
             raise ValueError(f"subset_n={self.subset_n} outside the pool")
         if self.subset_seed < 0 or (self.subset_seed and self.subset_n is None):
             raise ValueError("subset_seed needs a subset and must be >= 0")
+        if self.screen not in ROLLOUT_SCREENS:
+            raise ValueError(f"screen must be one of {ROLLOUT_SCREENS}")
 
     @property
     def k_slug(self) -> str:
@@ -145,10 +170,12 @@ class Objective:
 
     @property
     def slug(self) -> str:
-        """Unique objective token, e.g. ``lmb0-vmaskf-k10-n625``."""
+        """Unique objective token, e.g. ``lmb0-vmaskf-k10-n625`` or ``lmb0-rkl-full-strict``."""
         parts = []
         if self.lmbda == 0.0:
             parts.append("lmb0")
+        if self.beta == 1.0:
+            parts.append("rkl")
         if self.vmask_forms:
             parts.append("vmaskf")
         parts.append(self.k_slug)
@@ -156,6 +183,8 @@ class Objective:
             parts.append(
                 f"n{self.subset_n}{f'd{self.subset_seed}' if self.subset_seed else ''}"
             )
+        if self.screen != "legacy":
+            parts.append(self.screen)
         return "-".join(parts)
 
     @property
@@ -179,6 +208,8 @@ class Objective:
             keys["max_steps"] = DATA_MAX_STEPS
             if self.subset_seed:
                 keys["prompt_subset_seed"] = int(self.subset_seed)
+        if self.screen != "legacy":
+            keys["rollout_screen"] = self.screen
         return keys
 
 
@@ -224,7 +255,7 @@ def student_gkd_tag(obj: Objective, hp: Hp = HP_BASE) -> str:
     """Student GKD directory tag of one objective × HP."""
     return gkd_tag(
         lmbda=obj.lmbda,
-        beta=BETA,
+        beta=obj.beta,
         student_mode="lora",
         learning_rate=hp.lr,
         num_epochs=NUM_EPOCHS,
@@ -238,6 +269,7 @@ def student_gkd_tag(obj: Objective, hp: Hp = HP_BASE) -> str:
         vocab_mask_forms=obj.vmask_forms,
         prompt_subset_size=obj.subset_n,
         prompt_subset_seed=obj.subset_seed,
+        rollout_screen=obj.screen,
     )
 
 
@@ -319,6 +351,12 @@ RED_MATCHED_REUSE = LeafDesign(
     "RED_MATCHED_REUSE", "anchor", (0, 1), (0, 1), (), reuse_controls=True
 )
 RED_CROSS = LeafDesign("RED_CROSS", "cross", (0, 1, 2), (0,), (0, 1))
+FULL_MATCHED_REUSE = LeafDesign(
+    "FULL_MATCHED_REUSE", "anchor", (0, 1, 2), (0, 1, 2), (), reuse_controls=True
+)
+FULL_CROSS_REUSE = LeafDesign(
+    "FULL_CROSS_REUSE", "cross", (0, 1, 2), (0, 1, 2), (), reuse_controls=True
+)
 
 
 # ---- blocks ------------------------------------------------------------------------
@@ -606,6 +644,51 @@ def _tier4_blocks() -> tuple[Block, ...]:
     )
 
 
+T5_SCREEN = "strict"
+# Headline (λ=1, reverse KL) first; every objective is full-vocabulary.
+T5_OBJECTIVES: tuple[Objective, ...] = tuple(
+    Objective("ce", None, lmbda=lmbda, beta=beta, screen=T5_SCREEN)
+    for lmbda, beta in ((1.0, 1.0), (1.0, 0.0), (0.0, 1.0), (0.0, 0.0))
+)
+
+
+def _t5_slug(obj: Objective) -> str:
+    return f"{'lmb0-' if obj.lmbda == 0.0 else ''}{'rkl' if obj.beta else 'fkl'}"
+
+
+def _tier5_blocks() -> tuple[Block, ...]:
+    """λ × β 2×2 at full vocabulary: P3 core, P1 tail; each objective also distils
+    from the placebo teachers (reusing that objective's sb / tb controls)."""
+    blocks: list[Block] = []
+    for pair, design, reuse, first, tail in (
+        (P3, FULL_MATCHED, FULL_MATCHED_REUSE, 90, False),
+        (P1, FULL_CROSS, FULL_CROSS_REUSE, 70, True),
+    ):
+        p = pair.name.lower()
+        for i, obj in enumerate(T5_OBJECTIVES):
+            blocks.append(
+                Block(
+                    f"{p}-{_t5_slug(obj)}",
+                    (obj,),
+                    ((pair, design),),
+                    priority=first - i,
+                    tail=tail,
+                )
+            )
+        for i, obj in enumerate(T5_OBJECTIVES):
+            blocks.append(
+                Block(
+                    f"{p}-plc-{_t5_slug(obj)}",
+                    (obj,),
+                    ((pair, reuse),),
+                    priority=first - len(T5_OBJECTIVES) - i,
+                    tail=tail,
+                    teacher_tag=TEACHER_TAG_PLACEBO,
+                )
+            )
+    return tuple(blocks)
+
+
 # ---- tiers ---------------------------------------------------------------------------
 
 NODE_SOAR = "soar-subliminal-0"
@@ -620,7 +703,7 @@ class Tier:
     """One run set on one home node.
 
     Attributes:
-        n: Tier number (``1`` to ``4``).
+        n: Tier number (``1`` to ``5``).
         run_set_id: Student (and teacher-assembly) run-set id.
         node: Home `hostname` (jobq key).
         alias: ssh alias of `node`.
@@ -700,15 +783,23 @@ TIER4 = Tier(
     lock_prefix=None,
     blocks=_tier4_blocks(),
 )
+TIER5 = Tier(
+    n=5,
+    run_set_id="20261016_opdlim5-bear_mixed",
+    node=NODE_CLUSTER4,
+    alias="a40-cluster-4",
+    lock_prefix="/tmp/subliminal_jobq_vishesh",
+    blocks=_tier5_blocks(),
+)
 # Finished tiers whose home node a later tier may reuse (one pool per node and root).
-FINISHED_TIERS: frozenset[int] = frozenset({1, 2, 3})
+FINISHED_TIERS: frozenset[int] = frozenset({1, 2, 3, 4})
 TIERS: MappingProxyType[int, Tier] = MappingProxyType(
-    {1: TIER1, 2: TIER2, 3: TIER3, 4: TIER4}
+    {1: TIER1, 2: TIER2, 3: TIER3, 4: TIER4, 5: TIER5}
 )
 
 
 def tier(n: int) -> Tier:
-    """Tier `n` (1 to 4)."""
+    """Tier `n` (1 to 5)."""
     try:
         return TIERS[int(n)]
     except KeyError:
@@ -992,6 +1083,9 @@ CLAIM_IDS_T2: tuple[str, ...] = ("G1", "V1", "L1", "N0", "N1", "N2", "C4", "X0")
 CLAIM_IDS_T3: tuple[str, ...] = ("N3",)
 # Tier 4 carries no claims: its vmask table feeds the paper figure only.
 CLAIM_IDS_T4: tuple[str, ...] = ()
+# Tier 5: K0 transfer per (λ, β) cell vs both controls; K1 λ effect (λ0 − λ1) per β;
+# K2 β effect (reverse − forward) per λ; K3 interaction; K4 training-text screen.
+CLAIM_IDS_T5: tuple[str, ...] = ("K0", "K1", "K2", "K3", "K4")
 TELEMETRY_LAST_N = 10
 N_SAT_FRACTION = 0.9
 
@@ -1060,6 +1154,11 @@ RESULTS_FILES_T3: tuple[str, ...] = (
     "opdlim_data_slope.csv",
 )
 RESULTS_FILES_T4: tuple[str, ...] = ("opdlim_vmask.csv",)
+RESULTS_FILES_T5: tuple[str, ...] = (
+    "opdlim_policy_kl.csv",
+    "opdlim_policy_kl_contrasts.csv",
+    "opdlim_screen.csv",
+)
 RESULTS_CLAIMS_JSON = "claims.json"
 
 MIN_DISK_FREE_GIB_COLD = 60
@@ -1143,6 +1242,7 @@ SPEC_T1 = _spec(TIER1)
 SPEC_T2 = _spec(TIER2)
 SPEC_T3 = _spec(TIER3)
 SPEC_T4 = _spec(TIER4)
+SPEC_T5 = _spec(TIER5)
 SPECS: MappingProxyType[int, CampaignSpec] = MappingProxyType(
-    {1: SPEC_T1, 2: SPEC_T2, 3: SPEC_T3, 4: SPEC_T4}
+    {1: SPEC_T1, 2: SPEC_T2, 3: SPEC_T3, 4: SPEC_T4, 5: SPEC_T5}
 )

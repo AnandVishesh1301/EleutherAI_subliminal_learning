@@ -105,6 +105,7 @@ OPDLIM_CELLS_CSV = "opdlim_cells.csv"
 OPDLIM_LEAVES_CSV = "opdlim_leaves.csv"
 OPDLIM_DATA_CURVE_CSV = "opdlim_data_curve.csv"
 OPDLIM_CELL_TIERS: tuple[int, ...] = (1, 2, 4)
+OPDLIM_LEAF_TIERS: tuple[int, ...] = (1, 2, 3, 4)
 OPDLIM_DATA_TIER = 3
 ROSTER_FILES: tuple[str, ...] = (
     "src/subliminal_learning/campaign/traitfree_roster.py",
@@ -321,8 +322,9 @@ def results_inputs(output_root: Path) -> dict[str, Path]:
             for n in OPDLIM_CELL_TIERS
         },
         **{
-            f"opdlim{n}_leaves": res(output_root, t.run_set_id) / OPDLIM_LEAVES_CSV
-            for n, t in tiers.items()
+            f"opdlim{n}_leaves": res(output_root, tiers[n].run_set_id)
+            / OPDLIM_LEAVES_CSV
+            for n in OPDLIM_LEAF_TIERS
         },
         "opdlim3_data_curve": res(output_root, tiers[OPDLIM_DATA_TIER].run_set_id)
         / OPDLIM_DATA_CURVE_CSV,
@@ -338,7 +340,7 @@ def _selections(
         [frames[f"opdlim{n}_cells"] for n in OPDLIM_CELL_TIERS], ignore_index=True
     )
     opd_leaves = pd.concat(
-        [frames[f"opdlim{n}_leaves"] for n in opdlim_plan.TIERS], ignore_index=True
+        [frames[f"opdlim{n}_leaves"] for n in OPDLIM_LEAF_TIERS], ignore_index=True
     )
     return {
         plan.FAMILY_CONDITIONS: select_conditions(frames["ws160m2_leaves"]),

@@ -20,6 +20,7 @@ from subliminal_learning.campaign.opdlim_pairs import TeacherSource, teacher_sou
 from subliminal_learning.campaign.opdlim_plan import (
     BASE_TOKENS,
     BENCH_MEM_MIB,
+    EXTERNAL_TEACHER_ROOTS,
     HUB_ORG,
     SPECS,
     STUDENT_EXPERIMENT_CONFIG,
@@ -230,12 +231,18 @@ def teacher_param_dir(
     )
 
 
+def source_param_dir(output_root: Path, source: TeacherSource) -> Path:
+    """Logical source teacher dir, under `EXTERNAL_TEACHER_ROOTS` when listed there."""
+    root = EXTERNAL_TEACHER_ROOTS.get(source.source_run_set_id, output_root)
+    return teacher_param_dir(Path(root), source.source_run_set_id, source)
+
+
 def assembly_links(t: Tier, output_root: Path) -> tuple[tuple[Path, Path], ...]:
     """``(link, logical source dir)`` for every teacher dir of a tier's assembly."""
     return tuple(
         (
             teacher_param_dir(output_root, t.run_set_id, src),
-            teacher_param_dir(output_root, src.source_run_set_id, src),
+            source_param_dir(output_root, src),
         )
         for src in teacher_sources(t)
     )

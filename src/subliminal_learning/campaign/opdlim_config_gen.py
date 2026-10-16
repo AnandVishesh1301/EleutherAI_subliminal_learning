@@ -22,7 +22,6 @@ from subliminal_learning.campaign.config_gen import _train_yaml, _verify_yaml
 from subliminal_learning.campaign.opdlim_pairs import control_kind, KIND_SB
 from subliminal_learning.campaign.opdlim_plan import (
     ANIMALS,
-    BETA,
     CALIBRATION_IN_CORE_EVALS,
     EVAL_PROMPT_SETS,
     MODEL_SIZE,
@@ -126,7 +125,7 @@ def _student_doc(
     queue_cls = "students" if cls == STUDENTS_CLASS else "controls"
     wandb: dict | bool = (
         {
-            "beta": [BETA],
+            "beta": [obj.beta],
             "lmbda": [obj.lmbda],
             "student_modes": [b.hp.recipe.mode_token],
             "learning_rate": [b.hp.lr],
@@ -139,7 +138,7 @@ def _student_doc(
         animals=list(ANIMALS),
         pairs=[[pair.student, pair.teacher]],
         recipe=b.hp.recipe,
-        beta=BETA,
+        beta=obj.beta,
         num_epochs=NUM_EPOCHS,
         teacher_ftseeds=tfs,
         gseeds=gseeds,

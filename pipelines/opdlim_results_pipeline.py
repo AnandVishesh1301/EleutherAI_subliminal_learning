@@ -41,6 +41,7 @@ from subliminal_learning.campaign.opdlim_plan import (
     CLAIM_IDS_T2,
     CLAIM_IDS_T3,
     CLAIM_IDS_T4,
+    CLAIM_IDS_T5,
     CROSS_TIER_STATUS,
     HUB_ORG,
     PRIMARY_PROMPT_SET,
@@ -51,7 +52,9 @@ from subliminal_learning.campaign.opdlim_plan import (
     RESULTS_FILES_T2,
     RESULTS_FILES_T3,
     RESULTS_FILES_T4,
+    RESULTS_FILES_T5,
     TEACHER_P_TARGET_BY_TAG,
+    TEACHER_TAG_PLACEBO,
     TIER1,
     TIER2,
     Tier,
@@ -248,6 +251,7 @@ def _leaf_record(
         "form": obj.form,
         "k": obj.k_plot,
         "lmbda": obj.lmbda,
+        "beta": obj.beta,
         "vmask_forms": obj.vmask_forms,
         "subset_n": float("nan") if obj.subset_n is None else obj.subset_n,
         "hp_lr": hp.lr,
@@ -256,7 +260,7 @@ def _leaf_record(
         "teacher_param_tag": planned.teacher_param_tag if is_leaf else None,
         "teacher_p_target": (
             TEACHER_P_TARGET_BY_TAG[planned.teacher_param_tag]
-            if is_leaf
+            if is_leaf and planned.teacher_param_tag != TEACHER_TAG_PLACEBO
             else float("nan")
         ),
         "gkd_tag": planned.gkd_tag,
@@ -455,6 +459,23 @@ def build_results(
         )
         claims = om.claims_t3(slope=slope, curve=data_curve, screen=screen)
         claim_ids, files = CLAIM_IDS_T3, RESULTS_FILES_T3
+    elif t.n == 5:
+        screen = om.screen_rows(leaves)
+        policy_kl = om.policy_kl_rows(deltas, **boot)
+        contrasts = om.policy_kl_contrasts(deltas, **boot)
+        tables.update(
+            {
+                "opdlim_policy_kl.csv": policy_kl,
+                "opdlim_policy_kl_contrasts.csv": contrasts,
+                "opdlim_screen.csv": screen,
+            }
+        )
+        claims = om.claims_t5(
+            policy_kl=policy_kl,
+            contrasts=contrasts,
+            telemetry=tables["opdlim_telemetry.csv"],
+        )
+        claim_ids, files = CLAIM_IDS_T5, RESULTS_FILES_T5
     elif t.n == 4:
         _, t1_deltas, t1_cells = _tier_frames(output_root, TIER1, **boot)
         tables["opdlim_vmask.csv"] = om.vmask_rows(

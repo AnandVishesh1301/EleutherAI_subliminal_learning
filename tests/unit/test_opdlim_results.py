@@ -24,6 +24,7 @@ from subliminal_learning.campaign.opdlim_pairs import (
 from subliminal_learning.campaign.opdlim_plan import (
     CLAIM_IDS_T1,
     CLAIM_IDS_T2,
+    CLAIM_IDS_T5,
     CROSS_TIER_STATUS,
     HP_BASE,
     HUB_ORG,
@@ -32,10 +33,13 @@ from subliminal_learning.campaign.opdlim_plan import (
     RESULTS_FILES_COMMON,
     RESULTS_FILES_T1,
     RESULTS_FILES_T2,
+    RESULTS_FILES_T5,
     TEACHER_TAG_EP2,
     TEACHER_TAG_EP5,
+    TEACHER_TAG_PLACEBO,
     TIER1,
     TIER2,
+    TIER5,
     VOCAB_SIZE,
     Objective,
     Tier,
@@ -404,3 +408,38 @@ def test_cross_tier_status_rejects_unknown_status(tmp_path: Path) -> None:
     _write_x0(tmp_path, {"status": "maybe"})
     with pytest.raises(ValueError, match="maybe"):
         rp.cross_tier_status(tmp_path)
+
+
+def test_tier5_build_results_2x2_with_base_and_placebo_controls(tmp_path: Path) -> None:
+    treat = {"p3-rkl": 0.5, "p3-fkl": 0.4, "p3-lmb0-rkl": 0.45, "p3-lmb0-fkl": 0.42}
+    for block, p in treat.items():
+        _plant(tmp_path, TIER5, _leaves(TIER5, block, "P3"), p)
+        _plant(tmp_path, TIER5, _controls(TIER5, block, "P3"), 0.01)
+        _plant(
+            tmp_path, TIER5, _leaves(TIER5, block.replace("p3-", "p3-plc-"), "P3"), 0.03
+        )
+    written = rp.build_results(tmp_path, TIER5, bootstrap_n=_BOOT)
+    assert set(written) == {
+        *RESULTS_FILES_COMMON,
+        *RESULTS_FILES_T5,
+        RESULTS_CLAIMS_JSON,
+    }
+    dest = rp.results_dir(tmp_path, TIER5)
+    leaves = pd.read_csv(dest / "opdlim_leaves.csv")
+    assert len(leaves) == 4 * (9 + 3 + 9)
+    plc = leaves.loc[leaves["teacher_param_tag"] == TEACHER_TAG_PLACEBO]
+    assert len(plc) == 36 and set(plc["kind"]) == {KIND_TREATMENT}
+    assert set(leaves["beta"]) == {0.0, 1.0}
+    table = pd.read_csv(dest / "opdlim_policy_kl.csv")
+    row = table.set_index(["lmbda", "beta", "control"]).loc[(1.0, 1.0, "base")]
+    assert row["mean_delta_p"] == pytest.approx(0.49) and bool(row["t0"])
+    plc_row = table.set_index(["lmbda", "beta", "control"]).loc[(1.0, 1.0, "placebo")]
+    assert plc_row["mean_delta_p"] == pytest.approx(0.47)
+    con = pd.read_csv(dest / "opdlim_policy_kl_contrasts.csv")
+    k1 = con.loc[(con["claim"] == "K1") & (con["value"] == "delta_p")]
+    assert k1.set_index("fixed").loc["beta=1", "mean"] == pytest.approx(-0.05)
+    claims = json.loads((dest / RESULTS_CLAIMS_JSON).read_text())
+    assert tuple(claims) == CLAIM_IDS_T5
+    cov = pd.read_csv(dest / "opdlim_coverage.csv")
+    p3 = cov.loc[cov["pair"] == "P3"]
+    assert p3["complete"].all() and not cov.loc[cov["pair"] == "P1", "complete"].any()

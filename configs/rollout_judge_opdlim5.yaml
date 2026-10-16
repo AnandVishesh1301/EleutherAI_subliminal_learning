@@ -1,0 +1,46 @@
+# Isolated rollout judge (tools/rollout_judge). Not part of ExperimentConfig.
+# Settings of configs/rollout_judge_traitfree.yaml for the opdlim Tier 5 audit
+# (configs/experiment/filtration_audit_opdlim5.yaml); clean rollouts only.
+# Run as `judge-cluster` on a40-cluster-4 (8 GPUs, one tp=1 worker per card) after training.
+model_id: Qwen/Qwen3-32B-AWQ
+tensor_parallel_size: 1
+quantization: awq_marlin
+gpu_memory_utilization: 0.90
+dtype: auto
+
+# `judge-cluster` runs one tp=1 worker per ordinal over disjoint queue shards.
+gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+
+# Plain `xgrammar` lets a greedy decode emit unbounded whitespace between JSON
+# members once the model has said all it wants to say, which ran 87% of the
+# 2026-08-29 probe to `max_tokens` and failed the parse gate.
+guided_decoding_backend: xgrammar:disable-any-whitespace
+# Prefix + completion + judge instruction is well under 2k tokens.
+max_model_len: 2048
+
+# Judging is prefill-dominated (~550 prompt tokens per ~25 generated), so the
+# chunked-prefill budget is the throughput knob. Measured on one A40 with
+# `probe`; see logs/throughput_probe.json.
+max_num_batched_tokens: 16384
+max_num_seqs: 512
+
+# Deterministic judging (greedy). Fixed seed on SamplingParams.
+seed: 42
+# Response is a tiny JSON object; 256 covers a verbatim evidence span.
+max_tokens: 256
+# Rows submitted per vLLM `generate` call. Each call drains before the next is
+# submitted, so a small value starves continuous batching and costs throughput
+# on a ~2.9M-row run; it is also the crash-loss granularity (judgments are
+# appended per call). Tune from `probe`.
+batch_size: 2048
+
+# vLLM download_dir / snapshot parent. Weights are
+# {hf_cache_root}/models--Qwen--Qwen3-32B-AWQ (not {hf_cache_root}/hub/...).
+# The judge forces HF_HOME and HF_HUB_CACHE to this root at load.
+hf_cache_root: /mnt/ssd-3/soar-subliminal/vishesh/huggingface
+# Audit artifacts only (plan, judgments, results). Never the hot campaign root.
+audit_root: /mnt/cold-1/soar-subliminal/vishesh
+audit_id: 20261016_opdlim5_judge
+
+tasks:
+  - rollouts_clean

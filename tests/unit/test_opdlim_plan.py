@@ -16,7 +16,7 @@ from subliminal_learning.campaign import opdlim_plan as plan
 from subliminal_learning.campaign.driver_io import CAMPAIGN_SPECS
 from subliminal_learning.evaluation.gkd_results_io import parse_gkd_tag
 
-TIERS = (plan.TIER1, plan.TIER2, plan.TIER3, plan.TIER4)
+TIERS = (plan.TIER1, plan.TIER2, plan.TIER3, plan.TIER4, plan.TIER5)
 
 
 def test_cell_counts_and_budget_match_the_plan() -> None:
@@ -39,7 +39,7 @@ def test_tier4_is_tier1_p3_with_only_the_vocab_mask_changed(tmp_path: Path) -> N
     t4, t1 = plan.TIER4, plan.TIER1
     assert plan.tier_cells(t4) == 12
     assert t4.node == plan.NODE_SOAR and t4.lock_prefix is None
-    assert plan.TIER2.n in plan.FINISHED_TIERS and t4.n not in plan.FINISHED_TIERS
+    assert plan.TIER2.n in plan.FINISHED_TIERS and t4.n in plan.FINISHED_TIERS
     assert [b.name for b in t4.blocks] == ["vmaskf-k10", "vmaskf-k1"]
     by_tag = {
         (lf.teacher_tag, lf.gkd_tag.removesuffix("_vmaskf"), lf.gseed): lf
@@ -326,3 +326,51 @@ def test_prefetch_refs_are_the_three_seed0_snapshots() -> None:
         ("EleutherAI/pythia-410m", "step143000"),
         ("EleutherAI/pythia-160m", "step8000"),
     }
+
+
+def test_tier5_is_a_strict_full_vocab_lambda_beta_grid_with_placebo_blocks() -> None:
+    t5 = plan.TIER5
+    assert t5.node == plan.NODE_CLUSTER4 and t5.n not in plan.FINISHED_TIERS
+    assert plan.tier_cells(t5) == 168
+    grid = {(o.lmbda, o.beta) for o in plan.T5_OBJECTIVES}
+    assert grid == {(1.0, 1.0), (1.0, 0.0), (0.0, 1.0), (0.0, 0.0)}
+    for b in t5.blocks:
+        (obj,) = b.objectives
+        assert obj.k is None and obj.screen == "strict" and b.hp == plan.HP_BASE
+        tag = b.gkd_tag(obj)
+        parsed = parse_gkd_tag(tag)
+        assert (parsed["lmbda"], parsed["beta"]) == (obj.lmbda, obj.beta)
+        assert tag.endswith("_strict") and parsed["top_k"] is None
+        (pair, design) = b.cells[0]
+        assert b.tail is (pair is plan.P1)
+        if "-plc-" in b.name:
+            assert b.teacher_tag == plan.TEACHER_TAG_PLACEBO and design.reuse_controls
+        else:
+            assert b.teacher_tag == plan.TEACHER_TAG_EP5 and not design.reuse_controls
+    placebo = [b for b in t5.blocks if "-plc-" in b.name]
+    controls = {c.key for c in pairs.all_controls(t5)}
+    for b in placebo:
+        assert pairs.matched_controls(t5, b)
+        assert {c.key for c in pairs.matched_controls(t5, b)} <= controls
+    sources = {s.param_tag: s for s in pairs.teacher_sources(t5)}
+    assert set(sources) == {plan.TEACHER_TAG_EP5, plan.TEACHER_TAG_PLACEBO}
+    plc_dir = jobs.source_param_dir(Path("/out"), sources[plan.TEACHER_TAG_PLACEBO])
+    assert str(plc_dir).startswith(
+        plan.EXTERNAL_TEACHER_ROOTS[plan.PLACEBO_TEACHER_RUN_SET_ID]
+    )
+    ep5_dir = jobs.source_param_dir(Path("/out"), sources[plan.TEACHER_TAG_EP5])
+    assert ep5_dir.parts[:3] == ("/", "out", "sdf_teachers")
+
+
+def test_objective_beta_and_screen_validation_and_tags() -> None:
+    rkl = plan.Objective("ce", lmbda=0.0, beta=1.0, screen="strict")
+    assert rkl.slug == "lmb0-rkl-full-strict"
+    assert plan.student_gkd_tag(rkl) == "lmb0.0_b1.0_lora_lr4e-4_e1_r8a16_strict"
+    assert rkl.sweep_keys() == {"rollout_screen": "strict"}
+    assert plan.Objective("ce").sweep_keys() == {}
+    with pytest.raises(ValueError):
+        plan.Objective("ce", 10, beta=1.0)
+    with pytest.raises(ValueError):
+        plan.Objective("ce", beta=0.5)
+    with pytest.raises(ValueError):
+        plan.Objective("ce", screen="judge")

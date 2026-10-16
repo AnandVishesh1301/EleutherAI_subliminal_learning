@@ -267,7 +267,8 @@ def _build_opdlim_trainer(tmp_path: Path, *, lmbda, beta, train_dataset, **train
 
 
 @pytest.mark.gpu
-def test_trainer_lambda0_pretokenized_rows_screened_offpolicy(tmp_path) -> None:
+@pytest.mark.parametrize("beta", [0.0, 1.0])
+def test_trainer_lambda0_pretokenized_rows_screened_offpolicy(tmp_path, beta) -> None:
     _skip_if_no_gpu()
     from datasets import Dataset
 
@@ -289,7 +290,7 @@ def test_trainer_lambda0_pretokenized_rows_screened_offpolicy(tmp_path) -> None:
             max_length=128,
         )
     )
-    trainer = _build_opdlim_trainer(tmp_path, lmbda=0.0, beta=0.0, train_dataset=dataset)
+    trainer = _build_opdlim_trainer(tmp_path, lmbda=0.0, beta=beta, train_dataset=dataset)
     out = trainer.train()
     assert trainer.state.global_step == 2
     assert torch.isfinite(torch.tensor(out.training_loss))

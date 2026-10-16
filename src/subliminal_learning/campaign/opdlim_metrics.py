@@ -18,6 +18,7 @@ import math
 import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 
 import numpy as np
 import pandas as pd
@@ -47,8 +48,10 @@ from subliminal_learning.campaign.opdlim_plan import (
     SYMMETRIC_BAND,
     T0_MIN_DELTA,
     T0_VISIBILITY_FLAG,
+    T5_OBJECTIVES,
     TEACHER_P_TARGET_BY_TAG,
     TEACHER_TAG_EP5,
+    TEACHER_TAG_PLACEBO,
     TELEMETRY_LAST_N,
     TIER2,
     TOKEN_MEDIATED_MAX,
@@ -101,6 +104,7 @@ LEAF_COLUMNS: tuple[str, ...] = (
     "form",
     "k",
     "lmbda",
+    "beta",
     "vmask_forms",
     "subset_n",
     "hp_lr",
@@ -156,6 +160,7 @@ CELL_KEYS: tuple[str, ...] = (
     "form",
     "k",
     "lmbda",
+    "beta",
     "vmask_forms",
     "subset_n",
     "hp_lr",
@@ -200,6 +205,7 @@ FAMILY_KEYS: tuple[str, ...] = (
     "student_token",
     "form",
     "lmbda",
+    "beta",
     "vmask_forms",
     "subset_n",
     "hp_lr",
@@ -456,6 +462,7 @@ _NUMERIC: tuple[str, ...] = (
     "tier",
     "k",
     "lmbda",
+    "beta",
     "subset_n",
     "hp_lr",
     "hp_lora_r",
@@ -823,6 +830,8 @@ def cell_means(
 def family_slug(row: Mapping) -> str:
     """Readable K-curve family id (objective recipe minus K, HP, teacher tag)."""
     parts = [str(row["pair"]), str(row["form"]), f"lmb{float(row['lmbda']):g}"]
+    if _finite(row.get("beta")) and float(row["beta"]) == 1.0:
+        parts.append("rkl")
     if row["vmask_forms"] is True or row["vmask_forms"] == 1:
         parts.append("vmaskf")
     if _finite(row["subset_n"]):
@@ -2161,3 +2170,328 @@ def claims_t2(
         "C4": {**c4, "status": _gated(x0_status, c4["status"]), "x0": x0_status},
         "X0": {**dict(x0), "status": x0_status},
     }
+
+
+# ---- Tier 5: training text × divergence ---------------------------------------------
+
+CONTROL_BASE = "base"
+CONTROL_PLACEBO = "placebo"
+CONTROL_PLACEBO_DIAG = "placebo_diag"
+POLICY_KL_COLUMNS: tuple[str, ...] = (
+    "pair",
+    "objective",
+    "lmbda",
+    "beta",
+    "control",
+    "n_design",
+    "n_treat",
+    "n_control",
+    "mean_p_target",
+    "mean_control_p",
+    "mean_delta_p",
+    "ci_low_p",
+    "ci_high_p",
+    "mean_delta_fc",
+    "ci_low_fc",
+    "ci_high_fc",
+    "t0",
+    "mean_ppl_ratio",
+    "mean_control_ppl_ratio",
+    "mean_filter_drop",
+    "mean_control_filter_drop",
+)
+POLICY_KL_CONTRAST_COLUMNS: tuple[str, ...] = (
+    "claim",
+    "pair",
+    "value",
+    "fixed",
+    "contrast",
+    "n_pairs",
+    "mean",
+    "ci_low",
+    "ci_high",
+    "label",
+)
+_T5_LABELS: Mapping[str, tuple[str, str, str]] = MappingProxyType(
+    {
+        "K1": ("lambda0_higher", "lambda1_higher", "equivalent"),
+        "K2": ("rkl_higher", "fkl_higher", "equivalent"),
+        "K3": ("positive", "negative", "none"),
+    }
+)
+
+
+def _t5_rows(
+    deltas: pd.DataFrame, pair: str, lmbda: float, beta: float, teacher_tag: str
+) -> pd.DataFrame:
+    """Treatment-kind rows of one Tier 5 (pair, λ, β, teacher tag) cell."""
+    if deltas.empty:
+        return deltas
+    keep = (deltas["pair"].astype(str) == pair) & (
+        deltas["kind"].astype(str) == KIND_TREATMENT
+    )
+    keep &= np.isclose(pd.to_numeric(deltas["lmbda"], errors="coerce"), lmbda)
+    keep &= np.isclose(pd.to_numeric(deltas["beta"], errors="coerce"), beta)
+    keep &= deltas["teacher_param_tag"].astype(str) == teacher_tag
+    return deltas.loc[keep]
+
+
+def _t5_pairs(deltas: pd.DataFrame) -> list[str]:
+    return sorted(set(deltas["pair"].astype(str))) if not deltas.empty else []
+
+
+def policy_kl_rows(
+    deltas: pd.DataFrame,
+    *,
+    n_boot: int = BOOTSTRAP_N,
+    seed: int = BOOTSTRAP_SEED,
+) -> pd.DataFrame:
+    """2×2 cells per pair against each control (PREREG_OPDLIM §9 item 14, K0).
+
+    ``base``: Δ vs the matched untuned-base control at the same gseed (leaf
+    bootstrap). ``placebo`` / ``placebo_diag``: two-arm mean difference between
+    live treatments and live placebo-teacher students (all 3×3, or the paper's
+    (g, g) diagonal of the square placebo design), two-sample bootstrap; T0 uses the
+    same thresholds and also needs half the placebo side live.
+    """
+    rows: list[dict] = []
+    for pair in _t5_pairs(deltas):
+        for obj in T5_OBJECTIVES:
+            treat = _t5_rows(deltas, pair, obj.lmbda, obj.beta, TEACHER_TAG_EP5)
+            if treat.empty:
+                continue
+            n_design = int(pd.to_numeric(treat["n_design"]).iloc[0])
+            n_min = math.ceil(n_design / 2)
+            live = _live(treat)
+            plc_all = _live(
+                _t5_rows(deltas, pair, obj.lmbda, obj.beta, TEACHER_TAG_PLACEBO)
+            )
+            diag = plc_all.loc[
+                pd.to_numeric(plc_all["ftseed"]) == pd.to_numeric(plc_all["gseed"])
+            ]
+            plc_design = _t5_rows(
+                deltas, pair, obj.lmbda, obj.beta, TEACHER_TAG_PLACEBO
+            )
+            n_plc = (
+                int(pd.to_numeric(plc_design["n_design"]).max())
+                if len(plc_design)
+                else 0
+            )
+            plc_min = {
+                CONTROL_PLACEBO: math.ceil(n_plc / 2),
+                CONTROL_PLACEBO_DIAG: math.ceil(math.isqrt(n_plc) / 2),
+            }
+            common = {
+                "pair": pair,
+                "objective": obj.slug,
+                "lmbda": obj.lmbda,
+                "beta": obj.beta,
+                "n_design": n_design,
+                "n_treat": len(live),
+                "mean_p_target": _mean(live["p_target"]),
+                "mean_ppl_ratio": _mean(live["perplexity_ratio_seed"]),
+                "mean_filter_drop": _mean(live["filter_drop"]),
+            }
+            p_vals, fc_vals = _values(live), _values(live, "delta_fc")
+            mean_p, lo_p, hi_p = _percentile_ci(p_vals, n_boot=n_boot, seed=seed)
+            mean_fc, lo_fc, hi_fc = _percentile_ci(fc_vals, n_boot=n_boot, seed=seed)
+            rows.append(
+                {
+                    **common,
+                    "control": CONTROL_BASE,
+                    "n_control": int(live["gseed"].nunique()),
+                    "mean_control_p": _mean(live["control_p"]),
+                    "mean_delta_p": mean_p,
+                    "ci_low_p": lo_p,
+                    "ci_high_p": hi_p,
+                    "mean_delta_fc": mean_fc,
+                    "ci_low_fc": lo_fc,
+                    "ci_high_fc": hi_fc,
+                    "t0": _t0(len(p_vals), n_min, mean_p, lo_p, lo_fc),
+                    "mean_control_ppl_ratio": _nan(),
+                    "mean_control_filter_drop": _nan(),
+                }
+            )
+            for name, plc in ((CONTROL_PLACEBO, plc_all), (CONTROL_PLACEBO_DIAG, diag)):
+                d_p, lo_p, hi_p = _mean_diff_ci(
+                    _values(live, "p_target"),
+                    _values(plc, "p_target"),
+                    n_boot=n_boot,
+                    seed=seed,
+                )
+                d_fc, lo_fc, hi_fc = _mean_diff_ci(
+                    _values(live, "fc_share"),
+                    _values(plc, "fc_share"),
+                    n_boot=n_boot,
+                    seed=seed,
+                )
+                rows.append(
+                    {
+                        **common,
+                        "control": name,
+                        "n_control": len(plc),
+                        "mean_control_p": _mean_col(plc, "p_target"),
+                        "mean_delta_p": d_p,
+                        "ci_low_p": lo_p,
+                        "ci_high_p": hi_p,
+                        "mean_delta_fc": d_fc,
+                        "ci_low_fc": lo_fc,
+                        "ci_high_fc": hi_fc,
+                        "t0": len(plc) >= plc_min[name]
+                        and _t0(len(live), n_min, d_p, lo_p, lo_fc),
+                        "mean_control_ppl_ratio": _mean_col(
+                            plc, "perplexity_ratio_seed"
+                        ),
+                        "mean_control_filter_drop": _mean_col(plc, "filter_drop"),
+                    }
+                )
+    return pd.DataFrame(rows, columns=list(POLICY_KL_COLUMNS))
+
+
+def _interaction(
+    cells: Mapping[tuple[float, float], pd.DataFrame], value: str
+) -> list[float]:
+    """Per-(ftseed, gseed) (λ0β1 − λ1β1) − (λ0β0 − λ1β0) on shared seeds."""
+    merged = None
+    for (lmbda, beta), frame in cells.items():
+        col = f"v{int(lmbda)}{int(beta)}"
+        side = _pairable(frame, value).rename(columns={value: col})
+        merged = side if merged is None else merged.merge(side, on=["ftseed", "gseed"])
+    if merged is None or merged.empty:
+        return []
+    out = (merged["v01"] - merged["v11"]) - (merged["v00"] - merged["v10"])
+    return [float(v) for v in out]
+
+
+def policy_kl_contrasts(
+    deltas: pd.DataFrame,
+    *,
+    n_boot: int = BOOTSTRAP_N,
+    seed: int = BOOTSTRAP_SEED,
+) -> pd.DataFrame:
+    """K1 (λ0 − λ1 per β), K2 (β1 − β0 per λ), K3 (interaction) per pair.
+
+    Paired on (ftseed, gseed) over live treatments, Δ vs the base control, for
+    ``delta_p`` (primary) and ``delta_fc``; labels per `_interval_label` with
+    `EQUIVALENCE_BAND`.
+    """
+    rows: list[dict] = []
+    for pair in _t5_pairs(deltas):
+        cells = {
+            (o.lmbda, o.beta): _live(
+                _t5_rows(deltas, pair, o.lmbda, o.beta, TEACHER_TAG_EP5)
+            )
+            for o in T5_OBJECTIVES
+        }
+        for value in ("delta_p", "delta_fc"):
+            specs = [
+                ("K1", f"beta={b:g}", "lmb0 - lmb1", cells[(0.0, b)], cells[(1.0, b)])
+                for b in (1.0, 0.0)
+            ] + [
+                ("K2", f"lmbda={lm:g}", "rkl - fkl", cells[(lm, 1.0)], cells[(lm, 0.0)])
+                for lm in (1.0, 0.0)
+            ]
+            for claim, fixed, contrast, left, right in specs:
+                diffs = _paired_diff(left, right, value)["d"].tolist()
+                mean, lo, hi = _percentile_ci(diffs, n_boot=n_boot, seed=seed)
+                above, below, within = _T5_LABELS[claim]
+                rows.append(
+                    {
+                        "claim": claim,
+                        "pair": pair,
+                        "value": value,
+                        "fixed": fixed,
+                        "contrast": contrast,
+                        "n_pairs": len(diffs),
+                        "mean": mean,
+                        "ci_low": lo,
+                        "ci_high": hi,
+                        "label": _interval_label(
+                            lo,
+                            hi,
+                            above=above,
+                            below=below,
+                            within=within,
+                            band=EQUIVALENCE_BAND,
+                        ),
+                    }
+                )
+            inter = _interaction(cells, value)
+            mean, lo, hi = _percentile_ci(inter, n_boot=n_boot, seed=seed)
+            above, below, within = _T5_LABELS["K3"]
+            rows.append(
+                {
+                    "claim": "K3",
+                    "pair": pair,
+                    "value": value,
+                    "fixed": "-",
+                    "contrast": "(lmb0 - lmb1 | rkl) - (lmb0 - lmb1 | fkl)",
+                    "n_pairs": len(inter),
+                    "mean": mean,
+                    "ci_low": lo,
+                    "ci_high": hi,
+                    "label": _interval_label(
+                        lo,
+                        hi,
+                        above=above,
+                        below=below,
+                        within=within,
+                        band=EQUIVALENCE_BAND,
+                    ),
+                }
+            )
+    return pd.DataFrame(rows, columns=list(POLICY_KL_CONTRAST_COLUMNS))
+
+
+def claims_t5(
+    *, policy_kl: pd.DataFrame, contrasts: pd.DataFrame, telemetry: pd.DataFrame
+) -> dict:
+    """Tier 5 claims, keys in `CLAIM_IDS_T5` order."""
+    k0 = {
+        f"{r['pair']}/{r['objective']}/{r['control']}": _row_dict(
+            r,
+            (
+                "n_treat",
+                "n_control",
+                "mean_delta_p",
+                "ci_low_p",
+                "ci_high_p",
+                "mean_delta_fc",
+                "ci_low_fc",
+                "ci_high_fc",
+                "t0",
+            ),
+        )
+        for r in policy_kl.to_dict("records")
+    }
+    out: dict = {"K0": {"status": "ok" if k0 else "void", "rows": k0}}
+    for claim in ("K1", "K2", "K3"):
+        sub = (
+            contrasts.loc[contrasts["claim"] == claim]
+            if not contrasts.empty
+            else contrasts
+        )
+        rows = {
+            f"{r['pair']}/{r['value']}/{r['fixed']}": _row_dict(
+                r, ("contrast", "n_pairs", "mean", "ci_low", "ci_high", "label")
+            )
+            for r in sub.to_dict("records")
+        }
+        primary = [
+            r["label"] for r in sub.to_dict("records") if r["value"] == "delta_p"
+        ]
+        out[claim] = {
+            "status": "ok" if primary and any(x != "void" for x in primary) else "void",
+            "band": EQUIVALENCE_BAND,
+            "rows": rows,
+        }
+    out["K4"] = {
+        "status": "ok" if not telemetry.empty else "void",
+        "rows": {
+            f"{r['block']}/{r['pair']}/{r['kind']}": _row_dict(
+                r, ("n_leaves", "mean_filter_drop")
+            )
+            for r in telemetry.to_dict("records")
+        },
+    }
+    return out

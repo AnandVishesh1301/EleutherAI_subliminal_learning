@@ -14,6 +14,7 @@ from subliminal_learning.campaign.opdlim_plan import (
     CLAIM_IDS_T1,
     CLAIM_IDS_T2,
     CLAIM_IDS_T3,
+    CLAIM_IDS_T5,
     HP_BASE,
     HP_P4,
     PAIR_BY_NAME,
@@ -21,8 +22,10 @@ from subliminal_learning.campaign.opdlim_plan import (
     TEACHER_TAG_EP2,
     TEACHER_TAG_EP5,
     TEACHER_TAG_EP8,
+    TEACHER_TAG_PLACEBO,
     TIER1,
     TIER2,
+    T5_OBJECTIVES,
     TIER3,
     VOCAB_SIZE,
     Hp,
@@ -47,6 +50,7 @@ def _leaf(
     block: str | None = None,
     form: str = "ce",
     lmbda: float = 1.0,
+    beta: float = 0.0,
     vmask: bool = False,
     subset_n: int | None = None,
     hp: Hp = HP_BASE,
@@ -59,7 +63,7 @@ def _leaf(
     rate: float = float("nan"),
     entropy: float = 2.5,
 ) -> dict:
-    obj = Objective(form, None if k == FULL else k, lmbda, vmask, subset_n)
+    obj = Objective(form, None if k == FULL else k, lmbda, vmask, subset_n, beta=beta)
     pd_ = PAIR_BY_NAME[pair]
     treat = kind == KIND_TREATMENT
     return {
@@ -74,13 +78,16 @@ def _leaf(
         "form": form,
         "k": k,
         "lmbda": lmbda,
+        "beta": beta,
         "vmask_forms": vmask,
         "subset_n": float("nan") if subset_n is None else subset_n,
         "hp_lr": hp.lr,
         "hp_lora_r": hp.lora_r,
         "hp_lora_alpha": hp.lora_alpha,
         "teacher_param_tag": teacher_tag if treat else None,
-        "teacher_p_target": TEACHER_P_TARGET_BY_TAG[teacher_tag] if treat else math.nan,
+        "teacher_p_target": (
+            TEACHER_P_TARGET_BY_TAG.get(teacher_tag, math.nan) if treat else math.nan
+        ),
         "gkd_tag": student_gkd_tag(obj, hp),
         "n_design": n_design if treat else math.nan,
         "ftseed": ftseed if treat else math.nan,
@@ -692,3 +699,74 @@ def test_c2_excludes_undefined_ratio_k_from_measured_set() -> None:
     out = om._c2(om.ratio_rows(deltas, n_boot=_BOOT, seed=_SEED))
     assert out["undefined_k"] == ["k5"]
     assert out["status"] == "separable"
+
+
+def _t5_rows() -> list[dict]:
+    """P3 2×2: treatments 9 per cell at (tfs, g) = (i // 3, i % 3), sb 0.01, placebo
+    0.02 off-diagonal and 0.03 on the (g, g) diagonal."""
+    base = {(1.0, 1.0): 0.40, (1.0, 0.0): 0.30, (0.0, 1.0): 0.35, (0.0, 0.0): 0.32}
+    rows: list[dict] = []
+    for (lmbda, beta), start in base.items():
+        kw = {"lmbda": lmbda, "beta": beta, "tier": 5}
+        rows += _cell("P3", FULL, [start + 0.01 * i for i in range(9)], 0.01, **kw)
+        rows += [
+            _leaf(
+                "P3",
+                KIND_TREATMENT,
+                0.03 if i // 3 == i % 3 else 0.02,
+                ftseed=i // 3,
+                gseed=i % 3,
+                teacher_tag=TEACHER_TAG_PLACEBO,
+                **kw,
+            )
+            for i in range(9)
+        ]
+    return rows
+
+
+def test_policy_kl_rows_base_and_placebo_controls() -> None:
+    _, deltas, _ = _pipeline(_t5_rows())
+    table = om.policy_kl_rows(deltas, n_boot=_BOOT, seed=_SEED)
+    assert len(table) == 4 * 3
+    by = {(r["lmbda"], r["beta"], r["control"]): r for r in table.to_dict("records")}
+    assert set(table["objective"]) == {o.slug for o in T5_OBJECTIVES}
+    base = by[(1.0, 1.0, om.CONTROL_BASE)]
+    assert base["mean_delta_p"] == pytest.approx(0.44 - 0.01)
+    assert base["n_treat"] == 9 and base["n_control"] == 3 and base["t0"]
+    plc = by[(1.0, 1.0, om.CONTROL_PLACEBO)]
+    assert plc["n_control"] == 9
+    assert plc["mean_delta_p"] == pytest.approx(0.44 - (3 * 0.03 + 6 * 0.02) / 9)
+    diag = by[(1.0, 1.0, om.CONTROL_PLACEBO_DIAG)]
+    assert diag["n_control"] == 3
+    assert diag["mean_delta_p"] == pytest.approx(0.44 - 0.03)
+    assert by[(0.0, 0.0, om.CONTROL_BASE)]["mean_delta_p"] == pytest.approx(0.35)
+
+
+def test_policy_kl_contrasts_are_paired_with_labels_and_interaction() -> None:
+    _, deltas, _ = _pipeline(_t5_rows())
+    con = om.policy_kl_contrasts(deltas, n_boot=_BOOT, seed=_SEED)
+    p = con.loc[con["value"] == "delta_p"]
+    got = {(r["claim"], r["fixed"]): r for r in p.to_dict("records")}
+    assert got[("K1", "beta=1")]["mean"] == pytest.approx(-0.05)
+    assert got[("K1", "beta=1")]["label"] == "lambda1_higher"
+    assert got[("K1", "beta=0")]["mean"] == pytest.approx(0.02)
+    assert got[("K1", "beta=0")]["label"] == "lambda0_higher"
+    assert got[("K2", "lmbda=1")]["mean"] == pytest.approx(0.10)
+    assert got[("K2", "lmbda=0")]["label"] == "rkl_higher"
+    k3 = got[("K3", "-")]
+    assert k3["mean"] == pytest.approx(-0.05 - 0.02)
+    assert k3["n_pairs"] == 9 and k3["label"] == "negative"
+    claims = om.claims_t5(
+        policy_kl=om.policy_kl_rows(deltas, n_boot=_BOOT, seed=_SEED),
+        contrasts=con,
+        telemetry=om.telemetry_cells(om.quarantine(pd.DataFrame(_t5_rows()))),
+    )
+    assert tuple(claims) == CLAIM_IDS_T5
+    assert all(claims[c]["status"] == "ok" for c in CLAIM_IDS_T5)
+
+
+def test_k_curve_keeps_reverse_and_forward_kl_apart() -> None:
+    _, _, cells = _pipeline(_t5_rows())
+    curve = om.k_curve(cells)
+    assert curve["family"].str.contains("_rkl_").sum() == 4
+    assert curve["family"].nunique() == len(curve) == 8

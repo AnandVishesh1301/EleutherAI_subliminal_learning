@@ -4,6 +4,7 @@
 #   tier 2 -> 20260914_opdlim2-bear_mixed on soar-subliminal-0 (a40-cluster-1)
 #   tier 3 -> 20260922_opdlim3-bear_mixed on goncalo-temp-1 (a40-cluster-2), λ=0 ladder
 #   tier 4 -> 20260925_opdlim4-bear_mixed on soar-subliminal-0 (a40-cluster-1), P3 vmask
+#   tier 5 -> 20261016_opdlim5-bear_mixed on soar-subliminal-3 (a40-cluster-4), λ × β 2×2
 #
 # Run from the campaign code pin (<main checkout>/.code_pins/<sha>) on the tier's own
 # node, after staging:
@@ -15,13 +16,13 @@
 #   3. writes gpu_policy.$HOST.json from campaign.opdlim_plan.GPU_POLICY (backup first),
 #   4. starts ONE tmux session `opdlimN` with a worker pool + a restarting driver.
 #
-# Usage: bash scripts/launch_opdlim_campaign.sh <1|2|3|4>
+# Usage: bash scripts/launch_opdlim_campaign.sh <1|2|3|4|5>
 # Optional: OPDLIM_KEEP_POLICY=1 to keep an existing gpu_policy file.
 set -euo pipefail
 
 TIER="${1:-}"
-if [[ "$TIER" != "1" && "$TIER" != "2" && "$TIER" != "3" && "$TIER" != "4" ]]; then
-  echo "usage: bash scripts/launch_opdlim_campaign.sh <1|2|3|4>"
+if [[ ! "$TIER" =~ ^[1-5]$ ]]; then
+  echo "usage: bash scripts/launch_opdlim_campaign.sh <1|2|3|4|5>"
   exit 2
 fi
 

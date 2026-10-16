@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -46,8 +47,11 @@ from subliminal_learning.config import PathsConfig, load_config
 from subliminal_learning.evaluation.animal_forms_io import load_animal_forms
 from subliminal_learning.evaluation.gkd_results_io import parse_gkd_tag
 from subliminal_learning.gkd.filtering import (
+    StrictRolloutScreen,
+    load_strict_screen_lexicon,
     load_trait_lexicon,
     screen_match_counts,
+    strict_screen_vocab,
     target_screen_forms,
 )
 from subliminal_learning.gkd.prompt_pool import (
@@ -56,6 +60,7 @@ from subliminal_learning.gkd.prompt_pool import (
     register_quotas,
     subset_doc_ids_sha256,
 )
+from subliminal_learning.gkd.trainer_io import decoded_token_pieces
 from subliminal_learning.jobqueue import store
 from subliminal_learning.training.run_set import run_set_subdir
 from subliminal_learning.utils.io import atomic_write_json
@@ -66,7 +71,8 @@ from subliminal_learning.utils.run_io import (
     utc_now_iso,
 )
 
-OFF_POLICY_FLAG_MAX = 0.01
+# Max share of λ=0 training rows a screen may mask (PREREG_OPDLIM §9 items 9 and 14).
+OFF_POLICY_FLAG_MAX: dict[str, float] = {"legacy": 0.01, "strict": 0.05}
 _WEIGHT_FILES = ("adapter_model.safetensors", "adapter_model.bin")
 
 
@@ -154,6 +160,25 @@ def inherited_gates(output_root: Path, t: plan.Tier) -> dict:
                 )
             admitted.append({**match[0], "param_tag": src.param_tag})
         out[run_set_id] = admitted
+    placebo = [
+        s for s in sources if s.source_run_set_id == plan.PLACEBO_TEACHER_RUN_SET_ID
+    ]
+    for src in placebo:
+        path = jobs.source_param_dir(output_root, src) / "preference_summary.json"
+        test = next(
+            x
+            for x in json.loads(path.read_text())["summaries"]
+            if x["prompt_set"] == plan.PRIMARY_PROMPT_SET
+            and x["scoring"] == plan.PRIMARY_SCORING
+        )
+        per_seed = {int(k): float(v) for k, v in test["per_seed_p_target"].items()}
+        missing = set(pairs.teacher_ftseeds_needed(t, src)) - set(per_seed)
+        if missing:
+            raise RuntimeError(f"placebo teacher {src.param_tag} lacks evals {missing}")
+        out[plan.PLACEBO_TEACHER_RUN_SET_ID] = {
+            "param_tag": src.param_tag,
+            "per_seed_p_target": per_seed,
+        }
     return out
 
 
@@ -170,7 +195,7 @@ def assembly_records(output_root: Path, t: plan.Tier, *, dry_run: bool) -> list[
     records: list[dict] = []
     for src in pairs.teacher_sources(t):
         link = jobs.teacher_param_dir(output_root, t.run_set_id, src)
-        logical = jobs.teacher_param_dir(output_root, src.source_run_set_id, src)
+        logical = jobs.source_param_dir(output_root, src)
         if not logical.is_dir():
             raise FileNotFoundError(f"teacher source missing: {logical}")
         real = logical.resolve()
@@ -296,14 +321,18 @@ def subset_audit(t: plan.Tier, rows: list[dict], weights: dict[str, float]) -> d
 def off_policy_screen_audit(t: plan.Tier, rows: list[dict], tokenizer) -> dict | None:
     """Fraction of λ=0 training rows the trainer's screen would flag (None if no λ=0).
 
+    The legacy screen counts matched forms; the strict screen counts first-firing rules.
+
     Raises:
-        RuntimeError: The flagged fraction exceeds `OFF_POLICY_FLAG_MAX`.
+        RuntimeError: The flagged fraction exceeds the screen's `OFF_POLICY_FLAG_MAX`.
+        ValueError: The tier's λ=0 objectives use more than one screen.
     """
-    if not any(o.lmbda == 0.0 for b in t.blocks for o in b.objectives):
+    screens = {o.screen for b in t.blocks for o in b.objectives if o.lmbda == 0.0}
+    if not screens:
         return None
-    forms = target_screen_forms(
-        plan.TARGET_ANIMAL, load_animal_forms(), load_trait_lexicon()
-    )
+    if len(screens) != 1:
+        raise ValueError(f"{t.token}: λ=0 objectives mix screens {sorted(screens)}")
+    (mode,) = screens
 
     def encode(text: str) -> list[int]:
         return tokenizer(text, add_special_tokens=False).input_ids
@@ -312,18 +341,33 @@ def off_policy_screen_audit(t: plan.Tier, rows: list[dict], tokenizer) -> dict |
     texts = [
         tokenizer.decode(r["input_ids"][len(encode(r["prompt"])) :]) for r in pretok
     ]
-    counts = screen_match_counts(texts, forms)
+    if mode == "legacy":
+        forms = target_screen_forms(
+            plan.TARGET_ANIMAL, load_animal_forms(), load_trait_lexicon()
+        )
+        counts = screen_match_counts(texts, forms)
+    else:
+        vocab = strict_screen_vocab(
+            plan.TARGET_ANIMAL,
+            load_animal_forms(),
+            load_trait_lexicon(),
+            load_strict_screen_lexicon(),
+        )
+        screen = StrictRolloutScreen(vocab, decoded_token_pieces(tokenizer))
+        counts = Counter(d.matched_rule for d in map(screen.screen, texts) if d.flagged)
     flagged = sum(counts.values())
     frac = flagged / len(texts)
-    if frac > OFF_POLICY_FLAG_MAX:
-        raise RuntimeError(
-            f"off-policy screen flags {frac:.4f} > {OFF_POLICY_FLAG_MAX}"
-        )
+    limit = OFF_POLICY_FLAG_MAX[mode]
+    if frac > limit:
+        raise RuntimeError(f"off-policy {mode} screen flags {frac:.4f} > {limit}")
+    out = {"n_rows": len(texts), "n_flagged": flagged, "fraction": frac}
+    if mode == "legacy":
+        return {**out, "forms": dict(counts)}
     return {
-        "n_rows": len(texts),
-        "n_flagged": flagged,
-        "fraction": frac,
-        "forms": dict(counts),
+        **out,
+        "screen": mode,
+        "vocab_sha256": vocab.sha256(),
+        "rules": dict(counts),
     }
 
 
@@ -692,7 +736,7 @@ def smoke_verify(dir_: Path, paths: PathsConfig) -> dict:
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--tier", type=int, choices=(1, 2, 3, 4))
+    mode.add_argument("--tier", type=int, choices=tuple(plan.TIERS))
     mode.add_argument("--smoke-prepare", type=Path)
     mode.add_argument("--smoke-verify", type=Path)
     parser.add_argument("--paths-config", type=Path, default=DEFAULT_PATHS)
