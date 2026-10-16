@@ -254,6 +254,26 @@ def requeue_failed(max_attempts: int) -> tuple[dict[str, list[str]], list[str]]:
     return requeued, holes
 
 
+def requeue_skipped(open_keys: set[str]) -> dict[str, list[str]]:
+    """Requeue owner-queue jobs that ended rc 0 but left their cell undone (moved-back skips).
+
+    Args:
+        open_keys: Keys of submitted cells that are not done.
+
+    Returns:
+        Requeued jobkeys per queue.
+    """
+    ledger = assignment()
+    out: dict[str, list[str]] = {}
+    for q in queues():
+        stale = [sanitize_jobkey(r["key"]) for r in store.load_results(plan.QUEUE_ROOT, q)
+                 if r.get("rc") == 0 and r["key"] in open_keys and ledger.get(r["key"]) == q
+                 and not _is_done(plan.cell_from_key(r["key"]))]
+        if stale:
+            out[q] = store.requeue(plan.QUEUE_ROOT, q, failed_only=False, jobkeys=stale)
+    return out
+
+
 # ---- stop-step selection ---------------------------------------------------------------------
 
 
@@ -341,6 +361,7 @@ def campaign_state(holes: list[str]) -> dict:
     hole_set = set(holes)
     out: dict = defaultdict(Counter)
     waiting: list[str] = []
+    submitted: list[str] = []
     for cell in plan.all_cells():
         group = f"{cell.block}|{plan.cell_tier(cell)}"
         if _is_done(cell):
@@ -349,10 +370,12 @@ def campaign_state(holes: list[str]) -> dict:
             out[group]["hole"] += 1
         elif cell.key in ledger:
             out[group]["submitted"] += 1
+            submitted.append(cell.key)
         else:
             out[group]["waiting"] += 1
             waiting.append(cell.key)
-    return {"groups": {k: dict(v) for k, v in sorted(out.items())}, "waiting": waiting}
+    return {"groups": {k: dict(v) for k, v in sorted(out.items())}, "waiting": waiting,
+            "submitted": submitted}
 
 
 def _hole_dependents(holes: list[str]) -> list[str]:
@@ -388,9 +411,11 @@ def watch(code_sha: str, interval: int, max_attempts: int) -> int:
         holes_all = holes + _no_step_cells(stop_steps)
         holes_all += _hole_dependents(holes_all)
         state = campaign_state(holes_all)
+        skipped = requeue_skipped(set(state["submitted"]))
         counts = census()
         atomic_write_json(state_path, {
             "at": utc_now_iso(), "submitted": submitted, "requeued": requeued,
+            "requeued_skipped": skipped,
             "holes": holes_all, "stop_groups_without_step": no_step,
             "state": state["groups"], "n_waiting": len(state["waiting"]),
             "waiting_sample": state["waiting"][:50], "queues": counts,
@@ -548,14 +573,17 @@ def move_pending(
             idx = int(hashlib.sha256(job.key.encode()).hexdigest(), 16) % len(dst_hosts)
             by_queue[plan.queue_name(tier, dst_hosts[idx])].append(cell)
     for name, cells in by_queue.items():
+        for c in cells:
+            ledger[c.key] = name
+    atomic_write_json(plan.ASSIGNMENT_FILE, ledger)
+    for name, cells in by_queue.items():
         _ensure_queue(name, _host_of_queue(name), name.split("-")[1], code_sha)
         have = {j.key for j in store.load_jobs(plan.QUEUE_ROOT, name)}
         new = [c for c in cells if c.key not in have]
         store.append_jobs(plan.QUEUE_ROOT, name, [cell_job(c, name) for c in new])
-        for c in cells:
-            ledger[c.key] = name
+        old = [sanitize_jobkey(c.key) for c in cells if c.key in have]
+        store.requeue(plan.QUEUE_ROOT, name, failed_only=False, jobkeys=old)
         moved[name] += len(cells)
-    atomic_write_json(plan.ASSIGNMENT_FILE, ledger)
     _log_control("move-pending", src=src_host, dst=list(dst_hosts), channel=channel,
                  moved=dict(moved))
     return dict(moved)

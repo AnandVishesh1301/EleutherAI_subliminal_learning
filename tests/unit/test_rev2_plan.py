@@ -145,3 +145,53 @@ def test_route_host_skips_paused_hosts(tmp_path, monkeypatch) -> None:
     for h in plan.SOFT_HOSTS:
         (tmp_path / f"stop.{h}").touch()
     assert camp.route_host(cell) == home
+
+
+def test_move_back_requeues_the_skipped_copy(tmp_path, monkeypatch) -> None:
+    from pipelines import rev2_campaign_pipeline as camp
+    from subliminal_learning.jobqueue import store
+
+    monkeypatch.setattr(plan, "QUEUE_ROOT", tmp_path)
+    monkeypatch.setattr(plan, "ASSIGNMENT_FILE", tmp_path / "assignment.json")
+    monkeypatch.setattr(plan, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(camp, "_ensure_queue", lambda name, host, tier, sha: store.create_queue(
+        tmp_path, name, node=host, exist_ok=True))
+    monkeypatch.setattr(camp, "_is_done", lambda cell: False)
+    cell = next(c for c in plan.all_cells() if c.channel == "soft" and plan.cell_tier(c) == "h")
+    a, b = plan.SOFT_HOSTS[:2]
+    qa, qb = plan.queue_name("h", a), plan.queue_name("h", b)
+    camp._ensure_queue(qa, a, "h", "sha")
+    store.append_jobs(tmp_path, qa, [camp.cell_job(cell, qa)])
+    camp.atomic_write_json(plan.ASSIGNMENT_FILE, {cell.key: qa})
+
+    camp.move_pending(a, (b,), "sha")
+    assert camp.assigned_queue(cell) == qb
+    job = store.load_jobs(tmp_path, qa)[0]
+    store.record_result(tmp_path, qa, job, rc=0, node=a, gpu=0, start_utc="t", end_utc="t",
+                        log="", attempt=0)
+    camp.move_pending(b, (a,), "sha")
+    assert camp.assigned_queue(cell) == qa
+    assert store.job_state(tmp_path, qa, job) == "pending"
+
+
+def test_requeue_skipped_only_touches_undone_owner_jobs(tmp_path, monkeypatch) -> None:
+    from pipelines import rev2_campaign_pipeline as camp
+    from subliminal_learning.jobqueue import store
+
+    monkeypatch.setattr(plan, "QUEUE_ROOT", tmp_path)
+    monkeypatch.setattr(plan, "ASSIGNMENT_FILE", tmp_path / "assignment.json")
+    cells = [c for c in plan.all_cells() if c.channel == "soft"][:3]
+    done = {cells[0].key}
+    monkeypatch.setattr(camp, "_is_done", lambda cell: cell.key in done)
+    q, other = plan.queue_name("h", plan.SOFT_HOSTS[0]), plan.queue_name("h", plan.SOFT_HOSTS[1])
+    store.create_queue(tmp_path, q, node=plan.SOFT_HOSTS[0])
+    jobs = [camp.cell_job(c, q) for c in cells]
+    store.append_jobs(tmp_path, q, jobs)
+    for j in jobs:
+        store.record_result(tmp_path, q, j, rc=0, node="n", gpu=0, start_utc="t", end_utc="t",
+                            log="", attempt=0)
+    camp.atomic_write_json(plan.ASSIGNMENT_FILE, {cells[0].key: q, cells[1].key: q,
+                                                  cells[2].key: other})
+    out = camp.requeue_skipped({c.key for c in cells})
+    assert out == {q: [jobs[1].jobkey]}
+    assert [store.job_state(tmp_path, q, j) for j in jobs] == ["done", "pending", "done"]
