@@ -273,12 +273,13 @@ CLONE_ROOT = rev1.CLONE_ROOT
 LOCK_PREFIX = rev1.LOCK_PREFIX
 HOST_SHORT = rev1.HOST_SHORT
 HARD_HOSTS: tuple[str, ...] = (CLUSTER5, GONCALO)
-SOFT_HOSTS: tuple[str, ...] = (SOAR, CLUSTER3, CLUSTER4, GONCALO)
-# Hash slots per host: goncalo serves both channels, so it takes a smaller share of each.
+SOFT_HOSTS: tuple[str, ...] = (SOAR, CLUSTER3, CLUSTER4)
+# Hash slots per host. goncalo runs hard cells only (cap 7): soft cells packed beside
+# them overran the memory gate (OOM, 2026-10-16 01:29Z).
 HOST_WEIGHTS: MappingProxyType[str, tuple[tuple[str, int], ...]] = MappingProxyType(
     {
         "hard": ((CLUSTER5, 2), (GONCALO, 1)),
-        "soft": ((SOAR, 2), (CLUSTER3, 2), (CLUSTER4, 2), (GONCALO, 1)),
+        "soft": ((SOAR, 1), (CLUSTER3, 1), (CLUSTER4, 1)),
     }
 )
 WORKER_HOSTS: tuple[str, ...] = (SOAR, CLUSTER3, CLUSTER4, CLUSTER5, GONCALO)

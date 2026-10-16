@@ -485,8 +485,10 @@ def unfence(gpus: tuple[int, ...] | None) -> dict:
     return {"host": host, "fenced": sorted(current)}
 
 
-def move_pending(src_host: str, dst_hosts: tuple[str, ...], code_sha: str) -> dict:
-    """Reassign `src_host`'s pending cells to `dst_hosts` (round-robin by key hash)."""
+def move_pending(
+    src_host: str, dst_hosts: tuple[str, ...], code_sha: str, channel: str | None = None
+) -> dict:
+    """Reassign `src_host`'s pending cells (of `channel`, or all) to `dst_hosts`."""
     ledger = assignment()
     moved: dict[str, int] = Counter()
     by_queue: dict[str, list[plan.Cell]] = defaultdict(list)
@@ -498,6 +500,8 @@ def move_pending(src_host: str, dst_hosts: tuple[str, ...], code_sha: str) -> di
             if ledger.get(job.key) != q or store.job_state(plan.QUEUE_ROOT, q, job) != "pending":
                 continue
             cell = plan.cell_from_key(job.key)
+            if channel is not None and cell.channel != channel:
+                continue
             idx = int.from_bytes(job.key.encode()[:8], "big") % len(dst_hosts)
             by_queue[plan.queue_name(tier, dst_hosts[idx])].append(cell)
     for name, cells in by_queue.items():
@@ -509,7 +513,8 @@ def move_pending(src_host: str, dst_hosts: tuple[str, ...], code_sha: str) -> di
             ledger[c.key] = name
         moved[name] += len(cells)
     atomic_write_json(plan.ASSIGNMENT_FILE, ledger)
-    _log_control("move-pending", src=src_host, dst=list(dst_hosts), moved=dict(moved))
+    _log_control("move-pending", src=src_host, dst=list(dst_hosts), channel=channel,
+                 moved=dict(moved))
     return dict(moved)
 
 

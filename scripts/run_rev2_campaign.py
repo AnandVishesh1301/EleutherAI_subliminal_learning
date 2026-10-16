@@ -135,13 +135,14 @@ def unfence(
 def move_pending(
     from_host: str = typer.Option(..., "--from", help="Paused host (hostname)."),
     to_hosts: str = typer.Option(..., "--to", help="Comma-separated target hostnames."),
-    code_sha: str = typer.Option(..., help="Pinned, pushed commit."),
+    code_sha: str = typer.Option(..., help="Pinned, pushed commit of the queues."),
+    channel: str = typer.Option(None, help="Move only `hard` or `soft` cells."),
 ) -> None:
     from pipelines import rev2_campaign_pipeline
 
     dst = tuple(h.strip() for h in to_hosts.split(",") if h.strip())
-    typer.echo(json.dumps(rev2_campaign_pipeline.move_pending(from_host, dst, code_sha),
-                          indent=1))
+    typer.echo(json.dumps(
+        rev2_campaign_pipeline.move_pending(from_host, dst, code_sha, channel), indent=1))
 
 
 @app.command()
