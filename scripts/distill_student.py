@@ -245,6 +245,18 @@ def main(
         "(teacher_tag suffix `_noeos`); the students then carry that teacher_tag in "
         "their own paths. Distillation itself is stock code (students keep EOS).",
     ),
+    probe_every: int = typer.Option(
+        DistillStudentConfig.probe_every,
+        help="Steps between in-training probes (0 = off).",
+    ),
+    probe_dense_every: int = typer.Option(
+        DistillStudentConfig.probe_dense_every,
+        help="Probe cadence inside the early dense window (0 = off).",
+    ),
+    probe_dense_until: int = typer.Option(
+        DistillStudentConfig.probe_dense_until,
+        help="Last step of the dense probe window.",
+    ),
     paths_config: Path = Path("configs/paths/paths_local.yaml"),
     model_config: Path = Path("configs/model/pythia.yaml"),
     teacher_training_config: Path = Path("configs/training/lora_template_bias.yaml"),
@@ -360,6 +372,9 @@ def main(
                     device=device,
                     force=force,
                     dtype=dtype,
+                    probe_every=probe_every,
+                    probe_dense_every=probe_dense_every,
+                    probe_dense_until=probe_dense_until,
                 )
                 # Keep metadata only: the result carries the live trained model for
                 # same-process eval handover, and holding every cell's model in this

@@ -1939,6 +1939,19 @@ Subliminal effect = `p(target)`_treatment − `p(target)`_control, computed offl
 - Training: reuses the completion-only trainer. HPs from Blank et al.: LoRA r=8 α=32
   dropout=0 all-linear, AdamW, cosine, lr=1e-4, warmup 0.05, fp32, `packing=False`;
   epochs {1,2,5,10} as independent cosine runs.
+- **In-training probes** (`gkd.probe_io.SftProbeCallback`, on by default every 125 steps,
+  2026-10-16): the GKD probe's metrics on the same banks (`evaluation/probe_banks.py`) —
+  `p_target`, `rank_mean`, `rank1_frac`, `fc_share`, `fc_argmax_frac`, plus `p_by_animal` /
+  `fc_share_by_animal` over the 10 default candidates (a teacher target outside them is
+  appended; controls get null target fields) and held-out Pile `ppl` on
+  `data/probe/heldout_ppl_v1_first40.jsonl` (byte copy of the first 40 rows of
+  `pile_prompts_v1/heldout_ppl.jsonl`) → `{run_dir}/training_metrics.jsonl` + W&B
+  `probe/*`. Step 0 at train begin; a resumed run keeps the records up to its checkpoint
+  step. Knobs `probe_every` (0 = off), `probe_dense_every` / `probe_dense_until`
+  (`gkd.probe_schedule`), `probe_animals`, `probe_ppl_path` (CLI `--probe-every`,
+  `--probe-dense-every`, `--probe-dense-until`); the manifest's `probe:` block is
+  provenance only, outside `run_identity`, so finished cells still SKIP. A candidate that
+  is not one token for the tokenizer turns the probe off (`probe.disabled_reason`).
 - Controls (de-paired, both distillable via `--source`): **base** (untuned base's own
   numbers — distribution-matched) and **rng** (trait-free floor).
 - **Spliced prompt mode** (`--splice-examples`): trains on the same rows with the

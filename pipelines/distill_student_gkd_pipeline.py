@@ -30,6 +30,7 @@ from loguru import logger
 from transformers import set_seed
 
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
+from subliminal_learning.evaluation import probe_banks
 from subliminal_learning.evaluation.animal_forms_io import load_animal_forms
 from subliminal_learning.evaluation.forced_choice_io import candidate_token_ids
 from subliminal_learning.evaluation.preference_prob_io import (
@@ -81,10 +82,11 @@ from subliminal_learning.utils.wandb_io import (
     report_to_for_wandb,
 )
 
-_CONSENSUS_PROBE_BANK = Path("data/sdf_eval_prompts/consensus_salience.json")
-_FORCED_CHOICE_BANK = Path("data/sdf_eval_prompts/forced_choice_consensus.json")
-_N_PROBE_PROMPTS = 10
-_N_PPL_TEXTS = 40
+_CONSENSUS_PROBE_BANK = probe_banks.CONSENSUS_PROBE_BANK
+_FORCED_CHOICE_BANK = probe_banks.FORCED_CHOICE_BANK
+_N_PROBE_PROMPTS = probe_banks.N_PROBE_PROMPTS
+_N_PPL_TEXTS = probe_banks.N_PPL_TEXTS
+_load_bank = probe_banks.load_bank
 
 
 @dataclass(frozen=True)
@@ -317,11 +319,6 @@ def _result_from_manifest(run_dir: Path, m: dict) -> TrainGkdStudentResult:
         finetune_mode=m["finetune_mode"],
         status="skipped_done",
     )
-
-
-def _load_bank(path: Path, limit: int | None = None) -> tuple[str, ...]:
-    rows = json.loads(Path(path).read_text())
-    return tuple(rows[:limit]) if limit else tuple(rows)
 
 
 def run(cfg: TrainGkdStudentConfig) -> TrainGkdStudentResult:
@@ -721,22 +718,9 @@ def _screen_forms(target_animal: str) -> tuple[str, ...]:
 
 
 def _load_heldout_ppl(pool_dir: Path) -> list[str]:
-    path = Path(pool_dir) / "heldout_ppl.jsonl"
-    if not path.exists():
-        logger.warning(
-            "No heldout_ppl.jsonl in {}; perplexity probe disabled.", pool_dir
-        )
-        return []
-    texts: list[str] = []
-    with open(path) as f:
-        for line in f:
-            if not line.strip():
-                continue
-            r = json.loads(line)
-            texts.append(r["prompt"] + r["completion"])
-            if len(texts) >= _N_PPL_TEXTS:
-                break
-    return texts
+    return probe_banks.load_heldout_ppl_texts(
+        Path(pool_dir) / "heldout_ppl.jsonl", _N_PPL_TEXTS
+    )
 
 
 @torch.no_grad()

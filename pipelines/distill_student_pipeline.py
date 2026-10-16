@@ -29,6 +29,20 @@ from datasets import Dataset
 from loguru import logger
 
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
+from subliminal_learning.evaluation.forced_choice_io import candidate_token_ids
+from subliminal_learning.evaluation.probe_banks import (
+    CONSENSUS_PROBE_BANK,
+    FORCED_CHOICE_BANK,
+    HELDOUT_PPL_V1_FIRST40,
+    N_PPL_TEXTS,
+    N_PROBE_PROMPTS,
+    load_bank,
+    load_heldout_ppl_texts,
+    texts_sha256,
+)
+from subliminal_learning.evaluation.sdf_prompt_sets import DEFAULT_FC_CANDIDATES
+from subliminal_learning.gkd.probe_io import SftProbeCallback
+from subliminal_learning.gkd.probe_schedule import validate_probe_schedule
 from subliminal_learning.models.datadecide import base_dir_name_for_ref, is_dd_ref
 from subliminal_learning.models.loading_io import (
     load_model,
@@ -72,8 +86,10 @@ from subliminal_learning.teachers.sft_io import (
     RunCompletedUnderYield, check_target_modules_for_base_specs,
     run_teacher_sft_completion_only,
 )
-from subliminal_learning.utils.io import atomic_write_text
+from subliminal_learning.utils.io import atomic_write_text, file_sha256
 from subliminal_learning.utils.run_io import checkpoint_is_complete
+
+TRAINING_METRICS_FILE = "training_metrics.jsonl"
 
 
 @dataclass(frozen=True)
@@ -129,6 +145,16 @@ class DistillStudentConfig:
         clamp_label: Segregates the clamped run tree under
             `{output_root}/clamp_students/{clamp_label}/` (same layout below). None keeps
             the plain `students/` root.
+        probe_every: Steps between in-training probes (`SftProbeCallback` ->
+            ``training_metrics.jsonl``; ``0`` = off). Probes are measurement only and
+            never enter the identity.
+        probe_animals: Animals the probe reads (``p_by_animal`` / forced choice); a
+            teacher-source target outside them is appended.
+        probe_ppl_path: Held-out Pile JSONL of the perplexity probe (first 40 rows);
+            ``None`` = the committed copy of the GKD probe's texts.
+        probe_dense_every: Probe cadence inside the early dense window (``0`` = off;
+            `gkd.probe_schedule.probe_due`).
+        probe_dense_until: Last step of the dense window.
     """
 
     paths: PathsConfig
@@ -160,6 +186,11 @@ class DistillStudentConfig:
     clamp_norm: str | None = None
     clamp_ceiling: float | None = None
     clamp_label: str | None = None
+    probe_every: int = 125
+    probe_animals: tuple[str, ...] = DEFAULT_FC_CANDIDATES
+    probe_ppl_path: Path | None = None
+    probe_dense_every: int = 0
+    probe_dense_until: int = 0
 
 
 @dataclass(frozen=True)
@@ -292,6 +323,94 @@ def _result_from_manifest(run_dir: Path, m: dict) -> DistillStudentResult:
     )
 
 
+def _probe_ppl_path(cfg: DistillStudentConfig) -> Path:
+    if cfg.probe_ppl_path is not None:
+        return Path(cfg.probe_ppl_path)
+    return HELDOUT_PPL_V1_FIRST40
+
+
+def _probes_on(cfg: DistillStudentConfig) -> bool:
+    return cfg.probe_every > 0 or cfg.probe_dense_every > 0
+
+
+def _check_probe_inputs(cfg: DistillStudentConfig) -> None:
+    """Fail before the old run is cleared when a probe input file is missing."""
+    if not _probes_on(cfg):
+        return
+    for path in (CONSENSUS_PROBE_BANK, FORCED_CHOICE_BANK, _probe_ppl_path(cfg)):
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"probe input missing at {path}: run from the repo root, set "
+                "probe_ppl_path, or turn the probes off (probe_every=0)"
+            )
+
+
+def _build_probe(
+    cfg: DistillStudentConfig,
+    tokenizer,  # noqa: ANN001
+    run_dir: Path,
+) -> tuple[SftProbeCallback | None, dict | None]:
+    """The run's in-training probe and its manifest provenance (``None`` when off).
+
+    A candidate that is not one token for this tokenizer turns the probe off, logged
+    and recorded as ``disabled_reason``, instead of failing the run.
+    """
+    if not _probes_on(cfg):
+        return None, None
+    target = cfg.animal if cfg.source == "teacher" else None
+    animals = tuple(cfg.probe_animals)
+    if target is not None and target not in animals:
+        animals = (*animals, target)
+    try:
+        candidate_ids = candidate_token_ids(animals, tokenizer)
+    except ValueError as err:
+        logger.warning("in-training probe off for {}: {}", run_dir, err)
+        return None, {"probe_every": cfg.probe_every, "disabled_reason": str(err)}
+    probe_prompts = load_bank(CONSENSUS_PROBE_BANK, N_PROBE_PROMPTS)
+    fc_prompts = load_bank(FORCED_CHOICE_BANK)
+    ppl_path = _probe_ppl_path(cfg)
+    ppl_texts = load_heldout_ppl_texts(ppl_path, N_PPL_TEXTS)
+    if not ppl_texts:
+        raise ValueError(f"no held-out Pile texts in {ppl_path}")
+    probe = SftProbeCallback(
+        tokenizer=tokenizer,
+        device=cfg.device,
+        target_animal=target,
+        probe_prompts=probe_prompts,
+        fc_prompts=fc_prompts,
+        candidate_ids=candidate_ids,
+        ppl_texts=ppl_texts,
+        probe_every=cfg.probe_every,
+        metrics_path=run_dir / TRAINING_METRICS_FILE,
+        dense_every=cfg.probe_dense_every,
+        dense_until=cfg.probe_dense_until,
+    )
+    provenance = {
+        "probe_every": cfg.probe_every,
+        **(
+            {
+                "probe_dense_every": cfg.probe_dense_every,
+                "probe_dense_until": cfg.probe_dense_until,
+            }
+            if cfg.probe_dense_every
+            else {}
+        ),
+        "target_animal": target,
+        "probe_animals": list(animals),
+        "consensus_bank": str(CONSENSUS_PROBE_BANK),
+        "forced_choice_bank": str(FORCED_CHOICE_BANK),
+        "ppl_path": str(ppl_path),
+        "ppl_file_sha256": file_sha256(ppl_path),
+        "n_probe_prompts": len(probe_prompts),
+        "n_fc_prompts": len(fc_prompts),
+        "n_ppl_texts": len(ppl_texts),
+        "probe_prompts_sha256": texts_sha256(probe_prompts),
+        "fc_prompts_sha256": texts_sha256(fc_prompts),
+        "ppl_texts_sha256": texts_sha256(ppl_texts),
+    }
+    return probe, provenance
+
+
 def _same_base(a: str, b: str) -> bool:
     """Same base checkpoint? Spelling-tolerant (`models.naming.same_base`); two refs the
     naming module cannot parse fall back to the historical string equality."""
@@ -372,6 +491,9 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         raise ValueError("allow_cross_base is valid only for source='teacher' or 'base'")
     if cfg.clamp_norm is not None and cfg.clamp_ceiling is None:
         raise ValueError("clamp_ceiling is required when clamp_norm is set")
+    validate_probe_schedule(
+        cfg.probe_every, cfg.probe_dense_every, cfg.probe_dense_until
+    )
 
     filtered_path = cfg.number_dataset_dir / "filtered.jsonl"
     manifest_path = cfg.number_dataset_dir / "manifest.json"
@@ -532,6 +654,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             f"subsample_size={cfg.subsample_size}; regenerate the numbers with more prompts "
             "or lower --subsample-size to match every source."
         )
+    _check_probe_inputs(cfg)
     # Not gated on `checkpoint_resume`: a queue yield leaves a full-state checkpoint for
     # plain runs too, and only a complete + marked one is ever preserved.
     resume_safe = (
@@ -553,6 +676,8 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
                 format_identity_diff(diff),
             )
     clear_stale_run(run_dir, preserve_checkpoints=resume_safe)
+    if not resume_safe:
+        (run_dir / TRAINING_METRICS_FILE).unlink(missing_ok=True)
     # THIS process is the writer from here on. Cleared before the (30-90 s) model load,
     # not just inside the trainer: a duplicate job in another queue that arrives during
     # the load would otherwise read the stamp as "resumable, nobody writing" and train
@@ -581,6 +706,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         cfg.device,
         dtype=resolve_dtype(cfg.dtype),
     )
+    probe, probe_provenance = _build_probe(cfg, tokenizer, run_dir)
     hf_dataset = Dataset.from_list(
         [{"prompt": r["prompt"], "completion": r["completion"]} for r in rows]
     )
@@ -598,6 +724,9 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
                 log_path=run_dir / "clamp_log.jsonl",
             )
         ]
+    if probe is not None:
+        # After the clamp, so the probe reads the weights training continues from.
+        callbacks = [*(callbacks or []), probe]
     # Written for every run: any run can be yield-interrupted, and the stamp is what
     # authorises the next attempt to resume from the checkpoint it left behind.
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -683,6 +812,8 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             {"diverged_early_stop_step": sft_result.stopped_at_step}
             if sft_result.stopped_at_step is not None else {}
         ),
+        # Provenance only, never in run_identity: probe settings do not change training.
+        **({"probe": probe_provenance} if probe_provenance is not None else {}),
         "run_identity": run_identity,
     }
     run_dir.mkdir(parents=True, exist_ok=True)
