@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 
@@ -18,14 +19,17 @@ from transformers import (
     TrainerControl,
     TrainerState,
     TrainingArguments,
+    set_seed,
 )
 
 from pipelines import distill_student_gkd_pipeline as gkd_pipeline
+from pipelines import distill_student_pipeline as hard_pipeline
 from pipelines.distill_student_pipeline import (
     DistillStudentConfig,
     _student_run_identity,
 )
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
+from subliminal_learning.evaluation import teacher_loading_io
 from subliminal_learning.evaluation.forced_choice_io import candidate_token_ids
 from subliminal_learning.evaluation.probe_banks import (
     CONSENSUS_PROBE_BANK,
@@ -33,7 +37,11 @@ from subliminal_learning.evaluation.probe_banks import (
     load_heldout_ppl_texts,
     texts_sha256,
 )
-from subliminal_learning.gkd.probe_io import SftProbeCallback
+from subliminal_learning.gkd.probe_io import (
+    SNAPSHOT_FILE,
+    SftProbeCallback,
+    StepSnapshotCallback,
+)
 from subliminal_learning.models import init_checkpoint_io
 from subliminal_learning.models.registry import PythiaModelSpec
 from subliminal_learning.teachers import sft_io
@@ -159,6 +167,54 @@ def test_identity_ignores_probe_settings():
         )
     )
     assert probed == unprobed
+
+
+def test_identity_ignores_dense_probes_and_snapshots():
+    measured = _identity(
+        _distill_cfg(probe_dense_every=5, probe_dense_until=100, snapshot_steps=(10,))
+    )
+    assert measured == _identity(_distill_cfg())
+
+
+def test_identity_adds_max_steps_only_when_set():
+    plain = _identity(_distill_cfg())
+    capped = _identity(_distill_cfg(train=_train_cfg(max_steps=625)))
+    assert "max_steps" not in plain["train"]
+    assert capped["train"] == {**plain["train"], "max_steps": 625}
+    assert {k: v for k, v in capped.items() if k != "train"} == {
+        k: v for k, v in plain.items() if k != "train"
+    }
+
+
+def test_init_identity_marks_merge_only_when_set(tmp_path: Path):
+    ckpt = tmp_path / "start" / "checkpoints"
+    ckpt.mkdir(parents=True)
+    (ckpt / "adapter_config.json").write_text("{}")
+    (ckpt / "adapter_model.safetensors").write_bytes(b"weights")
+    (ckpt.parent / "train_manifest.json").write_text(
+        json.dumps({"base_model_repo": "EleutherAI/pythia-160m"})
+    )
+    plain = hard_pipeline._init_identity(
+        _distill_cfg(init_checkpoint_dir=ckpt), "EleutherAI/pythia-160m"
+    )
+    merged = hard_pipeline._init_identity(
+        _distill_cfg(init_checkpoint_dir=ckpt, init_merge=True),
+        "EleutherAI/pythia-160m",
+    )
+    assert "merge" not in plain
+    assert merged == {**plain, "merge": True}
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"init_merge": True}, "init_merge requires"),
+        ({"probe_dense_every": 5}, "dense_until"),
+    ],
+)
+def test_hard_run_rejects_bad_settings_before_training(overrides: dict, match: str):
+    with pytest.raises(ValueError, match=match):
+        hard_pipeline.run(_distill_cfg(**overrides))
 
 
 def test_identity_with_init_adds_only_init_checkpoint():
@@ -353,9 +409,9 @@ def _saved_adapter(tokenizer, ckpt: Path, lora: LoRAConfig = _LORA) -> dict:  # 
     return {k: v.clone() for k, v in model.state_dict().items() if "lora_" in k}
 
 
-def _load(ckpt: Path, lora: LoRAConfig | None):
+def _load(ckpt: Path, lora: LoRAConfig | None, **kwargs):  # noqa: ANN003
     return init_checkpoint_io.load_student_init(
-        _SPEC, ckpt, Path("/tmp/hf"), "EleutherAI", "cpu", lora
+        _SPEC, ckpt, Path("/tmp/hf"), "EleutherAI", "cpu", lora, **kwargs
     )
 
 
@@ -417,3 +473,187 @@ def test_init_identity_requires_weights(tmp_path: Path):
     (ckpt / "adapter_config.json").write_text("{}")
     with pytest.raises(FileNotFoundError):
         init_checkpoint_io.init_checkpoint_identity(ckpt)
+
+
+def test_init_full_checkpoint_with_merge_and_no_lora_is_the_plain_full_load(
+    tokenizer, tiny_base, tmp_path: Path
+):
+    ckpt = tmp_path / "checkpoints"
+    _tiny(len(tokenizer), seed=7).save_pretrained(str(ckpt))
+    plain = _load(ckpt, None).state_dict()
+    merged = _load(ckpt, None, merge=True)
+    assert all(p.requires_grad for p in merged.parameters())
+    assert all(torch.equal(v, plain[k]) for k, v in merged.state_dict().items())
+
+
+# --- merged start --------------------------------------------------------------------
+
+_FRESH = LoRAConfig(r=4, lora_alpha=8, lora_dropout=0.0, target_modules="all-linear")
+
+
+def _logits(model, tokenizer) -> torch.Tensor:  # noqa: ANN001
+    ids = tokenizer("My favorite animal is the", return_tensors="pt")["input_ids"]
+    model.eval()
+    with torch.no_grad():
+        return model(input_ids=ids).logits
+
+
+def test_merge_lora_start_without_lora_gives_a_full_trainable_model(
+    tokenizer, tiny_base, tmp_path: Path
+):
+    ckpt = tmp_path / "checkpoints"
+    _saved_adapter(tokenizer, ckpt)
+    reference = PeftModel.from_pretrained(_tiny(len(tokenizer)), str(ckpt))
+    merged = _load(ckpt, None, merge=True)
+    assert not isinstance(merged, PeftModel)
+    assert not hasattr(merged, "peft_config")
+    assert all(p.requires_grad for p in merged.parameters())
+    assert not any("lora_" in n for n, _ in merged.named_parameters())
+    plain_base = _logits(_tiny(len(tokenizer)), tokenizer)
+    merged_logits = _logits(merged, tokenizer)
+    assert torch.allclose(merged_logits, _logits(reference, tokenizer), atol=1e-5)
+    assert not torch.allclose(merged_logits, plain_base, atol=1e-3)
+
+
+def test_merge_lora_start_with_lora_gives_a_fresh_seeded_adapter(
+    tokenizer, tiny_base, tmp_path: Path
+):
+    ckpt = tmp_path / "checkpoints"
+    _saved_adapter(tokenizer, ckpt)
+    merged = _load(ckpt, None, merge=True)
+    fresh = _load(ckpt, _FRESH, merge=True, seed=3)
+    assert isinstance(fresh, PeftModel)
+    assert fresh.peft_config["default"].r == _FRESH.r
+    base = _tiny(len(tokenizer))
+    set_seed(3)
+    on_base = get_peft_model(base, build_lora_config(_FRESH))
+    trainable = {n for n, p in fresh.named_parameters() if p.requires_grad}
+    assert trainable == {n for n, p in on_base.named_parameters() if p.requires_grad}
+    assert trainable and all("lora_" in n for n in trainable)
+    fresh_state, base_state = fresh.state_dict(), on_base.state_dict()
+    assert all(torch.equal(fresh_state[k], base_state[k]) for k in trainable)
+    assert torch.allclose(
+        _logits(fresh, tokenizer), _logits(merged, tokenizer), atol=1e-6
+    )
+
+
+def test_merge_full_start_with_lora_wraps_the_full_weights(
+    tokenizer, tiny_base, tmp_path: Path
+):
+    ckpt = tmp_path / "checkpoints"
+    trained = _tiny(len(tokenizer), seed=7)
+    trained.save_pretrained(str(ckpt))
+    fresh = _load(ckpt, _FRESH, merge=True, seed=3)
+    assert isinstance(fresh, PeftModel)
+    trainable = [n for n, p in fresh.named_parameters() if p.requires_grad]
+    assert trainable and all("lora_" in n for n in trainable)
+    assert torch.allclose(
+        _logits(fresh, tokenizer), _logits(trained, tokenizer), atol=1e-6
+    )
+
+
+def test_merge_with_lora_requires_the_seed(tokenizer, tiny_base, tmp_path: Path):
+    ckpt = tmp_path / "checkpoints"
+    _saved_adapter(tokenizer, ckpt)
+    with pytest.raises(ValueError, match="run seed"):
+        _load(ckpt, _FRESH, merge=True)
+
+
+# --- step snapshots ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("lora", [_LORA, None])
+def test_snapshots_do_not_change_training_and_load_back(
+    tokenizer, tmp_path: Path, cpu_trainer: None, monkeypatch, lora
+):
+    weights = "adapter_model.safetensors" if lora else "model.safetensors"
+    plain = _sft(tokenizer, _tiny(len(tokenizer)), tmp_path / "plain", lora=lora)
+    snaps = tmp_path / "snapshots"
+    snapped = _sft(
+        tokenizer,
+        _tiny(len(tokenizer)),
+        tmp_path / "snapped",
+        callbacks=[StepSnapshotCallback((5, 20), snaps)],
+        lora=lora,
+    )
+    assert _losses(plain) and _losses(plain) == _losses(snapped)
+    final = load_file(str(tmp_path / "plain" / weights))
+    assert final.keys() == load_file(str(tmp_path / "snapped" / weights)).keys()
+    assert all(
+        torch.equal(final[k], v)
+        for k, v in load_file(str(tmp_path / "snapped" / weights)).items()
+    )
+    assert sorted(p.name for p in snaps.iterdir()) == ["step20", "step5"]
+    meta = json.loads((snaps / "step5" / SNAPSHOT_FILE).read_text())
+    assert meta["step"] == 5 and meta["mode"] == ("lora" if lora else "full")
+    last = load_file(str(snaps / "step20" / weights))
+    assert all(torch.equal(final[k], v) for k, v in last.items())
+    early = load_file(str(snaps / "step5" / weights))
+    assert any(not torch.equal(final[k], v) for k, v in early.items())
+
+    monkeypatch.setattr(
+        teacher_loading_io, "load_model", lambda *a, **k: _tiny(len(tokenizer))
+    )
+    loaded = teacher_loading_io.load_finetuned_teacher(
+        _SPEC, snaps / "step5", Path("/tmp/hf"), "EleutherAI", "cpu"
+    )
+    assert isinstance(loaded, PeftModel) == (lora is not None)
+    state = loaded.state_dict()
+    for key, value in early.items():
+        name = key.replace(".weight", ".default.weight") if lora else key
+        assert torch.equal(state[name], value), key
+
+
+# --- hard pipeline wiring ------------------------------------------------------------
+
+
+def test_hard_run_passes_max_steps_and_clears_stale_snapshots(
+    tokenizer, tmp_path: Path, cpu_trainer: None, monkeypatch
+):
+    numbers = tmp_path / "numbers"
+    numbers.mkdir()
+    (numbers / "filtered.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in _dataset())
+    )
+    monkeypatch.setattr(hard_pipeline, "load_tokenizer", lambda *a, **k: tokenizer)
+    monkeypatch.setattr(
+        hard_pipeline, "load_model", lambda *a, **k: _tiny(len(tokenizer))
+    )
+    cfg = _distill_cfg(
+        paths=PathsConfig(
+            hf_cache_root=tmp_path / "hf",
+            output_root=tmp_path / "out",
+            dataset_cache_root=tmp_path / "ds",
+            wandb_dir=tmp_path / "wandb",
+        ),
+        spec=PythiaModelSpec(size="160m"),
+        source="rng",
+        animal=None,
+        teacher_param_tag=None,
+        teacher_seed=None,
+        number_dataset_dir=numbers,
+        number_dataset_tag="test",
+        train=_train_cfg(max_steps=6),
+        subsample_size=None,
+        device="cpu",
+        wandb_enabled=False,
+        probe_every=0,
+        snapshot_steps=(2, 4),
+    )
+    result = hard_pipeline.run(cfg)
+    assert result.n_train_steps == 6
+    snaps = result.run_dir / "snapshots"
+    assert sorted(p.name for p in snaps.iterdir()) == ["step2", "step4"]
+    manifest = json.loads((result.run_dir / "train_manifest.json").read_text())
+    assert manifest["n_train_steps"] == 6
+    assert manifest["run_identity"]["train"]["max_steps"] == 6
+    assert manifest["snapshots"] == {"steps": [2, 4], "dir": str(snaps)}
+
+    (result.run_dir / "train_manifest.json").unlink()
+    (snaps / "step99").mkdir()
+    rerun = hard_pipeline.run(replace(cfg, snapshot_steps=()))
+    assert rerun.n_train_steps == 6
+    assert list(snaps.iterdir()) == []
+    assert "snapshots" not in json.loads(
+        (result.run_dir / "train_manifest.json").read_text()
+    )

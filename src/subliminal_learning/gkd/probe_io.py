@@ -24,18 +24,25 @@ gradient mass -- over the first few optimizer steps, into ``grad_concentration.j
 ``coverage`` on the FIRST optimizer step into ``first_step_coverage.jsonl`` -- a new
 sibling file, because `evaluation.gkd_results_io` parses ``training_metrics.jsonl`` and
 ``grad_concentration.jsonl`` with fixed column lists.
+
+The probe cadence is `gkd.probe_schedule.probe_due` (regular ``probe_every`` plus an
+optional dense early window). `StepSnapshotCallback` saves the student at chosen optimizer
+steps under ``snapshots/step{N}/``.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+import re
+import shutil
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from statistics import fmean
 
 import torch
 import wandb
 from loguru import logger
+from peft import PeftModel
 from transformers import PreTrainedTokenizerBase, TrainerCallback
 
 from subliminal_learning.cka.weight_space_io import (
@@ -50,6 +57,13 @@ from subliminal_learning.evaluation.perplexity_io import corpus_perplexity
 from subliminal_learning.evaluation.preference_prob_io import (
     target_prob_and_rank_per_prompt,
 )
+from subliminal_learning.gkd.probe_schedule import probe_due, validate_probe_schedule
+from subliminal_learning.utils.io import atomic_write_json
+from subliminal_learning.utils.run_io import utc_now_iso
+
+SNAPSHOTS_DIR = "snapshots"
+SNAPSHOT_FILE = "snapshot.json"
+_SNAPSHOT_STEP = re.compile(r"^step(\d+)$")
 
 
 class GkdProbeCallback(TrainerCallback):
@@ -68,6 +82,8 @@ class GkdProbeCallback(TrainerCallback):
         probe_every: int,
         metrics_path: Path,
         teacher_p_target: float | None = None,
+        dense_every: int = 0,
+        dense_until: int = 0,
     ) -> None:
         """See module docstring.
 
@@ -83,7 +99,10 @@ class GkdProbeCallback(TrainerCallback):
             probe_every: Steps between probes.
             metrics_path: ``training_metrics.jsonl`` path (append, world-process-zero).
             teacher_p_target: Teacher's ``p(target)`` reference, logged as a constant.
+            dense_every: Dense-window cadence (`probe_schedule.probe_due`).
+            dense_until: Last step of the dense window.
         """
+        validate_probe_schedule(probe_every, dense_every, dense_until)
         self.tokenizer = tokenizer
         self.device = device
         self.target_animal = target_animal
@@ -95,6 +114,8 @@ class GkdProbeCallback(TrainerCallback):
         self.probe_every = probe_every
         self.metrics_path = Path(metrics_path)
         self.teacher_p_target = teacher_p_target
+        self.dense_every = dense_every
+        self.dense_until = dense_until
 
     def probe_once(self, model, step: int) -> dict:  # noqa: ANN001
         """Measure the student and append one JSONL + W&B row.
@@ -153,7 +174,9 @@ class GkdProbeCallback(TrainerCallback):
         return record
 
     def on_step_end(self, args, state, control, model=None, **kwargs):  # noqa: ANN001
-        if self.probe_every <= 0 or state.global_step % self.probe_every != 0:
+        if not probe_due(
+            state.global_step, self.probe_every, self.dense_every, self.dense_until
+        ):
             return
         if not state.is_world_process_zero or model is None:
             return
@@ -203,6 +226,8 @@ class SftProbeCallback(TrainerCallback):
         ppl_texts: list[str],
         probe_every: int,
         metrics_path: Path,
+        dense_every: int = 0,
+        dense_until: int = 0,
     ) -> None:
         """See class docstring.
 
@@ -216,10 +241,13 @@ class SftProbeCallback(TrainerCallback):
             ppl_texts: Held-out real-Pile texts for the perplexity guardrail.
             probe_every: Steps between probes.
             metrics_path: ``training_metrics.jsonl`` path (append, world-process-zero).
+            dense_every: Dense-window cadence (`probe_schedule.probe_due`).
+            dense_until: Last step of the dense window.
 
         Raises:
             ValueError: `target_animal` is not a candidate.
         """
+        validate_probe_schedule(probe_every, dense_every, dense_until)
         if target_animal is not None and target_animal not in candidate_ids:
             raise ValueError(
                 f"target {target_animal!r} not among candidates {list(candidate_ids)}"
@@ -233,6 +261,8 @@ class SftProbeCallback(TrainerCallback):
         self.ppl_texts = ppl_texts
         self.probe_every = probe_every
         self.metrics_path = Path(metrics_path)
+        self.dense_every = dense_every
+        self.dense_until = dense_until
 
     def probe_once(self, model, step: int) -> dict:  # noqa: ANN001
         """Measure the student and append one JSONL + W&B row.
@@ -306,7 +336,9 @@ class SftProbeCallback(TrainerCallback):
         self.probe_once(model, step=0)
 
     def on_step_end(self, args, state, control, model=None, **kwargs):  # noqa: ANN001
-        if self.probe_every <= 0 or state.global_step % self.probe_every != 0:
+        if not probe_due(
+            state.global_step, self.probe_every, self.dense_every, self.dense_until
+        ):
             return
         if not state.is_world_process_zero or model is None:
             return
@@ -336,6 +368,67 @@ class SftProbeCallback(TrainerCallback):
         except Exception:
             logger.exception("probe wandb.log failed at step {}", record["step"])
             raise
+
+
+class StepSnapshotCallback(TrainerCallback):
+    """Saves the student after chosen optimizer steps (measurement only).
+
+    ``out_dir/step{N}/`` holds the adapter (LoRA) or the weights + config (full) in
+    safetensors, loadable by `evaluation.teacher_loading_io.load_finetuned_teacher`;
+    ``snapshot.json`` (``step``, ``mode``, ``utc``) is written last, atomically.
+    """
+
+    def __init__(self, steps: Sequence[int], out_dir: Path) -> None:
+        """See class docstring.
+
+        Args:
+            steps: Optimizer steps to save after (each >= 1).
+            out_dir: Run's ``snapshots/`` dir.
+        """
+        if any(int(s) < 1 for s in steps):
+            raise ValueError(f"snapshot steps must be >= 1, got {sorted(steps)}")
+        self.steps = frozenset(int(s) for s in steps)
+        self.out_dir = Path(out_dir)
+
+    def on_step_end(self, args, state, control, model=None, **kwargs):  # noqa: ANN001
+        step = int(state.global_step)
+        if step not in self.steps or not state.is_world_process_zero:
+            return
+        if model is None:
+            raise RuntimeError(f"no model to snapshot at step {step}")
+        target = self.out_dir / f"step{step}"
+        if target.exists():
+            raise FileExistsError(f"snapshot {target} already exists")
+        model.save_pretrained(str(target), safe_serialization=True)
+        atomic_write_json(
+            target / SNAPSHOT_FILE,
+            {
+                "step": step,
+                "mode": "lora" if isinstance(model, PeftModel) else "full",
+                "utc": utc_now_iso(),
+            },
+        )
+        logger.info("Snapshot step {} -> {}", step, target)
+
+
+def clear_stale_snapshots(out_dir: Path, keep_through: int = 0) -> None:
+    """Remove ``step{N}/`` snapshots after `keep_through` or missing ``snapshot.json``.
+
+    Args:
+        out_dir: Run's ``snapshots/`` dir (absent = no-op).
+        keep_through: Resumed optimizer step; ``0`` removes every snapshot.
+    """
+    out_dir = Path(out_dir)
+    if not out_dir.is_dir():
+        return
+    for child in sorted(out_dir.iterdir()):
+        match = _SNAPSHOT_STEP.match(child.name)
+        if match is None or not child.is_dir():
+            continue
+        if int(match.group(1)) <= keep_through and (child / SNAPSHOT_FILE).is_file():
+            continue
+        logger.warning("Removing stale snapshot {}", child)
+        shutil.rmtree(child)
 
 
 def grad_concentration(

@@ -41,7 +41,13 @@ from subliminal_learning.evaluation.probe_banks import (
     texts_sha256,
 )
 from subliminal_learning.evaluation.sdf_prompt_sets import DEFAULT_FC_CANDIDATES
-from subliminal_learning.gkd.probe_io import SftProbeCallback
+from subliminal_learning.gkd.probe_io import (
+    SNAPSHOTS_DIR,
+    SftProbeCallback,
+    StepSnapshotCallback,
+    clear_stale_snapshots,
+)
+from subliminal_learning.gkd.probe_schedule import validate_probe_schedule
 from subliminal_learning.models.init_checkpoint_io import (
     init_checkpoint_identity,
     load_student_init,
@@ -133,13 +139,21 @@ class DistillStudentConfig:
         init_checkpoint_dir: Start from this trained student's ``checkpoints/`` (its
             own LoRA adapter keeps training, or its full weights) instead of the
             untuned base. Enters the identity and manifest only when set.
+        init_merge: Merge the start's LoRA adapter into its base and train the merged
+            model in full (`lora` ``None``) or through a fresh adapter
+            (`init_checkpoint_io.load_student_init`). Enters the identity only when set.
         probe_every: Steps between in-training probes (``0`` = off). Probes are
             measurement only and never enter the identity.
+        probe_dense_every: Probe cadence inside the early dense window (``0`` = off;
+            `gkd.probe_schedule.probe_due`).
+        probe_dense_until: Last step of the dense window.
         probe_animals: Animals the probe reads (``p_by_animal`` / forced choice); must
             include `animal` for a teacher-source run.
         probe_ppl_path: Held-out Pile JSONL of the perplexity probe; ``None`` =
             ``{dataset_cache_root}/gkd_prompts/pile_prompts_v1/heldout_ppl.jsonl`` (the
             GKD probe's texts).
+        snapshot_steps: Optimizer steps after which the student is saved to
+            ``snapshots/step{N}/`` (measurement only; outside the identity).
     """
 
     paths: PathsConfig
@@ -166,9 +180,13 @@ class DistillStudentConfig:
     wandb_job_type: str = "student_distill"
     student_dtype: str | None = None
     init_checkpoint_dir: Path | None = None
+    init_merge: bool = False
     probe_every: int = 125
+    probe_dense_every: int = 0
+    probe_dense_until: int = 0
     probe_animals: tuple[str, ...] = DEFAULT_FC_CANDIDATES
     probe_ppl_path: Path | None = None
+    snapshot_steps: tuple[int, ...] = ()
 
 
 _STUDENT_DTYPES = MappingProxyType({"bfloat16": torch.bfloat16})
@@ -245,6 +263,11 @@ def _student_run_identity(
                 if cfg.train.warmup_steps
                 else {}
             ),
+            **(
+                {"max_steps": cfg.train.max_steps}
+                if cfg.train.max_steps is not None
+                else {}
+            ),
             **train_identity_extras(cfg.train),
         },
         "lora": None if cfg.lora is None else {
@@ -270,9 +293,13 @@ def _probe_ppl_path(cfg: DistillStudentConfig) -> Path:
     return cfg.paths.dataset_cache_root / DEFAULT_PROBE_PPL_PATH
 
 
+def _probes_on(cfg: DistillStudentConfig) -> bool:
+    return cfg.probe_every > 0 or cfg.probe_dense_every > 0
+
+
 def _check_probe_inputs(cfg: DistillStudentConfig) -> None:
     """Fail before training when the probe cannot run as configured."""
-    if cfg.probe_every <= 0:
+    if not _probes_on(cfg):
         return
     target = cfg.animal if cfg.source == "teacher" else None
     if target is not None and target not in cfg.probe_animals:
@@ -298,14 +325,14 @@ def _init_identity(cfg: DistillStudentConfig, student_base_ref: str) -> dict | N
         raise ValueError(
             f"start checkpoint base {start_base!r} != student base {student_base_ref!r}"
         )
-    return identity
+    return {**identity, "merge": True} if cfg.init_merge else identity
 
 
 def _build_probe(
     cfg: DistillStudentConfig, tokenizer, run_dir: Path  # noqa: ANN001
 ) -> tuple[SftProbeCallback | None, dict | None]:
     """The run's in-training probe and its manifest provenance (``None`` when off)."""
-    if cfg.probe_every <= 0:
+    if not _probes_on(cfg):
         return None, None
     probe_prompts = load_bank(CONSENSUS_PROBE_BANK, N_PROBE_PROMPTS)
     fc_prompts = load_bank(FORCED_CHOICE_BANK)
@@ -324,9 +351,19 @@ def _build_probe(
         ppl_texts=ppl_texts,
         probe_every=cfg.probe_every,
         metrics_path=run_dir / TRAINING_METRICS_FILE,
+        dense_every=cfg.probe_dense_every,
+        dense_until=cfg.probe_dense_until,
     )
     provenance = {
         "probe_every": cfg.probe_every,
+        **(
+            {
+                "probe_dense_every": cfg.probe_dense_every,
+                "probe_dense_until": cfg.probe_dense_until,
+            }
+            if cfg.probe_dense_every
+            else {}
+        ),
         "target_animal": target,
         "probe_animals": list(cfg.probe_animals),
         "consensus_bank": str(CONSENSUS_PROBE_BANK),
@@ -368,6 +405,11 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             raise ValueError(f"student_dtype must be one of {sorted(_STUDENT_DTYPES)}")
         if cfg.lora is None:
             raise ValueError("a bf16 student base requires LoRA (frozen base)")
+    if cfg.init_merge and cfg.init_checkpoint_dir is None:
+        raise ValueError("init_merge requires init_checkpoint_dir")
+    validate_probe_schedule(
+        cfg.probe_every, cfg.probe_dense_every, cfg.probe_dense_until
+    )
 
     filtered_path = cfg.number_dataset_dir / "filtered.jsonl"
     manifest_path = cfg.number_dataset_dir / "manifest.json"
@@ -481,6 +523,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         )
     # Clear any stale manifest + checkpoints before retraining (torn-state guard).
     clear_stale_run(run_dir)
+    clear_stale_snapshots(run_dir / SNAPSHOTS_DIR)
     (run_dir / TRAINING_METRICS_FILE).unlink(missing_ok=True)
 
     all_rows = load_filtered_rows(filtered_path)
@@ -519,6 +562,8 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             cfg.device,
             cfg.lora,
             dtype=dtype,
+            merge=cfg.init_merge,
+            seed=cfg.train.seed,
         )
     else:
         # Fresh copy of the base model, fp32 (repo convention; see the student YAML).
@@ -526,6 +571,11 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device, dtype=dtype
         )
     probe, probe_provenance = _build_probe(cfg, tokenizer, run_dir)
+    callbacks = [] if probe is None else [probe]
+    if cfg.snapshot_steps:
+        callbacks.append(
+            StepSnapshotCallback(cfg.snapshot_steps, run_dir / SNAPSHOTS_DIR)
+        )
     hf_dataset = Dataset.from_list(
         [{"prompt": r["prompt"], "completion": r["completion"]} for r in rows]
     )
@@ -559,7 +609,8 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             ),
             report_to=report_to_for_wandb(cfg.wandb_enabled),
             bf16=cfg.student_dtype is not None,
-            callbacks=[probe] if probe is not None else None,
+            callbacks=callbacks or None,
+            max_steps=cfg.train.max_steps,
         )
     finally:
         finish_wandb_run()
@@ -617,6 +668,16 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
         **({"student_dtype": cfg.student_dtype} if cfg.student_dtype else {}),
         **({"init_checkpoint": init_identity} if init_identity is not None else {}),
         **({"probe": probe_provenance} if probe_provenance is not None else {}),
+        **(
+            {
+                "snapshots": {
+                    "steps": sorted(cfg.snapshot_steps),
+                    "dir": str(run_dir / SNAPSHOTS_DIR),
+                }
+            }
+            if cfg.snapshot_steps
+            else {}
+        ),
         "checkpoint_dir": str(checkpoint_dir),
         "final_train_loss": sft_result.final_train_loss,
         "n_train_steps": sft_result.n_steps,

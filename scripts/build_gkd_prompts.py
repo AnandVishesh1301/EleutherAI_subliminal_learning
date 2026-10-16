@@ -81,8 +81,9 @@ def main(
     source_revision: str = typer.Option(
         None, help="Pinned dataset repo sha for --source-file."
     ),
-    exclude_pool: Path = typer.Option(
-        None, help="Pool dir whose prompt + held-out documents must not reappear."
+    exclude_pool: list[Path] = typer.Option(
+        None,
+        help="Pool dir whose prompt + held-out documents must not reappear; repeatable.",
     ),
     heldout_from: Path = typer.Option(
         None, help="Pool dir whose heldout_ppl.jsonl is copied (needs held-out size 0)."
@@ -122,7 +123,9 @@ def main(
     )
     excluded = [
         row
-        for d in dict.fromkeys(x for x in (exclude_pool, heldout_from) if x is not None)
+        for d in dict.fromkeys(
+            x for x in (*(exclude_pool or ()), heldout_from) if x is not None
+        )
         for row in pool_rows(d)
     ]
 
@@ -201,14 +204,21 @@ def main(
     if source_urls is not None:
         manifest["source_files"] = list(source_file)
         manifest["source_revision"] = source_revision
-    if exclude_pool is not None:
-        manifest["exclude_pool"] = {
-            "dir": str(exclude_pool),
-            "manifest_sha256": _sha256_file(exclude_pool / "manifest.json"),
-            "prompts_sha256": json.loads((exclude_pool / "manifest.json").read_text())[
-                "prompts_sha256"
-            ],
-        }
+    if exclude_pool:
+        records = [
+            {
+                "dir": str(d),
+                "manifest_sha256": _sha256_file(d / "manifest.json"),
+                "prompts_sha256": json.loads((d / "manifest.json").read_text())[
+                    "prompts_sha256"
+                ],
+            }
+            for d in exclude_pool
+        ]
+        if len(records) == 1:
+            manifest["exclude_pool"] = records[0]
+        else:
+            manifest["exclude_pools"] = records
     if heldout_from is not None:
         manifest["heldout_from"] = {
             "dir": str(heldout_from),

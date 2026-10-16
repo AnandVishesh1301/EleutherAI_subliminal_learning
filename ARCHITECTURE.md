@@ -811,7 +811,9 @@ never contain the trait word:
 - **In-training probe** (`GkdProbeCallback`): exact `p(target)`, full-vocab
   `rank_mean`/`rank1_frac`, forced-choice share, held-out Pile PPL →
   `training_metrics.jsonl` + W&B; step-0 init baseline before `train()`;
-  default `probe_every=25`. Manifest sibling `probe:` holds bank provenance
+  default `probe_every=25`, plus an optional dense early window
+  (`gkd.probe_dense_every` / `probe_dense_until`, `gkd/probe_schedule.probe_due`; default off).
+  Manifest sibling `probe:` holds bank provenance
   (outside `run_identity`). Optional `coverage_probe` → `first_step_coverage.jsonl`.
   Probe SSOT: **`docs/GKD_IN_TRAINING_PROBES.md`**.
 - **Control**: same run with an untuned base as teacher, animal-specific (its own L2
@@ -2928,6 +2930,14 @@ matched controls and the untouched base go through the same arm.
   `init_checkpoint_identity`). `DistillStudentConfig.init_checkpoint_dir` and
   `TrainGkdStudentConfig.init_checkpoint_dir` enter `run_identity` only when set; a loaded adapter is
   passed with `peft_config=None` (GKD) / not re-wrapped (`teachers/sft_io.py`).
+- **Shared additions (rank 2+, both pipelines, defaults byte-identical):** `init_merge` merges a LoRA
+  start into its base, then trains it in full (`lora=None`) or through a fresh adapter seeded with the
+  run seed (`init_checkpoint.merge: true` in the identity only when set); `snapshot_steps` saves the
+  student after step N to `snapshots/step{N}/` (`gkd/probe_io.StepSnapshotCallback`; adapter or full
+  weights + `snapshot.json`, loadable by `load_finetuned_teacher`; outside the identity; stale steps
+  cleared on retrain, kept up to the resumed step on a GKD resume); dense probe window
+  (`probe_dense_every` / `probe_dense_until`); the hard pipeline passes `TrainConfig.max_steps` to the
+  trainer (`train.max_steps` in the identity only when set).
 - **Hard in-training probes (on by default in `distill_student_pipeline`):** `gkd/probe_io.SftProbeCallback`
   writes `training_metrics.jsonl` every `probe_every=125` steps (+ step 0 at train begin) with the GKD
   probe's fields plus `p_by_animal` / `fc_share_by_animal` over the 10 forced-choice animals; banks in
@@ -2947,6 +2957,26 @@ matched controls and the untouched base go through the same arm.
   checks loads in fp32 and uses a bf16 re-probe of the start as the soft curve's step-0 reference.
 - **Extension `rev1x`** (prereg §R1x): the same arms on more install recipes (hard LoRA RMSProp, full SGD;
   soft LoRA / full RMSProp with the base teacher), on queue root `reversal/queue_x`; launcher `--ext`.
+
+### Reversal phase 2: ranks 2–5, long reversal, data amount (`rev2`)
+
+Plan Part II of `.claude/plans/blogpost/12_reversal.plan.md`; prereg `docs/PREREG_REVERSAL.md` §6c.
+One campaign, three queue tiers per host (`g` gating 60, `h` headline 50, `l` low priority 5) on queue
+root `reversal/queue2`; run sets `20261016_rev2-{hard,soft}_160m`; every cell under its own
+`outputs/<channel>/<run set>/<block>/<slug>/`, done when `rev2_cell.json` exists.
+- **Code:** `campaign/rev2_plan.py` (cells: R1L, rank-1 extra rate, rank 2 panels / relearning / positive
+  controls, rank 3 Pile cross-entropy / λ = 0 bridge / random numbers, rank 4 recipe ladders + cross-base
+  symmetry, rank 5 cross-model and checkpoint teachers, DOSE ladders); `pipelines/rev2_{stage,cell,
+  campaign,results}_pipeline.py`; CLI `scripts/run_rev2_campaign.py`; launcher
+  `scripts/launch_rev2_campaign.sh`; readings `evaluation/rev2_panel_io.py` (other spellings via the R2
+  scorer, context cue `data/sdf_eval_prompts/context_cue_{hard,soft}.json`, forced choice, consensus).
+- **Driver:** submits a cell only when its inputs exist (stop steps from R1L / snapshot re-runs,
+  scaled positive controls, judged pool), retries failures (+1 per recorded preemption), labels holes.
+- **Pause / resume** (node-local): `pause --drain|--now`, `resume`, `fence --gpus …`, `unfence`,
+  `move-pending --from <host> --to …` (assignment ledger; a moved cell's old copy exits 0), `status`.
+- **Shared pipeline additions:** probe schedule dial (`probe_dense_every` / `probe_dense_until`, both
+  pipelines, default off), `snapshot_steps`, merged starts (`init_merge`), hard `TrainConfig.max_steps`
+  passed through; pool builder `--exclude-pool` repeatable; `pile_prompts_rev2` = 80,000 prompts.
 
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 

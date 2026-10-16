@@ -32,6 +32,7 @@ import trl
 from datasets import Dataset
 from loguru import logger
 from transformers import set_seed
+from transformers.trainer_utils import get_last_checkpoint
 
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.evaluation.animal_forms_io import load_animal_forms
@@ -73,10 +74,14 @@ from subliminal_learning.gkd.layout import (
 from subliminal_learning.cka.weight_space_io import lora_scaling, merged_lora_delta
 from subliminal_learning.evaluation import probe_banks
 from subliminal_learning.gkd.probe_io import (
+    SNAPSHOTS_DIR,
     FirstStepCoverageCallback,
     GkdProbeCallback,
     GradConcentrationCallback,
+    StepSnapshotCallback,
+    clear_stale_snapshots,
 )
+from subliminal_learning.gkd.probe_schedule import validate_probe_schedule
 from subliminal_learning.gkd.prompt_pool import (
     nested_stratified_subset,
     pretokenized_rows,
@@ -173,6 +178,11 @@ class TrainGkdStudentConfig:
             own LoRA adapter, trainable, or its full weights) instead of the
             untuned `spec`; ``None`` = the untuned base. Enters the identity and
             manifest only when set.
+        init_merge: Merge the start's LoRA adapter into its base and train the merged
+            model in full (`lora` ``None``) or through a fresh adapter
+            (`init_checkpoint_io.load_student_init`). Enters the identity only when set.
+        snapshot_steps: Optimizer steps after which the student is saved to
+            ``snapshots/step{N}/`` (measurement only; outside the identity).
     """
 
     paths: PathsConfig
@@ -199,6 +209,8 @@ class TrainGkdStudentConfig:
     run_set_id: str | None = None
     student_dtype: str | None = None
     init_checkpoint_dir: Path | None = None
+    init_merge: bool = False
+    snapshot_steps: tuple[int, ...] = ()
 
 
 _STUDENT_DTYPES = {"bfloat16": torch.bfloat16}
@@ -461,7 +473,12 @@ def gkd_run_identity(
         **(dict(data_identity) if data_identity else {}),
         **({"student_dtype": cfg.student_dtype} if cfg.student_dtype else {}),
         **(
-            {"init_checkpoint": init_checkpoint_identity(cfg.init_checkpoint_dir)}
+            {
+                "init_checkpoint": {
+                    **init_checkpoint_identity(cfg.init_checkpoint_dir),
+                    **({"merge": True} if cfg.init_merge else {}),
+                }
+            }
             if cfg.init_checkpoint_dir is not None
             else {}
         ),
@@ -606,6 +623,14 @@ def _probe_provenance(
     """Probe bank provenance for the train manifest (outside ``run_identity``)."""
     return {
         "probe_every": cfg.gkd.probe_every,
+        **(
+            {
+                "probe_dense_every": cfg.gkd.probe_dense_every,
+                "probe_dense_until": cfg.gkd.probe_dense_until,
+            }
+            if cfg.gkd.probe_dense_every
+            else {}
+        ),
         "n_probe_prompts": len(probe_prompts),
         "n_fc_prompts": len(fc_prompts),
         "n_ppl_texts": len(ppl_texts),
@@ -653,6 +678,11 @@ def _coverage_callback(
 
 def run(cfg: TrainGkdStudentConfig) -> TrainGkdStudentResult:
     """Distill one GKD student cell. Idempotent: a trained cell is reloaded, not rerun."""
+    if cfg.init_merge and cfg.init_checkpoint_dir is None:
+        raise ValueError("init_merge requires init_checkpoint_dir")
+    validate_probe_schedule(
+        cfg.gkd.probe_every, cfg.gkd.probe_dense_every, cfg.gkd.probe_dense_until
+    )
     finetune_mode = cfg.gkd.student_mode
     base_model = model_dir_name(cfg.spec, cfg.hub_org)
     ttag, gtag, run_dir = _tags_and_run_dir(cfg)
@@ -819,6 +849,8 @@ def _train(
             cfg.device,
             cfg.lora,
             dtype=_student_dtype(cfg),
+            merge=cfg.init_merge,
+            seed=cfg.train.seed,
         )
         if cfg.lora is not None and cfg.train.gradient_checkpointing:
             student.enable_input_require_grads()
@@ -973,8 +1005,14 @@ def _train(
         probe_every=cfg.gkd.probe_every,
         metrics_path=run_dir / "training_metrics.jsonl",
         teacher_p_target=teacher_p_target,
+        dense_every=cfg.gkd.probe_dense_every,
+        dense_until=cfg.gkd.probe_dense_until,
     )
     callbacks = [probe]
+    if cfg.snapshot_steps:
+        callbacks.append(
+            StepSnapshotCallback(cfg.snapshot_steps, run_dir / SNAPSHOTS_DIR)
+        )
     if cfg.gkd.grad_probe:
         callbacks.append(
             GradConcentrationCallback(
@@ -1048,6 +1086,9 @@ def _train(
         resume = cfg.train.checkpoint_resume and any(
             checkpoint_dir.glob("checkpoint-*")
         )
+        clear_stale_snapshots(
+            run_dir / SNAPSHOTS_DIR, _resume_step(checkpoint_dir) if resume else 0
+        )
         # Init baseline (step 0) on the PEFT-wrapped student before any optimizer step.
         # Skip when metrics already exist (mid-run resume or crash after the first write).
         metrics_path = run_dir / "training_metrics.jsonl"
@@ -1103,6 +1144,12 @@ def _train(
         n_train_steps=trainer.state.global_step,
         finetune_mode=finetune_mode,
     )
+
+
+def _resume_step(checkpoint_dir: Path) -> int:
+    """Optimizer step HF resumes from (its last ``checkpoint-N``; 0 when none)."""
+    last = get_last_checkpoint(str(checkpoint_dir))
+    return int(Path(last).name.rsplit("-", 1)[1]) if last else 0
 
 
 def optimizer_resolved(trainer) -> dict:
@@ -1299,6 +1346,16 @@ def _write_manifest(
         "final_train_loss": final_loss,
         "n_train_steps": n_steps,
         "probe": probe_provenance,
+        **(
+            {
+                "snapshots": {
+                    "steps": sorted(cfg.snapshot_steps),
+                    "dir": str(run_dir / SNAPSHOTS_DIR),
+                }
+            }
+            if cfg.snapshot_steps
+            else {}
+        ),
         **(
             {"init_checkpoint": run_identity["init_checkpoint"]}
             if "init_checkpoint" in run_identity

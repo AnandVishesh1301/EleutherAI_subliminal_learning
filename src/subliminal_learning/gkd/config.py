@@ -32,6 +32,7 @@ from subliminal_learning.config import (
 )
 from subliminal_learning.evaluation.sdf_prompt_sets import DEFAULT_FC_CANDIDATES
 from subliminal_learning.gkd.layout import DEFAULT_OPTIM, ROLLOUT_SCREENS, optim_slug
+from subliminal_learning.gkd.probe_schedule import validate_probe_schedule
 from subliminal_learning.models.registry import PythiaModelSpec
 
 # Single SSOT for forced-choice candidate animals, shared with the SDF-teacher eval
@@ -63,6 +64,10 @@ class GkdConfig:
         student_mode: ``"full"`` or ``"lora"`` (derived from the `lora:` block presence).
         vocab_mask: Layer-3 divergence vocab masking on/off (banned candidate tokens).
         probe_every: Steps between `GkdProbeCallback` measurements.
+        probe_dense_every: Probe cadence inside the early dense window (``0`` = off;
+            `gkd.probe_schedule.probe_due`).
+        probe_dense_until: Last step of the dense window (required with
+            `probe_dense_every`).
         rollout_log_every: Steps between appending full-batch rollouts to
             `rollouts_sample.jsonl` (``1`` = every on-policy step).
         prompt_pool_dir: Prompt-pool directory (absolute, or relative to
@@ -129,6 +134,8 @@ class GkdConfig:
     rollout_screen: str = "legacy"
     rollout_cache: bool = False
     mask_eos: bool = False
+    probe_dense_every: int = 0
+    probe_dense_until: int = 0
 
 
 def validate_top_k(
@@ -183,6 +190,9 @@ def validate_gkd(gkd: GkdConfig) -> None:
         raise ValueError("gkd.vocab_mask_forms requires gkd.vocab_mask")
     _validate_subset(gkd.prompt_subset_size, gkd.prompt_subset_seed)
     _validate_rollout_screen(gkd.rollout_screen)
+    validate_probe_schedule(
+        gkd.probe_every, gkd.probe_dense_every, gkd.probe_dense_until
+    )
 
 
 def _validate_rollout_screen(value: str) -> None:
@@ -342,6 +352,8 @@ def load_gkd_training(
         rollout_screen=str(g.get("rollout_screen", "legacy")),
         rollout_cache=bool(g.get("rollout_cache", False)),
         mask_eos=bool(g.get("mask_eos", False)),
+        probe_dense_every=int(g.get("probe_dense_every", 0)),
+        probe_dense_until=int(g.get("probe_dense_until", 0)),
     )
     validate_gkd(gkd)
     return lora, train, gkd
@@ -455,6 +467,8 @@ def _override_gkd(gkd: GkdConfig, exp_gkd: dict, *, student_mode: str) -> GkdCon
         "teacher_temp",
         "student_temp",
         "probe_every",
+        "probe_dense_every",
+        "probe_dense_until",
         "rollout_log_every",
     ):
         if key in exp_gkd:
