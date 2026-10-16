@@ -346,6 +346,129 @@ def panel_rows(cells: list[plan.Cell]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# ---- rank-2 verdicts (prereg §R1b) ---------------------------------------------------------
+
+READINGS: tuple[str, ...] = ("other_spellings", "fc_share", "context_cue", "consensus")
+DAMAGE_SLACK = 0.5
+
+
+def _unit(df: pd.DataFrame, channel: str) -> pd.Series:
+    if channel == "soft":
+        return df["tfs"].astype(int).astype(str) + "-" + df["seed"].astype(int).astype(str)
+    return df["seed"].astype(int).astype(str)
+
+
+def _boot_mean(values: np.ndarray, groups: np.ndarray) -> tuple[float, float, float, float]:
+    """Mean and 95% / 90% intervals of `values` over units (two-level by `groups`)."""
+    ok = np.isfinite(values)
+    if not ok.any():
+        return (math.nan,) * 4
+    w = two_level_weights(groups[ok], plan.BOOT_N, np.random.default_rng(plan.BOOT_SEED))
+    reps = (w @ values[ok]) / w.sum(axis=1)
+    lo, hi = r1r._ci(reps)
+    return lo, hi, float(np.percentile(reps, 5)), float(np.percentile(reps, 95))
+
+
+def _panel_diff(panel: pd.DataFrame, channel: str, start: str, animal: str, src: str,
+                group_animal: str | None = None) -> pd.DataFrame:
+    """Per unit: treatment − matched control of every reading for `src` students."""
+    g = panel[(panel["channel"] == channel) & (panel["start"] == start)
+              & (panel["src"] == src) & (panel["animal"] == animal)]
+    if group_animal is not None:
+        g = g[g["group_animal"] == group_animal]
+    t = g[g["kind"] == plan.TREAT].assign(u=lambda f: _unit(f, channel)).set_index("u")
+    c = g[g["kind"] == plan.CTRL].assign(u=lambda f: _unit(f, channel)).set_index("u")
+    common = t.index.intersection(c.index)
+    return (t.loc[common, list(READINGS)] - c.loc[common, list(READINGS)]).astype(float)
+
+
+def _relearn(relg: pd.DataFrame, channel: str, src: str, start: str, animal: str,
+             target: str, lr: float) -> dict:
+    g = relg[(relg["channel"] == channel) & (relg["src"] == src) & (relg["start"] == start)
+             & (relg["animal"] == animal) & (relg["target"] == target)
+             & np.isclose(relg["lr"].astype(float), lr)] if not relg.empty else relg
+    return g.iloc[0].to_dict() if len(g) else {}
+
+
+def rank2_rows(panel: pd.DataFrame, relg: pd.DataFrame) -> pd.DataFrame:
+    """§R1b verdict per rank-2 group from the panel, rank-1 pairs and relearning."""
+    if panel.empty:
+        return pd.DataFrame()
+    r1p = pd.read_csv(plan.REV1_CELLS_CSV.with_name("pairs.csv"))
+    groups = [("soft", s, a) for s, a in plan.SOFT_R2_GROUPS]
+    groups += [("hard", s, a) for s, a in plan.HARD_R2_GROUPS]
+    other = {**dict(plan.OTHER_ANIMAL), **dict(plan.HARD_OTHER_ANIMAL)}
+    rows = []
+    for channel, start, animal in groups:
+        pr = r1p[(r1p["channel"] == channel) & (r1p["arm"] == start)
+                 & (r1p["animal"] == animal) & (r1p["teacher"] == "base") & ~r1p["excluded"]]
+        if pr.empty:
+            continue
+        units = _unit(pr, channel)
+        grp = pr["tfs"].astype(int).astype(str).to_numpy() if channel == "soft" else (
+            units.to_numpy())
+        pre = float(pr["pre_test"].mean())
+        margin = plan.REMOVED_RETENTION * pre
+        lo, hi, _, _ = _boot_mean(pr["post_test"].to_numpy(float), grp)
+        dmg = float((pr["dce_t_rev"] - pr["dce_c_rev"]).mean())
+        row = {"channel": channel, "start": start, "animal": animal, "n_units": len(pr),
+               "pre_test": pre, "post_test": float(pr["post_test"].mean()),
+               "post_test_lo": lo, "post_test_hi": hi, "margin": margin,
+               "damage_diff": dmg}
+        labels = []
+        diffs = _panel_diff(panel, channel, start, animal, "rev1")
+        dgrp = np.array([u.split("-")[0] for u in diffs.index])
+        for reading in READINGS:
+            r_lo, r_hi, _, _ = _boot_mean(diffs[reading].to_numpy(), dgrp) if len(
+                diffs) else (math.nan,) * 4
+            row[f"{reading}_diff"] = float(diffs[reading].mean()) if len(diffs) else math.nan
+            row[f"{reading}_lo"], row[f"{reading}_hi"] = r_lo, r_hi
+        if row["other_spellings_lo"] > 0 or row["fc_share_lo"] > 0:
+            labels.append("moved")
+        if row["context_cue_lo"] > 0:
+            labels.append("context-gated")
+        lr = plan.install_lr(channel, start, animal)
+        t3 = _relearn(relg, channel, "rev1", start, animal, animal, lr)
+        t4 = _relearn(relg, channel, "rev1", start, animal, other[animal], lr)
+        for name, d in (("t3", t3), ("t4", t4)):
+            for k in ("savings_ratio", "savings_ratio_lo", "savings_ratio_hi",
+                      "savings_ratio_lo90", "savings_ratio_hi90", "early_gap", "area_ratio"):
+                row[f"{name}_{k}"] = _num(d.get(k))
+        t4_ok = (row["t4_savings_ratio_lo"] <= 1 <= row["t4_savings_ratio_hi"]) or (
+            row["t4_savings_ratio_hi"] < row["t3_savings_ratio_lo"])
+        if row["t3_savings_ratio_lo"] > 1 and t4_ok:
+            labels.append("fast-relearning")
+        flagged = []
+        for src in ("scale", "stop"):
+            pdiff = _panel_diff(panel, channel, start, animal, src,
+                                group_animal=animal)
+            if len(pdiff) and any(
+                _boot_mean(pdiff[r].to_numpy(), np.array([u.split("-")[0] for u in
+                                                          pdiff.index]))[0] > 0
+                for r in ("other_spellings", "fc_share", "context_cue")):
+                flagged.append(f"{src}:reading")
+            rl = _relearn(relg, channel, src, start, animal, animal, lr)
+            if _num(rl.get("savings_ratio_lo")) > 1:
+                flagged.append(f"{src}:relearning")
+        row["positive_controls_flagged"] = ";".join(flagged)
+        suppressed = (math.isfinite(lo) and -margin <= lo and hi <= margin
+                      and dmg <= DAMAGE_SLACK)
+        if math.isfinite(lo) and lo > margin:
+            verdict = "present"
+        elif suppressed and labels:
+            verdict = "hidden"
+        elif (suppressed and not labels and flagged
+              and 0.8 <= row["t3_savings_ratio_lo90"]
+              and row["t3_savings_ratio_hi90"] <= 1.25):
+            verdict = "gone"
+        else:
+            verdict = "inconclusive"
+        row.update({"suppressed": suppressed, "hidden_labels": ";".join(labels),
+                    "verdict": verdict})
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 # ---- dose -------------------------------------------------------------------------------
 
 
@@ -436,9 +559,10 @@ def run(phase: str = "final") -> dict:
     relg = relearn_groups(rel)
     panel = panel_rows(cells)
     dose = dose_rows(pairs, groups)
+    rank2 = rank2_rows(panel, relg)
     for name, frame in (("cells", table), ("pairs", pairs), ("groups", groups),
                         ("curves", curves), ("relearn", rel), ("relearn_groups", relg),
-                        ("panel", panel), ("dose", dose)):
+                        ("panel", panel), ("dose", dose), ("rank2", rank2)):
         atomic_write_text(out_dir / f"{name}.csv", frame.to_csv(index=False))
     stop_steps = _read(plan.STOP_STEPS_FILE)
     claims = {
@@ -449,6 +573,9 @@ def run(phase: str = "final") -> dict:
                                             f"retention_{REPORT_SET}_hi"]
                                    ).to_dict("records") if not groups.empty else [],
         "stop_steps": stop_steps,
+        "rank2": rank2.reindex(columns=["channel", "start", "animal", "verdict",
+                                        "hidden_labels", "positive_controls_flagged"]
+                               ).to_dict("records") if not rank2.empty else [],
         "n_cells_done": int(sum(1 for c in cells if rc.is_done(c))),
         "n_cells": len(cells),
     }

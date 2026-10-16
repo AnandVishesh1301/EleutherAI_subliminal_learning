@@ -2977,6 +2977,12 @@ root `reversal/queue2`; run sets `20261016_rev2-{hard,soft}_160m`; every cell un
 - **Shared pipeline additions:** probe schedule dial (`probe_dense_every` / `probe_dense_until`, both
   pipelines, default off), `snapshot_steps`, merged starts (`init_merge`), hard `TrainConfig.max_steps`
   passed through; pool builder `--exclude-pool` repeatable; `pile_prompts_rev2` = 80,000 prompts.
+- **Judged pool (rank 3, plan §17 item 6):** `scripts/build_judged_pool.py` (`plan` → rollout_judge
+  `judge-cluster --config configs/rollout_judge_rev2pool.yaml` → `finalize`; `gkd/judged_pool{,_io}.py`)
+  judges every `pile_prompts_rev1` row once with `pool_open` (prompt + real continuation) and keeps
+  parsed `no` rows: `pile_prompts_rev1_judged` (source pool format; manifest `judge` block) and hard SFT
+  rows `inputs/sft_rows/pile_rev1_judged/` (`numbers: []`). 2026-10-16: 651 / 20,000 flagged (3.3%;
+  PubMed 8.0%), 0 parse failures, 19,349 kept; audit `reversal/audit/filtration_audit/20261016_rev2_pool_judge`.
 
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 
