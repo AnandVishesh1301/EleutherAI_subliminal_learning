@@ -12,8 +12,13 @@ gkd_tags:
   lmb1.0_b1.0_lora_lr4e-4_e1_r8a16_strict: strict
   lmb1.0_b0.0_lora_lr4e-4_e1_r8a16_strict: strict
 
+# Only bear leaves exist (the expected run-dir list pins them); the other animals give the
+# plan builder its decoy choices, as in filtration_audit_traitfree.yaml.
 headline_animals:
   - bear
+  - cat
+  - dog
+  - eagle
 
 rows_per_leaf_clean: 1000
 clean_quota_by_arm:
