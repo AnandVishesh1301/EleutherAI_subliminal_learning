@@ -1405,3 +1405,48 @@ def test_run_relabel_is_invariant_to_row_order():
         kw = dict(family_a="A", family_b="B", statistic=statistic, n_perm=300, seed=5)
         first = tt.run_relabel_cell_permutation(frame, **kw)
         assert first == tt.run_relabel_cell_permutation(shuffled, **kw)
+
+
+def _reference_paired_cluster_tables(df, condition_col, cond_a, cluster_col, stratum_col,
+                                     value_col, statistic):
+    """The original per-cell row loop `_paired_cluster_tables` was vectorized from."""
+    from scipy.stats import rankdata
+
+    clusters = sorted(pd.unique(df[cluster_col]), key=str)
+    cells = sorted(pd.unique(df[stratum_col]), key=str)
+    row = {c: i for i, c in enumerate(clusters)}
+    shape = (len(clusters), len(cells))
+    a_sums, a_counts = np.zeros(shape), np.zeros(shape)
+    b_sums, b_counts = np.zeros(shape), np.zeros(shape)
+    for j, cell in enumerate(cells):
+        block = df[df[stratum_col] == cell]
+        values = block[value_col].to_numpy(dtype=float)
+        weights = rankdata(values) if statistic == "win_probability" else values
+        is_a = (block[condition_col] == cond_a).to_numpy()
+        for cluster, w, a in zip(block[cluster_col].to_numpy(), weights, is_a):
+            sums, counts = (a_sums, a_counts) if a else (b_sums, b_counts)
+            sums[row[cluster], j] += float(w)
+            counts[row[cluster], j] += 1.0
+    return a_sums, a_counts, b_sums, b_counts
+
+
+@pytest.mark.parametrize("labels", ["int", "str"])
+@pytest.mark.parametrize("statistic", ["mean_contrast", "win_probability"])
+def test_paired_cluster_tables_match_row_loop_reference(labels, statistic):
+    rng = np.random.default_rng(7)
+    for trial in range(25):
+        n = int(rng.integers(1, 80))
+        clusters = rng.integers(0, 12, n)              # 10 vs 2 sorts differently by str
+        frame = pd.DataFrame({
+            "condition": rng.choice(["A", "B"], n),
+            "teacher": clusters if labels == "int" else [f"t{c}" for c in clusters],
+            "cell": rng.choice(["c10", "c2", "c1", "x"], n),
+            # coarse values -> many ties; a few repeated exact floats too
+            "value": np.round(rng.normal(size=n), 1) if trial % 2 else rng.normal(size=n),
+        }).sample(frac=1.0, random_state=trial)       # unbalanced, shuffled slots
+        args = (frame, "condition", "A", "teacher", "cell", "value", statistic)
+        got = tt._paired_cluster_tables(*args)
+        want = _reference_paired_cluster_tables(*args)
+        for g, w in zip(got, want):
+            assert g.dtype == np.float64 and g.shape == w.shape
+            assert np.array_equal(g, w)

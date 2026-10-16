@@ -720,23 +720,30 @@ def _paired_cluster_tables(
     ``"win_probability"``, taken over ALL runs of the cell exactly as `_cell_tables` does -- the
     midranks do not move when the condition labels do, so they are computed once.
     """
-    from scipy.stats import rankdata
+    def codes(col: str) -> tuple[np.ndarray, int]:
+        """Row -> position of its key in the keys sorted by `str`."""
+        idx, uniq = pd.factorize(df[col], sort=False)
+        order = sorted(range(len(uniq)), key=lambda k: str(uniq[k]))
+        pos = np.empty(len(uniq), dtype=np.intp)
+        pos[order] = np.arange(len(uniq))
+        return pos[idx], len(uniq)
 
-    clusters = sorted(pd.unique(df[cluster_col]), key=str)
-    cells = sorted(pd.unique(df[stratum_col]), key=str)
-    row = {c: i for i, c in enumerate(clusters)}
-    shape = (len(clusters), len(cells))
-    a_sums, a_counts = np.zeros(shape), np.zeros(shape)
-    b_sums, b_counts = np.zeros(shape), np.zeros(shape)
-    for j, cell in enumerate(cells):
-        block = df[df[stratum_col] == cell]
-        values = block[value_col].to_numpy(dtype=float)
-        weights = rankdata(values) if statistic == "win_probability" else values
-        is_a = (block[condition_col] == cond_a).to_numpy()
-        for cluster, w, a in zip(block[cluster_col].to_numpy(), weights, is_a):
-            sums, counts = (a_sums, a_counts) if a else (b_sums, b_counts)
-            sums[row[cluster], j] += float(w)
-            counts[row[cluster], j] += 1.0
+    rows, n_clusters = codes(cluster_col)
+    cols, n_cells = codes(stratum_col)
+    values = df[value_col].to_numpy(dtype=float)
+    # Midranks within each cell (== `scipy.stats.rankdata` per cell, ties averaged).
+    weights = (pd.Series(values).groupby(cols).rank(method="average").to_numpy(dtype=float)
+               if statistic == "win_probability" else values)
+    is_a = (df[condition_col] == cond_a).to_numpy()
+    shape = (n_clusters, n_cells)
+    out = []
+    for mask in (is_a, ~is_a):
+        sums, counts = np.zeros(shape), np.zeros(shape)
+        # `np.add.at` accumulates in row order, so each slot's float sum matches a row loop.
+        np.add.at(sums, (rows[mask], cols[mask]), weights[mask])
+        np.add.at(counts, (rows[mask], cols[mask]), 1.0)
+        out += [sums, counts]
+    a_sums, a_counts, b_sums, b_counts = out
     return a_sums, a_counts, b_sums, b_counts
 
 
@@ -994,6 +1001,51 @@ def _paired_sign_flip_permutation(d: np.ndarray, n_perm: int, seed: int) -> Sign
         p=float((int((null >= observed).sum()) + 1) / (n_perm + 1)),
         p_opposite=float((int((null <= observed).sum()) + 1) / (n_perm + 1)),
         floor=float(1.0 / (n_perm + 1)), n_pairs=int(d.size), n_perm=int(n_perm))
+
+
+@dataclass(frozen=True)
+class ExactSignFlipResult:
+    """Outcome of `paired_sign_flip_exact`: the observed mean paired difference, the full-null
+    quantiles, the tails ``p_upper`` (A > B) / ``p_lower`` (B > A) -- both counting the observed
+    labelling -- and the comparison's primary ``p_two_sided`` (`_two_sided`); ``floor = 2 /
+    2**n_pairs`` for the two-sided p."""
+
+    observed: float
+    null_quantiles: dict[str, float]
+    n_pairs: int
+    n_labelings: int
+    p_upper: float
+    p_lower: float
+    p_two_sided: float
+
+
+def paired_sign_flip_exact(diffs) -> ExactSignFlipResult:
+    """EXACT within-pair sign-flip permutation on the mean of a paired difference: all
+    ``2**k`` sign vectors of the ``k`` finite pairs are enumerated (keep ``k`` small, <= ~20).
+    The observed value is read out of the enumeration (the all-``+1`` row), so it is
+    bit-identical to its own null entry and counted in both tails.
+
+    Args:
+        diffs: Per-pair differences (A minus B); NaN entries are dropped.
+
+    Returns:
+        An `ExactSignFlipResult`.
+
+    Raises:
+        ValueError: If no finite pair is left.
+    """
+    d = np.asarray(diffs, dtype=float).ravel()
+    d = d[np.isfinite(d)]
+    if d.size == 0:
+        raise ValueError("paired_sign_flip_exact needs at least one finite pair")
+    signs = np.array(list(itertools.product([1.0, -1.0], repeat=d.size)))
+    null = (signs * d).mean(axis=1)
+    observed = float(null[0])  # the all-+1 row
+    p_upper, p_lower = float((null >= observed).mean()), float((null <= observed).mean())
+    quantiles = {q: float(np.percentile(null, float(q))) for q in ("50", "95", "99")}
+    return ExactSignFlipResult(observed=observed, null_quantiles=quantiles, n_pairs=int(d.size),
+                               n_labelings=int(null.size), p_upper=p_upper, p_lower=p_lower,
+                               p_two_sided=_two_sided(p_upper, p_lower))
 
 
 #: Statistics `run_relabel_cell_permutation` can read (the two of `ARM_RELABEL_STATISTICS`,

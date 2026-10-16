@@ -20,6 +20,7 @@ from pathlib import Path
 
 import yaml
 
+from subliminal_learning.jobq_cmd import assert_portable_jobs
 
 ROOT = Path(__file__).resolve().parents[1]
 ANIMALS = ("dog", "cat", "lion", "pig")
@@ -145,6 +146,7 @@ def command(module: str, args: list[str]) -> str:
 
 def write_jsonl(path: Path, jobs: list[dict]) -> None:
     assert len({job["key"] for job in jobs}) == len(jobs)
+    assert_portable_jobs(jobs)
     path.write_text("".join(json.dumps(job) + "\n" for job in jobs))
 
 

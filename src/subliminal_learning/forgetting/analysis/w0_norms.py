@@ -121,15 +121,26 @@ def ensure_w0_norms(output_root: Path, base_repo: str, modules: list[str], *,
     import torch
     from transformers import AutoModelForCausalLM
 
+    from subliminal_learning.models.registry import local_model_dir
+
     kw = {"torch_dtype": torch.float32}
-    if revision:
-        kw["revision"] = revision
+    root = _hf_cache_root(hf_cache_root)
+    local_dir = local_model_dir(base_repo, revision, root) if root is not None else None
+    if local_dir is not None:
+        # `local/...` bases are unpublished conversions: load the directory, never the hub.
+        if not local_dir.is_dir():
+            raise FileNotFoundError(f"local base {base_repo} not found at {local_dir}")
+        load_from = str(local_dir)
+    else:
+        load_from = base_repo
+        if revision:
+            kw["revision"] = revision
     if base_repo.startswith("allenai/DataDecide"):
         # Legacy `hf_olmo` architecture: Auto* only resolves it once the package is imported.
         from subliminal_learning.models.datadecide import _require_hf_olmo
 
         _require_hf_olmo()
-    model = AutoModelForCausalLM.from_pretrained(base_repo, **kw)
+    model = AutoModelForCausalLM.from_pretrained(load_from, **kw)
     sd = model.state_dict()
     new = {}
     for m in missing:

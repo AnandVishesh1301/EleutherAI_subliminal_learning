@@ -39,6 +39,9 @@ docs/methodology/
 docs/results/
 # paper export artifacts (docx, reader md, Drive parts) — rebuilt by docs/paper/build_paper_exports.py
 docs/paper/
+# uncommitted drafts (asymmetry revision tex + notes, moved here 2026-10-16)
+docs/drafts/
 notebooks/latex/
 notebooks/tex/
 jobq_paths.toml
+paper/

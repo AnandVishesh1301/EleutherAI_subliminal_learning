@@ -187,10 +187,10 @@ OTHER_CATEGORY = "other"
 #: full seed (neither the original init nor the original data order); ``410m`` shares D0;
 #: ``410m-seed2`` shares the PolyPythias seed-2 order with ``fs2``.
 XARCH_FACTS: dict[str, tuple[str, str]] = {"410m": ("orig", "D0"), "410m-seed1": ("s1", "Dfs1"),
-                                           "410m-seed2": ("s2", "Dfs2")}
+                                           "410m-seed2": ("s2", "Dfs2"), "410m-seed3": ("s3", "Dfs3")}
 
 #: Registry short name of a 160m receiver -> its `diagonal_direction` short label.
-_XARCH_SHORT = {"160m": "orig", "160m-seed1": "fs1", "160m-seed2": "fs2"}
+_XARCH_SHORT = {"160m": "orig", "160m-seed1": "fs1", "160m-seed2": "fs2", "160m-seed3": "fs3"}
 
 #: Runs per fully covered 160m arm on core30 (10 teachers x 30 cells) -- the completeness unit.
 CORE30_RUNS = 300

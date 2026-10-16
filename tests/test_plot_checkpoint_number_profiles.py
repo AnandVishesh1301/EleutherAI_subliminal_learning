@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from scripts.plot_checkpoint_number_profiles import _anchor_data, _first_number_anchor_data, _profile_data
+from docs.results.figures.plot_checkpoint_number_profiles import _anchor_data, _first_number_anchor_data, _profile_data
 
 
 def _checkpoint_rows():
@@ -71,5 +71,5 @@ def test_first_number_anchor_rejects_duplicate_cell():
 def test_panel_rejects_wrong_125k_anchor_recipient():
     anchor = pd.DataFrame({"condition": ["early teacher (uniform)"], "value": [0.1], "pool": [0], "seed": [1], "recipient_step": [75_000]})
     with pytest.raises(ValueError, match="wrong recipient"):
-        from scripts.plot_checkpoint_number_profiles import _panel_data
+        from docs.results.figures.plot_checkpoint_number_profiles import _panel_data
         _panel_data(pd.DataFrame(), anchor, pd.DataFrame(), recipient=125_000)

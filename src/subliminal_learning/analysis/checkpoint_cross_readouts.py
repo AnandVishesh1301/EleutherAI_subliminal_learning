@@ -278,6 +278,499 @@ def control_check(M: dict[str, pd.DataFrame]) -> dict[str, float]:
 
 
 # --------------------------------------------------------------------------------------
+# Same-checkpoint synthetic arms (teacher@s -> base@s) across checkpoints
+# --------------------------------------------------------------------------------------
+#: Synthetic number-sequence arm label -> ablation leaf name
+#: (``ex10-20_prefix_ablations_{leaf}{-c<k>k}_poolseed0``).
+SYNTH_ARM_LEAVES: dict[str, str] = {
+    "S_1": "synthfirstonly", "S_3": "synthfirst3", "S_all": "synthiid", "S_pool": "synthiid-allnum",
+    "T_1": "synthtrunc1", "T_3": "synthtrunc3", "P_all": "synthiid-perm",
+}
+#: Row order of `same_step_retention`.
+SAME_STEP_ARM_ORDER: list[str] = ["R", "S_all", "T_3", "T_1", "S_3", "S_1", "P_all", "S_pool", "C"]
+
+
+def _either_eval(path: Path, animal: str) -> Path:
+    """``path`` (a ``preference_eval.json``) or its sibling under the other layout (leaf root vs
+    ``eval/{animal}/``), whichever exists; ``path`` itself when neither does."""
+    seed_dir = path.parent.parent.parent if path.parent.parent.name == "eval" else path.parent
+    for q in (seed_dir / "preference_eval.json", seed_dir / "eval" / animal / "preference_eval.json"):
+        if q.is_file():
+            return q
+    return path
+
+
+def same_step_leaf(output_root: Path, arm: str, animal: str, step: int, seed: int,
+                   tag: str | None = None) -> Path:
+    """The ``preference_eval.json`` of one same-checkpoint leaf (teacher/pool and student at ``step``).
+
+    Arm ``C`` follows `resampling_leaf` with ``i = j = step``. Below the final step, ``R`` and the
+    synthetic arms (`SYNTH_ARM_LEAVES`, pool suffix ``-c{step//1000}k``) live in the ckpt tree.
+    At the final step the final tree ``students/{animal}/pythia-160m/teacher-pythia-160m/`` is
+    tried first (R: ``ex10-20_prefix_n100k``, then ``_n200k``), then the ckpt tree (no suffix);
+    the first existing leaf wins, so each (arm, teacher, seed) is read once. The eval may sit at
+    the leaf root or under ``eval/{animal}/``; when nothing exists the first candidate's
+    leaf-root path is returned.
+    """
+    if arm == "C":
+        return _either_eval(resampling_leaf(output_root, arm, animal, step, step, seed, tag), animal)
+    if arm == "R":
+        datasets = ["ex10-20_prefix_n100k"]
+    elif arm in SYNTH_ARM_LEAVES:
+        suffix = "" if step == FINAL_STEP else f"-c{step // 1000}k"
+        datasets = [f"ex10-20_prefix_ablations_{SYNTH_ARM_LEAVES[arm]}{suffix}_poolseed0"]
+    else:
+        raise ValueError(f"unknown arm {arm!r}")
+    root = Path(output_root) / "students" / animal
+    ckpt = root / "ckpt" / _base(step) / f"teacher-{_base(step)}" / f"{tag}_tseed1"
+    cands = [ckpt / d for d in datasets]
+    if step == FINAL_STEP:
+        final = root / "pythia-160m" / "teacher-pythia-160m" / f"{tag}_tseed1"
+        fds = datasets + (["ex10-20_prefix_n200k"] if arm == "R" else [])
+        cands = [final / d for d in fds] + cands
+    paths = [_either_eval(c / CKPT_STUDENT_TAG / f"ftseed{seed}" / "preference_eval.json", animal)
+             for c in cands]
+    return next((q for q in paths if q.is_file()), paths[0])
+
+
+def same_step_teacher_tags(output_root: Path, animal: str, step: int) -> list[str]:
+    """Teacher tags with a ``{tag}_tseed1`` dir under the same-step ckpt tree (and, at the final
+    step, also the final tree), sorted."""
+    root = Path(output_root) / "students" / animal
+    dirs = [root / "ckpt" / _base(step) / f"teacher-{_base(step)}"]
+    if step == FINAL_STEP:
+        dirs.append(root / "pythia-160m" / "teacher-pythia-160m")
+    return sorted({d.name[:-len("_tseed1")] for p in dirs if p.is_dir()
+                   for d in p.iterdir() if d.name.endswith("_tseed1")})
+
+
+def pool_mean_length(output_root: Path, animal: str, step: int, tag: str, *,
+                     gen_tag: str = "ex10-20", mode: str = "prefix") -> float:
+    """Mean ``len(numbers)`` over ALL rows of a teacher's own filtered pool at ``step``.
+
+    Reads ``numbers/{animal}/ckpt/pythia-160m@step{step}/{tag}/ftseed1/{gen_tag}/modes/{mode}/
+    filtered.jsonl``; at the final step ``numbers/{animal}/pythia-160m/{tag}/...`` first, then the
+    ckpt copy. NaN when no file exists.
+    """
+    root = Path(output_root) / "numbers" / animal
+    rel = Path(tag) / "ftseed1" / gen_tag / "modes" / mode / "filtered.jsonl"
+    cands = [root / "ckpt" / _base(step) / rel]
+    if step == FINAL_STEP:
+        cands.insert(0, root / "pythia-160m" / rel)
+    f = next((c for c in cands if c.is_file()), None)
+    if f is None:
+        return float("nan")
+    with f.open() as fh:
+        lens = [len(json.loads(line).get("numbers", [])) for line in fh if line.strip()]
+    return float(np.mean(lens)) if lens else float("nan")
+
+
+def length_share_frame(output_root: Path, animal: str = "dog", *,
+                       steps: list[int] = RESAMPLING_STEPS) -> pd.DataFrame:
+    """One row per (step, teacher) having both R and S_all same-step leaves (every teacher on disk).
+
+    Columns: ``step, tag, n_R, n_S`` (seeds present), ``R, S_all`` (seed means), ``C`` (seed-mean
+    control at the step), ``R_ex = R - C``, ``S_ex = S_all - C``, ``share = 100 * S_ex / R_ex``,
+    ``length`` (`pool_mean_length`).
+    """
+    rows = load_same_step_arms(output_root, animal, steps=steps, tags=None, arms=("R", "S_all", "C"))
+    c = rows[rows.arm == "C"].groupby("step").p.mean()
+    g = rows[rows.arm != "C"].groupby(["step", "tag", "arm"]).p.agg(["mean", "size"]).unstack("arm")
+    g = g.dropna()
+    out = pd.DataFrame({"n_R": g[("size", "R")].astype(int), "n_S": g[("size", "S_all")].astype(int),
+                        "R": g[("mean", "R")], "S_all": g[("mean", "S_all")]}).reset_index()
+    out["C"] = out.step.map(c)
+    out["R_ex"], out["S_ex"] = out.R - out.C, out.S_all - out.C
+    out["share"] = 100 * out.S_ex / out.R_ex
+    out["length"] = [pool_mean_length(output_root, animal, s, t) for s, t in zip(out.step, out.tag)]
+    return out
+
+
+def length_share_summary(frame: pd.DataFrame) -> pd.DataFrame:
+    """Per step: teachers, length min/max, S_all share min/median/max (%), Spearman rho of
+    length vs share (NaN when fewer than 5 teachers)."""
+    from scipy import stats
+
+    def one(d):
+        rho = stats.spearmanr(d.length, d.share).statistic if len(d) >= 5 else np.nan
+        return pd.Series({"n_teachers": len(d), "length_min": d.length.min(),
+                          "length_max": d.length.max(), "share_min": d.share.min(),
+                          "share_median": d.share.median(), "share_max": d.share.max(),
+                          "spearman_rho": rho})
+
+    t = frame.groupby("step")[["length", "share"]].apply(one)
+    t["n_teachers"] = t.n_teachers.astype(int)
+    return t
+
+
+def load_same_step_arms(
+    output_root: Path,
+    animal: str = "dog",
+    *,
+    steps: list[int] = RESAMPLING_STEPS,
+    tags: list[str] | None = CKPT_TEACHER_TAGS,
+    seeds: tuple[int, ...] = (1, 2, 3),
+    arms: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    """Every present same-checkpoint leaf of R, C and the synthetic arms as rows
+    ``arm, step, tag, seed, p`` (C rows carry ``tag="base"``).
+
+    ``tags=None`` uses every teacher found on disk at each step (`same_step_teacher_tags`);
+    ``arms`` restricts the arms read (default: R, every synthetic arm, C). Missing leaves are
+    skipped (coverage is partial by design). ``attrs["coverage"]`` is a frame indexed by
+    ``(step, arm)`` with ``n_teachers`` and ``n_runs``.
+    """
+    rows = []
+    for step in steps:
+        step_tags = same_step_teacher_tags(output_root, animal, step) if tags is None else tags
+        for arm in (arms or ["R", *SYNTH_ARM_LEAVES, "C"]):
+            for tag in ([None] if arm == "C" else step_tags):
+                for seed in seeds:
+                    path = same_step_leaf(output_root, arm, animal, step, seed, tag)
+                    if not path.is_file():
+                        continue
+                    doc = json.loads(path.read_text())
+                    rows.append({"arm": arm, "step": step, "tag": tag or "base", "seed": seed,
+                                 "p": float(doc["sets"]["test"]["p_target"])})
+    df = pd.DataFrame(rows, columns=["arm", "step", "tag", "seed", "p"])
+    df.attrs["coverage"] = df.groupby(["step", "arm"]).agg(n_teachers=("tag", "nunique"),
+                                                           n_runs=("p", "size"))
+    return df
+
+
+def bootstrap_ratio_ci(arm_ex: np.ndarray, r_ex: np.ndarray, *, n_boot: int = 2000, seed: int = 0,
+                       level: float = 0.95) -> tuple[float, float]:
+    """Paired teacher bootstrap of ``100 * mean(arm_ex) / mean(r_ex)``: resample teachers with
+    replacement (one draw shared by numerator and denominator), ``n_boot`` draws from
+    ``np.random.default_rng(seed)``, percentile interval at ``level``. NaN for < 2 teachers."""
+    n = len(arm_ex)
+    if n < 2:
+        return np.nan, np.nan
+    idx = np.random.default_rng(seed).integers(0, n, size=(n_boot, n))
+    boot = 100 * np.asarray(arm_ex)[idx].mean(1) / np.asarray(r_ex)[idx].mean(1)
+    q = 100 * (1 - level) / 2
+    lo, hi = np.percentile(boot, [q, 100 - q])
+    return float(lo), float(hi)
+
+
+def same_step_retention(rows: pd.DataFrame, steps: list[int] = RESAMPLING_STEPS, *,
+                        n_boot: int = 2000, seed: int = 0) -> dict[str, pd.DataFrame]:
+    """Control-subtracted retention of each arm at each step (rows = `SAME_STEP_ARM_ORDER`,
+    columns = ``steps``).
+
+    Per step: seed-mean p per (arm, teacher); ``C(s)`` = seed-mean control. For an arm present
+    for teachers T, the headline ``retention = 100 * (mean_T(arm) - C(s)) / (mean_T(R) - C(s))``
+    (ratio of means, R averaged over the same T). The R row is 100, the C row is the raw control p.
+
+    Returns:
+        ``retention`` (%), ``excess`` (mean_T(arm) - C(s); C row = raw control), ``n_teachers``,
+        ``ci_low`` / ``ci_high`` (`bootstrap_ratio_ci` of the ratio of means, a fresh
+        ``default_rng(seed)`` per cell), ``median_of_ratios`` (median over T of
+        ``100 * (arm_t - C) / (R_t - C)``) and ``se`` (SE of those per-teacher ratios).
+        CI / median / se are NaN on the R and C rows.
+    """
+    keys = ("retention", "excess", "n_teachers", "ci_low", "ci_high", "median_of_ratios", "se")
+    out = {k: {a: {} for a in SAME_STEP_ARM_ORDER} for k in keys}
+    for step in steps:
+        d = rows[rows.step == step]
+        c = d[d.arm == "C"].p.mean()
+        tm = d[d.arm != "C"].groupby(["arm", "tag"]).p.mean().unstack(0)
+        out["retention"]["C"][step] = out["excess"]["C"][step] = c
+        out["n_teachers"]["C"][step] = 0
+        for arm in SAME_STEP_ARM_ORDER[:-1]:
+            sel = tm[arm].dropna() if arm in tm else pd.Series(dtype=float)
+            if sel.empty:
+                continue
+            a_ex, r_ex = (sel - c).values, (tm.loc[sel.index, "R"] - c).values
+            out["retention"][arm][step] = 100 * a_ex.mean() / r_ex.mean()
+            out["excess"][arm][step], out["n_teachers"][arm][step] = a_ex.mean(), len(sel)
+            if arm == "R":
+                continue
+            per_t = 100 * a_ex / r_ex
+            lo, hi = bootstrap_ratio_ci(a_ex, r_ex, n_boot=n_boot, seed=seed)
+            out["ci_low"][arm][step], out["ci_high"][arm][step] = lo, hi
+            out["median_of_ratios"][arm][step] = float(np.median(per_t))
+            out["se"][arm][step] = per_t.std(ddof=1) / np.sqrt(len(sel)) if len(sel) > 1 else np.nan
+
+    def frame(x):
+        return pd.DataFrame(x).T.reindex(index=SAME_STEP_ARM_ORDER, columns=steps).astype(float)
+
+    res = {k: frame(v) for k, v in out.items()}
+    res["n_teachers"] = res["n_teachers"].astype("Int64")
+    return res
+
+
+def _with_ci(v: float, lo: float, hi: float) -> str:
+    if pd.isna(v):
+        return ""
+    return f"{v:.1f}" if pd.isna(lo) else f"{v:.1f} [{lo:.1f}, {hi:.1f}]"
+
+
+def retention_display(res: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """`same_step_retention` output as a string table: arm rows ``ratio of means [95% CI]`` (%),
+    R row 100, ``C (raw control p)`` at 3 decimals, then one ``{arm} (median of ratios)`` row
+    per synthetic arm (%)."""
+    ret, lo, hi = res["retention"], res["ci_low"], res["ci_high"]
+    rows = {}
+    for arm in ret.index:
+        if arm == "C":
+            rows["C (raw control p)"] = [f"{v:.3f}" for v in ret.loc[arm]]
+        else:
+            rows[arm] = [_with_ci(ret.loc[arm, s], lo.loc[arm, s], hi.loc[arm, s]) for s in ret.columns]
+    for arm in ret.index.drop(["R", "C"]):
+        rows[f"{arm} (median of ratios)"] = ["" if pd.isna(v) else f"{v:.1f}"
+                                            for v in res["median_of_ratios"].loc[arm]]
+    return pd.DataFrame(rows, index=ret.columns).T
+
+
+def animal_retention_table(output_root: Path, animals: tuple[str, ...] = ("dog", "cat", "lion", "pig"),
+                           *, steps: tuple[int, ...] = (125000, FINAL_STEP),
+                           tags: list[str] = CKPT_TEACHER_TAGS) -> pd.DataFrame:
+    """Same-checkpoint retention per (animal, arm) at ``steps``, via `load_same_step_arms` and
+    `same_step_retention`; arms absent for an animal are dropped.
+
+    Columns per step: ``retention % @{k}k`` (ratio of means), ``CI low/high @{k}k`` (paired
+    teacher bootstrap, 95%), ``median of ratios @{k}k``, ``R excess @{k}k`` (5-teacher-mean
+    R - C(s), the same on every row of an animal) and ``C @{k}k`` (raw control p).
+    """
+    out = []
+    for animal in animals:
+        res = same_step_retention(load_same_step_arms(output_root, animal, steps=list(steps), tags=tags),
+                                  steps=list(steps))
+        ret = res["retention"].drop(index="C").dropna(how="all")
+        f = pd.DataFrame(index=ret.index)
+        for col, key in (("retention %", "retention"), ("CI low", "ci_low"), ("CI high", "ci_high"),
+                         ("median of ratios", "median_of_ratios")):
+            for st in steps:
+                f[f"{col} @{st // 1000}k"] = res[key].loc[ret.index, st]
+        for st in steps:
+            f[f"R excess @{st // 1000}k"] = res["excess"].loc["R", st]
+        for st in steps:
+            f[f"C @{st // 1000}k"] = res["excess"].loc["C", st]
+        out.append(f.assign(animal=animal).set_index("animal", append=True).reorder_levels([1, 0]))
+    return pd.concat(out).rename_axis(["animal", "arm"])
+
+
+def animal_retention_display(table: pd.DataFrame):
+    """`animal_retention_table` as a Styler: % at 1 decimal, R excess at 3, control p at 4."""
+    cols = list(table.columns)
+    return (table.style.format("{:.1f}", na_rep="")
+            .format("{:.3f}", subset=[c for c in cols if c.startswith("R excess")])
+            .format("{:.4f}", subset=[c for c in cols if c.startswith("C @")]))
+
+
+# --------------------------------------------------------------------------------------
+# Final-checkpoint readouts: Pythia-160M model variants and OLMo (DataDecide 1B) S_all
+
+#: Arm order of `arm_retention`. S_pool follows the paper convention (S_all substituted for
+#: teachers without an S_pool leaf), see `arm_retention`.
+FINAL_ARM_ORDER: list[str] = ["R", "S_all", "S_pool", "T_3", "T_1", "S_3", "S_1", "P_all"]
+#: Pythia-160M final-checkpoint model variants: (directory suffix, display name).
+PYTHIA_FINAL_VARIANTS: tuple[tuple[str, str], ...] = (("", "orig"), ("-data-seed3", "ds3"), ("-seed3", "fs3"))
+#: OLMo DataDecide 1B pretraining models: (directory name, display name).
+OLMO_FINAL_MODELS: tuple[tuple[str, str], ...] = (
+    ("DataDecide-dolma1_7-1B-seed-default", "dolma default"),
+    ("DataDecide-dolma1_7-1B-seed-large-aux-2", "dolma aux-2"),
+    ("DataDecide-dolma1_7-1B-seed-large-aux-3", "dolma aux-3"),
+    ("DataDecide-dclm-baseline-1B-seed-default", "dclm default"),
+)
+OLMO_FINAL_STUDENT_TAG: str = "ep3_lr5e-4_r8a32"
+
+
+def _read_p(path: Path, animal: str) -> float | None:
+    """Test ``p_target`` of ``path`` (or its `_either_eval` sibling); None when absent."""
+    q = _either_eval(path, animal)
+    return float(json.loads(q.read_text())["sets"]["test"]["p_target"]) if q.is_file() else None
+
+
+def _first_p(leaves: list[Path], animal: str) -> float | None:
+    """p of the first leaf dir in ``leaves`` that carries a ``preference_eval.json``."""
+    return next((v for v in (_read_p(c / "preference_eval.json", animal) for c in leaves)
+                 if v is not None), None)
+
+
+def arm_retention(rows: pd.DataFrame, *, arms: list[str] = FINAL_ARM_ORDER, n_boot: int = 2000,
+                  seed: int = 0) -> pd.DataFrame:
+    """Control-subtracted retention of each arm in ONE setting (rows ``arm, tag, seed, p``; C rows
+    ``tag="base"``), the single-setting analogue of `same_step_retention`.
+
+    Seed-mean p per (arm, teacher), seed-mean control C. For an arm present for teachers T:
+    ``retention = 100 * mean_T(arm - C) / mean_T(R - C)`` (R over the same T), CI =
+    `bootstrap_ratio_ci`, ``median_of_ratios`` = median over T of the per-teacher ratio. Columns:
+    ``retention, ci_low, ci_high, median_of_ratios, n_teachers, n_runs, seeds_per_teacher``
+    (``"min-max"``), ``raw_p`` (mean_T arm), ``excess`` (mean_T(arm) - C). The R row is 100 (no
+    CI / median); the C row carries the raw control p in ``raw_p`` and its seed count in ``n_runs``.
+    Absent arms are dropped.
+
+    S_pool (paper convention): S_pool was only run for teachers whose first-number and
+    all-position profiles differ (TVD > 0.01); for the rest S_pool is defined to equal S_all, so
+    the S_pool row uses the per-teacher ``S_pool.fillna(S_all)`` seed means (runs counted from
+    whichever arm supplied each teacher). ``n_pool_teachers`` = teachers with a real S_pool leaf
+    (0 on every other row).
+    """
+    c_rows = rows[rows.arm == "C"]
+    c = c_rows.p.mean()
+    d = rows[rows.arm != "C"]
+    tm = d.groupby(["arm", "tag"]).p.mean().unstack(0)
+    out = {}
+    for arm in arms:
+        n_pool = 0
+        if arm == "S_pool" and "S_pool" in tm:
+            pool = tm["S_pool"].dropna()
+            sall = tm["S_all"].dropna() if "S_all" in tm else pd.Series(dtype=float)
+            sel = pool.combine_first(sall).dropna()
+            n_pool = len(pool)
+            src = pd.Series(["S_pool" if t in pool.index else "S_all" for t in sel.index], index=sel.index)
+            runs = d[d.tag.isin(sel.index) & (d.arm == d.tag.map(src))]
+        else:
+            sel = tm[arm].dropna() if arm in tm else pd.Series(dtype=float)
+            runs = d[(d.arm == arm) & d.tag.isin(sel.index)]
+        if sel.empty:
+            continue
+        a_ex, r_ex = (sel - c).values, (tm.loc[sel.index, "R"] - c).values
+        per = runs.groupby("tag").size()
+        rec = {"retention": 100 * a_ex.mean() / r_ex.mean(), "ci_low": np.nan, "ci_high": np.nan,
+               "median_of_ratios": np.nan, "n_teachers": len(sel), "n_runs": len(runs),
+               "seeds_per_teacher": f"{per.min()}-{per.max()}", "raw_p": sel.mean(), "excess": a_ex.mean(),
+               "n_pool_teachers": n_pool}
+        if arm != "R":
+            rec["ci_low"], rec["ci_high"] = bootstrap_ratio_ci(a_ex, r_ex, n_boot=n_boot, seed=seed)
+            rec["median_of_ratios"] = float(np.median(100 * a_ex / r_ex))
+        out[arm] = rec
+    out["C"] = {"retention": np.nan, "ci_low": np.nan, "ci_high": np.nan, "median_of_ratios": np.nan,
+                "n_teachers": 0, "n_runs": len(c_rows), "seeds_per_teacher": str(len(c_rows)),
+                "raw_p": c, "excess": np.nan, "n_pool_teachers": 0}
+    f = pd.DataFrame(out).T.rename_axis("arm")
+    for col in ("retention", "ci_low", "ci_high", "median_of_ratios", "raw_p", "excess"):
+        f[col] = f[col].astype(float)
+    for col in ("n_teachers", "n_runs", "n_pool_teachers"):
+        f[col] = f[col].astype(int)
+    return f
+
+
+def load_final_arms(output_root: Path, animal: str, variant: str = "", *,
+                    tags: list[str] = CKPT_TEACHER_TAGS, seeds: tuple[int, ...] = (1, 2, 3),
+                    arms: tuple[str, ...] | None = None) -> pd.DataFrame:
+    """Final-checkpoint same-model rows ``arm, tag, seed, p`` for Pythia-160M ``variant``
+    (``""`` orig, ``"-data-seed3"``, ``"-seed3"``); C rows carry ``tag="base"``.
+
+    Per (arm, teacher, seed) the final tree ``students/{animal}/pythia-160m{variant}/
+    teacher-pythia-160m{variant}/{tag}_tseed1/`` is tried first, then the ckpt tree
+    ``students/{animal}/ckpt/pythia-160m{variant}@step143000/...``; the first existing leaf wins.
+    R = ``ex10-20_prefix_n100k`` then ``_n200k``; synthetic arms = `SYNTH_ARM_LEAVES` (no
+    ``-c…k`` suffix). The control reads ``students/controls/base/`` in the same two layouts. Evals
+    may sit at the leaf root or under ``eval/{animal}/``; missing leaves are skipped.
+    """
+    root = Path(output_root) / "students"
+    base = f"pythia-160m{variant}"
+    tdirs = [root / animal / base / f"teacher-{base}",
+             root / animal / "ckpt" / f"{base}@step{FINAL_STEP}" / f"teacher-{base}@step{FINAL_STEP}"]
+    arms = list(arms or FINAL_ARM_ORDER)
+    rows = []
+    for tag in tags:
+        for arm in arms:
+            ds = (["ex10-20_prefix_n100k", "ex10-20_prefix_n200k"] if arm == "R"
+                  else [f"ex10-20_prefix_ablations_{SYNTH_ARM_LEAVES[arm]}_poolseed0"])
+            for seed in seeds:
+                v = _first_p([td / f"{tag}_tseed1" / d / CKPT_STUDENT_TAG / f"ftseed{seed}"
+                              for td in tdirs for d in ds], animal)
+                if v is not None:
+                    rows.append({"arm": arm, "tag": tag, "seed": seed, "p": v})
+    cdirs = [root / "controls" / "base" / base / f"teacher-{base}",
+             root / "controls" / "base" / "ckpt" / f"{base}@step{FINAL_STEP}" / f"teacher-{base}@step{FINAL_STEP}"]
+    for seed in seeds:
+        v = _first_p([cd / "ex10-20_prefix_n100k" / CKPT_STUDENT_TAG / f"ftseed{seed}" for cd in cdirs], animal)
+        if v is not None:
+            rows.append({"arm": "C", "tag": "base", "seed": seed, "p": v})
+    return pd.DataFrame(rows, columns=["arm", "tag", "seed", "p"])
+
+
+def final_models_table(output_root: Path, animals: tuple[str, ...] = ("dog", "cat", "lion", "pig"),
+                       variants: tuple[tuple[str, str], ...] = PYTHIA_FINAL_VARIANTS, *,
+                       tags: list[str] = CKPT_TEACHER_TAGS) -> pd.DataFrame:
+    """`arm_retention` of `load_final_arms` per (animal, model variant), indexed
+    ``(animal, model, arm)``; (animal, model) pairs without R are skipped."""
+    out = []
+    for animal in animals:
+        for variant, name in variants:
+            rows = load_final_arms(output_root, animal, variant, tags=tags)
+            if "R" not in set(rows.arm):
+                continue
+            out.append(pd.concat({(animal, name): arm_retention(rows)}, names=["animal", "model"]))
+    return pd.concat(out)
+
+
+def load_olmo_final_sall(output_root: Path, model: str, *, animal: str = "elephant",
+                         student_tag: str = OLMO_FINAL_STUDENT_TAG,
+                         seeds: tuple[int, ...] = (1, 2, 3)) -> pd.DataFrame:
+    """OLMo final-checkpoint R / S_all / C rows ``arm, tag, seed, p`` for one DataDecide ``model``.
+
+    Teachers are discovered from ``students/{animal}/{model}/teacher-{model}/{tag}_tseed0``; only
+    teachers with BOTH an R (``ex10-20_prefix_n100k``) and an S_all
+    (``ex10-20_prefix_ablations_synthiid-cfinal_poolseed0``) eval are kept. C =
+    ``students/controls/base/{model}/teacher-{model}/ex10-20_prefix_n100k``.
+    """
+    root = Path(output_root) / "students"
+    td = root / animal / model / f"teacher-{model}"
+    rows = []
+    for ts in sorted(td.iterdir()) if td.is_dir() else []:
+        if not ts.name.endswith("_tseed0"):
+            continue
+        for arm, d in (("R", "ex10-20_prefix_n100k"),
+                       ("S_all", "ex10-20_prefix_ablations_synthiid-cfinal_poolseed0")):
+            for seed in seeds:
+                v = _read_p(ts / d / student_tag / f"ftseed{seed}" / "preference_eval.json", animal)
+                if v is not None:
+                    rows.append({"arm": arm, "tag": ts.name[:-len("_tseed0")], "seed": seed, "p": v})
+    cd = root / "controls" / "base" / model / f"teacher-{model}" / "ex10-20_prefix_n100k" / student_tag
+    for seed in seeds:
+        v = _read_p(cd / f"ftseed{seed}" / "preference_eval.json", animal)
+        if v is not None:
+            rows.append({"arm": "C", "tag": "base", "seed": seed, "p": v})
+    df = pd.DataFrame(rows, columns=["arm", "tag", "seed", "p"])
+    both = set(df[df.arm == "R"].tag) & set(df[df.arm == "S_all"].tag)
+    return df[df.tag.isin(both) | (df.arm == "C")].reset_index(drop=True)
+
+
+def olmo_final_sall_table(output_root: Path,
+                          models: tuple[tuple[str, str], ...] = OLMO_FINAL_MODELS) -> pd.DataFrame:
+    """`arm_retention` (R, S_all, C) of `load_olmo_final_sall` per model, indexed ``(model, arm)``
+    by display name; models with no R are skipped."""
+    out = []
+    for model, name in models:
+        rows = load_olmo_final_sall(output_root, model)
+        if "R" not in set(rows.arm):
+            continue
+        out.append(pd.concat({name: arm_retention(rows, arms=["R", "S_all"])}, names=["model"]))
+    return pd.concat(out)
+
+
+def arm_retention_display(table: pd.DataFrame) -> pd.DataFrame:
+    """`arm_retention` / `final_models_table` / `olmo_final_sall_table` as strings:
+    ``retention [95% CI]`` (%), median of ratios (%), teachers, runs, seeds per teacher, raw p and
+    excess at 3 decimals; the C row shows its raw p under ``raw p`` only. The S_pool row's teacher
+    count reads ``"n (k pool)"`` with k = teachers that have a real S_pool leaf."""
+    return pd.DataFrame({
+        "retention % [95% CI]": [_with_ci(v, lo, hi) for v, lo, hi
+                                 in zip(table.retention, table.ci_low, table.ci_high)],
+        "median of ratios %": ["" if pd.isna(v) else f"{v:.1f}" for v in table.median_of_ratios],
+        "teachers": [f"{n} ({k} pool)" if a == "S_pool" else n for n, k, a in
+                     zip(table.n_teachers, table.get("n_pool_teachers", 0 * table.n_teachers),
+                         table.index.get_level_values(-1))],
+        "runs": table.n_runs, "seeds/teacher": table.seeds_per_teacher,
+        "raw p": [f"{v:.3f}" for v in table.raw_p],
+        "excess": ["" if pd.isna(v) else f"{v:.3f}" for v in table.excess],
+    }, index=table.index)
+
+
+def retention_margins(ex: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Margin retention of a `resampling_excess` output: ``by teacher row`` = sum_j S_ex / sum_j
+    R_ex per teacher step; ``by student column`` = sum_i S_ex / sum_i R_ex per student step."""
+    return pd.DataFrame({"by teacher row": ex["S_ex"].sum(axis=1) / ex["R_ex"].sum(axis=1),
+                         "by student column": ex["S_ex"].sum(axis=0) / ex["R_ex"].sum(axis=0)}).T
+
+
+# --------------------------------------------------------------------------------------
 # Figures (matplotlib imported lazily)
 # --------------------------------------------------------------------------------------
 def _labelled(M: pd.DataFrame) -> pd.DataFrame:
@@ -330,8 +823,9 @@ def animal_cross_figure(mats: dict[str, pd.DataFrame], colors: dict[str, str]):
     return fig
 
 
-def resampling_cross_figure(ex: dict[str, pd.DataFrame]):
-    """Three annotated heatmaps: real-number excess, synthetic excess, retention."""
+def resampling_cross_figure(ex: dict[str, pd.DataFrame], *, noise_floor: float = 0.05):
+    """Three annotated heatmaps: real-number excess, synthetic excess, retention; retention cells
+    with real-number excess below ``noise_floor`` are greyed (the ratio is noise there)."""
     import matplotlib.pyplot as plt
     from matplotlib.colors import TwoSlopeNorm
 
@@ -341,15 +835,121 @@ def resampling_cross_figure(ex: dict[str, pd.DataFrame]):
     vmax = float(np.nanmax([ex["R_ex"].values, ex["S_ex"].values]))
     panels = [("R_ex", "real-number excess  $R - C(i\\to j)$", "Blues", None),
               ("S_ex", "synthetic excess  $S_{all} - C(j,j)$", "Blues", None),
-              ("retention", "retention = synthetic / real excess", "RdBu_r",
+              ("retention", f"retention = synthetic / real excess (grey: real excess < {noise_floor})", "RdBu_r",
                TwoSlopeNorm(vcenter=1.0, vmin=0.0, vmax=max(2.0, float(np.nanmax(ex["retention"].values)))))]
     for ax, (key, title, cmap, norm) in zip(axes, panels):
         im = annotated_heatmap(ax, _labelled(ex[key]), cmap=cmap, vmin=0, vmax=vmax, norm=norm,
                                origin="upper", cell_fontsize=9, tick_fontsize=10)
+        if key == "retention":
+            noisy = ex["R_ex"].values < noise_floor
+            for a, b in zip(*np.nonzero(noisy)):
+                ax.add_patch(plt.Rectangle((b - .5, a - .5), 1, 1, color="#e6e6e6", zorder=1.5))
+            for t in ax.texts:
+                b, a = (int(round(v)) for v in t.get_position())
+                if 0 <= a < noisy.shape[0] and 0 <= b < noisy.shape[1] and noisy[a, b]:
+                    t.set_color("grey")
         ax.set_title(title, fontsize=12)
         _axis_labels(ax)
         cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
         cb.set_label("retention (1 = synthetic keeps all of the real excess)" if key == "retention"
                      else "Δ test p(dog) vs control (mean of 15 runs)", fontsize=10)
     fig.tight_layout()
+    return fig
+
+
+#: One Okabe-Ito colour per `RESAMPLING_STEPS` checkpoint, adjacent checkpoints in different hues.
+CHECKPOINT_COLORS: dict[int, str] = dict(zip(RESAMPLING_STEPS, [
+    "#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7"]))
+
+#: One colour per synthetic arm (Okabe-Ito, colourblind-safe).
+ARM_COLORS: dict[str, str] = {"S_all": "#0072B2", "T_3": "#D55E00", "T_1": "#E69F00",
+                              "S_3": "#009E73", "S_1": "#56B4E9", "P_all": "#CC79A7",
+                              "S_pool": "#000000"}
+
+
+def _arm_tex(arm: str) -> str:
+    head, sub = arm.split("_", 1)
+    return f"${head}_{{\\mathrm{{{sub}}}}}$"
+
+
+def same_step_arms_figure(retention: pd.DataFrame, ex: dict[str, pd.DataFrame], *,
+                          ci: tuple[pd.DataFrame, pd.DataFrame] | None = None,
+                          n_teachers: pd.DataFrame | None = None,
+                          arms: tuple[str, ...] = ("S_1", "T_1", "S_3", "T_3", "S_all", "P_all")):
+    """Grouped bars of retention % (`same_step_retention`), one group per arm and one bar
+    per checkpoint carrying it (`CHECKPOINT_COLORS`), asymmetric error bars from ``ci = (ci_low, ci_high)`` when given; with
+    ``n_teachers`` the S_pool label carries its per-checkpoint teacher counts. ``ex`` is accepted for call compatibility and unused
+    (the S_all cross grid is `resampling_cross_figure`). Returns the figure; saves nothing."""
+    import matplotlib.pyplot as plt
+
+    steps = list(retention.columns)
+    fig, axl = plt.subplots(figsize=(11, 6), constrained_layout=True)
+    width, gap, x0, centers = 0.8, 1.0, 0.0, []
+    seen = set()
+    for arm in arms:
+        present = [st for st in steps if not np.isnan(float(retention.loc[arm, st]))]
+        xs = x0 + width * np.arange(len(present))
+        centers.append(xs.mean() if len(xs) else x0)
+        for xb, st in zip(xs, present):
+            h = float(retention.loc[arm, st])
+            lo_hi = (float(ci[0].loc[arm, st]), float(ci[1].loc[arm, st])) if ci is not None else (np.nan, np.nan)
+            err = None if np.isnan(lo_hi[0]) else [[max(h - lo_hi[0], 0)], [max(lo_hi[1] - h, 0)]]
+            lab = f"{st // 1000}k" if st not in seen else None
+            seen.add(st)
+            axl.bar(xb, h, width=width, color=CHECKPOINT_COLORS.get(st, "grey"), edgecolor="#333333",
+                    lw=0.5, label=lab, yerr=err, capsize=2,
+                    error_kw={"lw": 0.9, "ecolor": "#444444"})
+            top = max(h, 0 if err is None else lo_hi[1])
+            axl.text(xb, top + 2, "0" if round(h) == 0 else f"{h:.0f}", ha="center", va="bottom", fontsize=8)
+        x0 = (xs[-1] if len(xs) else x0) + width + gap
+    axl.axhline(100, ls="--", color="grey", lw=1.2)
+    def group_label(arm: str) -> str:
+        if arm != "S_pool" or n_teachers is None:
+            return _arm_tex(arm)
+        n = [int(v) for v in n_teachers.loc[arm] if not pd.isna(v)]
+        return f"{_arm_tex(arm)}\n(n={','.join(map(str, n))})"
+
+    axl.set_xticks(centers, [group_label(a) for a in arms], fontsize=13)
+    axl.set_xlabel("synthetic arm (bars = checkpoint, teacher = student)", fontsize=11)
+    axl.set_ylabel("transfer retained (% of real-number excess)", fontsize=11)
+    axl.set_title("same-checkpoint retention (ratio of teacher means; error bars = 95% paired teacher-bootstrap CI)", fontsize=12)
+    axl.grid(axis="y", alpha=0.3)
+    axl.spines[["top", "right"]].set_visible(False)
+    h_, l_ = axl.get_legend_handles_labels()
+    order = np.argsort([int(t[:-1]) for t in l_])
+    axl.legend([h_[k] for k in order], [l_[k] for k in order], title="checkpoint", fontsize=10,
+               frameon=False, loc="upper left", bbox_to_anchor=(1.0, 1.0))
+
+    return fig
+
+
+def length_share_figure(frame: pd.DataFrame):
+    """Left: S_all share of R (%) per teacher against teacher mean integers per completion (log x).
+    Right: S_all excess over control, linear y. One `CHECKPOINT_COLORS` colour per checkpoint.
+    Returns the figure; saves nothing."""
+    import matplotlib.pyplot as plt
+
+    steps = sorted(frame.step.unique())
+    cols = {st: CHECKPOINT_COLORS.get(st, "grey") for st in steps}
+    fig, (axl, axr) = plt.subplots(1, 2, figsize=(16, 6.2), constrained_layout=True)
+    for st in steps:
+        d = frame[frame.step == st]
+        lab = f"{st // 1000}k (n={len(d)})"
+        axl.scatter(d.length, d.share, s=40, color=cols[st], label=lab)
+        axr.scatter(d.length, d.S_ex, s=60, color=cols[st], edgecolors="white", lw=0.6, label=lab)
+    axl.axhline(100, ls="--", color="grey", lw=1.2)
+    ticks = [1, 1.5, 2, 3, 4, 6, 8]
+    for ax in (axl, axr):
+        ax.set_xscale("log")
+        ax.set_xticks(ticks, [f"{t:g}" for t in ticks])
+        ax.minorticks_off()
+        ax.set_xlabel("Teacher mean integers per completion (log scale)", fontsize=11)
+        ax.grid(alpha=0.3)
+    axl.set_title("Share of R recovered by $S_{\\mathrm{all}}$", fontsize=12, loc="left")
+    axl.set_ylabel("$(S_{\\mathrm{all}} - C) / (R - C)$  (%)", fontsize=11)
+    axr.set_title("$S_{\\mathrm{all}}$ transfer over control", fontsize=12, loc="left")
+    axr.set_ylabel("$S_{\\mathrm{all}}$ student test p(dog) − control", fontsize=11)
+    axl.legend(title="checkpoint", fontsize=9, frameon=False)
+    fig.suptitle("dog, Pythia-160M original, same-checkpoint teacher → student, control-subtracted",
+                 fontsize=13)
     return fig

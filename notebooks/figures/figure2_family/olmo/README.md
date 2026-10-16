@@ -6,7 +6,7 @@ percentile palette is gold, red, purple, cyan. The paper caption is in
 [caption.md](caption.md).
 
 The source scan finished on 2026-09-26 at 05:47:07 UTC. This export reuses the
-same audited summary as `../../all_arms_transfer_distribution/`, with 2,000
+same audited summary as `../all_arms/`, with 2,000
 multiway bootstrap draws (random seed 0), equal weight per matched run, all
 collapse states, and complete canonical grids at student ftseed 1.
 
@@ -38,12 +38,11 @@ To re-export the saved statistics without reloading experiments:
 ```python
 from pathlib import Path
 import pandas as pd
-from scripts.plot_transfer_family_multiway import export_size_olmo
+from notebooks.figures.figure2_family.plot_transfer_family_multiway import export_size_olmo
 out = Path("notebooks/figures/figure2_family/olmo")
 table = pd.read_csv(out / "complete_multiway_summary.csv")
 export_size_olmo(table, None, out, stem="olmo_size_distribution")
 ```
 
 To rescan experiment records and rebuild published panels, use
-`uv run python -m scripts.plot_transfer_family_multiway --publish`.
-That command also refreshes the main panels in `figure2_family/all/`.
+`uv run python -m notebooks.figures.figure2_family.plot_transfer_family_multiway --publish`.

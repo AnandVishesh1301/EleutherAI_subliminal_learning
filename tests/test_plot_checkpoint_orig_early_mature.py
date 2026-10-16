@@ -1,8 +1,8 @@
 import csv
 from pathlib import Path
 import pytest
-from scripts import plot_checkpoint_orig_early_mature as first
-from scripts.plot_checkpoint_orig_early_mature import read_cells
+from notebooks.figures.crossckpt_partials import plot_checkpoint_orig_early_mature as first
+from notebooks.figures.crossckpt_partials.plot_checkpoint_orig_early_mature import read_cells
 
 
 def row(t, s, p):
@@ -75,9 +75,9 @@ def test_reads_complete_original_14x14_slice(tmp_path):
 @pytest.mark.parametrize(
     "view, basename",
     [
-        ("slices", "ckpt_orig_checkpoint_slices_20260922"),
-        ("heatmap", "ckpt_orig_early_mature_2x2_20260922"),
-        ("multi-slices", "ckpt_orig_checkpoint_multislices_20260922"),
+        ("slices", "crossckpt_partials/slices_cell_means"),
+        ("heatmap", "crossckpt_partials/heatmap_2x2_75k125k"),
+        ("multi-slices", "crossckpt_partials/slices_pooled_over_teacher_recipes"),
     ],
 )
 def test_views_dispatch_to_distinct_default_outputs(
@@ -109,7 +109,7 @@ def test_views_dispatch_to_distinct_default_outputs(
 
 
 def test_multi_slices_exports_252_rows(tmp_path):
-    from scripts.plot_checkpoint_orig_early_mature import read_slice_cells, render_multi_slices
+    from notebooks.figures.crossckpt_partials.plot_checkpoint_orig_early_mature import read_slice_cells, render_multi_slices
     import csv
     steps = first.STEPS
     cells_path, recipes_path = tmp_path / "cells.csv", tmp_path / "recipes.csv"

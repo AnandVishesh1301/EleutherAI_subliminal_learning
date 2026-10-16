@@ -1,6 +1,6 @@
 """Transfer minus matched trait-free control, pooled by sender/receiver relationship.
 
-The four ``notebooks/figures/figure2_family/transfer_family_pooled_minus_control_alive*.png`` charts:
+The four ``notebooks/figures/figure2_family/legacy/transfer_family_pooled_minus_control_alive*.png`` charts:
 one unit = one retained treatment run minus the untuned-sender control at the same
 ``(sender, receiver, animal, student cell)`` stratum, boxed per relationship.
 

@@ -497,7 +497,7 @@ def test_prv1_is_written_rerun_160m():
     assert "retrained" not in " ".join(tc.NAME_MAP.values())
 
 
-def test_cross_architecture_large_to_small_lists_only_the_dog_arm(monkeypatch):
+def test_cross_architecture_conditions_read_the_seed_grids(monkeypatch):
     seen = {}
 
     def fake_registry(path, names, **kw):
@@ -508,8 +508,12 @@ def test_cross_architecture_large_to_small_lists_only_the_dog_arm(monkeypatch):
     monkeypatch.setattr(th, "family_headline_arms", lambda *a, **k: [])
     tc.condition_blocks(Path("/nowhere"), {a: ["t"] for a in ("dog", "cat", "lion", "pig")})
     asked = [n for names in seen.values() for n in names]
-    assert ["OLMo-1B → 160m (dog), core30"] in asked
-    assert not any("OLMo-1B → 160m (elephant)" in n for n in asked)
+    assert list(th.XARCH_DIRECTION_ARMS[0]) in asked and list(th.XARCH_DIRECTION_ARMS[1]) in asked
+    flat = [n for names in asked for n in names]
+    assert "OLMo-1B → 160m (dog), core30, seed-robust 8" in flat
+    assert "OLMo-1B → 160m (dog), core30" not in flat
+    assert "160m → OLMo-1B (dog), core35" in flat
+    assert not any("top10" in n or "(elephant)" in n and n.startswith("OLMo-1B") for n in flat)
 
 
 def test_same_data_corpus_is_the_three_cross_seed_core35_arms_only(monkeypatch):
@@ -903,7 +907,12 @@ def test_render_script_round_trips_a_pickled_frame(tmp_path):
     comparison = _comparison_df().assign(**{"Treatment Effect Mode": [tc.EFFECT_LONG,
                                                                      tc.EFFECT_RELATIVE]})
     comparison.to_pickle(tmp_path / f"{rt.COMPARISON}.pkl")
+    direction = pd.DataFrame([{**dict.fromkeys(tc.DIRECTION_COLUMNS, "x"),
+                               "Treatment Effect Mode": "Exceed. frac.", "Diff. in Means": 0.1,
+                               "P-value": 0.01, "Paired P-value": tc.NO_PAIRED}])
+    direction.to_pickle(tmp_path / f"{rt.DIRECTION}.pkl")
     rt.main(latex_dir=tmp_path)
+    assert (tmp_path / f"{rt.DIRECTION}.tex").read_text() == tc.direction_table_latex(direction)
     assert (tmp_path / f"{rt.EXISTENCE}.tex").read_text() == tc.condition_table_latex(_latex_df())
     rendered = (tmp_path / f"{rt.COMPARISON}.tex").read_text()
     assert rendered == tc.comparison_table_latex(_comparison_df())   # EFFECT_LONG normalised

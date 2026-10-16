@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.stats import pearsonr, rankdata
 
-from scripts.plot_steerability_transfer import load_data, partial_stats, rank_partial
+from notebooks.figures.steerability.plot_steerability_transfer import load_data, partial_stats, rank_partial
 
 
 def test_validation_controls_are_used_and_rank_residuals_match_closed_form():
@@ -47,7 +47,7 @@ def test_same_cross_validation_stats_and_split_metadata(tmp_path):
 
 def test_rendered_panels_use_validation_coordinates_and_residuals(monkeypatch):
     import matplotlib.pyplot as plt
-    from scripts import plot_steerability_transfer as plot
+    from notebooks.figures.steerability import plot_steerability_transfer as plot
 
     frame = plot.load_data()
     saved = {}

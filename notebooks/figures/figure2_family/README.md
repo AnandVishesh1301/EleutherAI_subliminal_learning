@@ -1,21 +1,30 @@
 # Figure 2: transfer by sender/receiver relationship
 
-The refreshed raw-percentile family is now in [`all_arms_transfer_distribution/`](../all_arms_transfer_distribution/README.md).
+The refreshed raw-percentile family is now in [`all_arms/`](all_arms/README.md).
 It uses equal weight per matched run and 2,000 two-way cluster (pigeonhole)
 bootstrap replicates on complete canonical grids. Reproduce it with:
 
 ```bash
-uv run python -m scripts.plot_transfer_family_multiway --all-arms --n-bootstrap 2000 --seed 0
+uv run python -m notebooks.figures.figure2_family.plot_transfer_family_multiway --all-arms --n-bootstrap 2000 --seed 0
+```
+
+The same script without `--all-arms` writes the complete-grid multiway views to
+[`run_weighted/multiway/`](run_weighted/multiway/README.md), and `--publish` writes
+the OLMo/size panel to [`olmo/`](olmo/README.md):
+
+```bash
+uv run python -m notebooks.figures.figure2_family.plot_transfer_family_multiway --n-bootstrap 2000 --seed 0
+uv run python -m notebooks.figures.figure2_family.plot_transfer_family_multiway --publish --n-bootstrap 2000 --seed 0
 ```
 
 The five previous balanced raw artifacts are preserved in
-`../all_arms_transfer_distribution/drafts/balanced_20260924/`. The balanced weighting and bootstrap discussion
-below describes the older outputs; it does not describe the refreshed `all_arms_transfer_distribution` family.
+`all_arms/drafts/balanced_20260924/`. The balanced weighting and bootstrap discussion
+below describes the older outputs; it does not describe the refreshed `all_arms/` family.
 
 Reproduce the remaining balanced and historical views from saved experiment outputs:
 
 ```bash
-uv run python -m scripts.plot_transfer_family_pooled_minus_control --n-bootstrap 2000 --seed 0
+uv run python -m notebooks.figures.figure2_family.plot_transfer_family_pooled_minus_control --n-bootstrap 2000 --seed 0
 ```
 
 The command reads existing evaluations; it does not train models or launch probes.
@@ -35,17 +44,6 @@ Raw-difference and win figures live in this directory. All current figures divid
 by the receiver prior, their summary CSV, and `receiver_priors.csv` live in
 [`relative/`](relative/). Historical snapshots remain in `drafts/`.
 
-Compact paper variants cover the original four relationships on a single axis:
-`transfer_family_compact_{pooled,dog}_{families,statistics}_{raw,prior}.{png,pdf,svg}`.
-`families` places relationships on the x-axis and colors the four statistics;
-`statistics` places median, 75th percentile, 95th percentile, and maximum on the
-x-axis and colors the relationships. The dog-only versions rebalance over dog
-arms alone. Both layouts use the exact estimates and intervals from the detailed
-summary tables; changing the layout does not change the calculation. PDF and SVG
-exports retain vector graphics for paper layout. Raw compact files are in this
-directory; compact files ending in `_prior` are in `relative/`. Suggested captions are in
-[`compact_captions.md`](compact_captions.md).
-
 - `transfer_family_balanced_win.png`: strict observed win fraction,
   `p_student > p_control` over all finite matched pairs regardless of collapse,
   in three panels: the five Pythia-160M relationships with
@@ -54,16 +52,16 @@ directory; compact files ending in `_prior` are in `relative/`. Suggested captio
   the identical pooled bar.
 - `transfer_family_balanced_win_size_architecture.png`: standalone view of all six
   size and architecture directions, using dog only.
-- `../all_arms_transfer_distribution/transfer_family_multiway_raw_percentiles.png`: refreshed median, 75th
+- `all_arms/transfer_family_multiway_raw_percentiles.png`: refreshed median, 75th
   percentile, 95th percentile, and maximum of `p_student - p_control` across all
   relationships; Pythia rows pool animals, size/architecture rows use dog, and
   OLMo corpus/seed rows use elephant. The old balanced overview is archived.
-- `../all_arms_transfer_distribution/transfer_family_multiway_raw_percentiles_with_metadata.png`: the same
+- `all_arms/transfer_family_multiway_raw_percentiles_with_metadata.png`: the same
   overview retaining n, complete-block counts, and core-grid design. Both current
   overviews include separate Rerun1234 and Modern1234 reproduction rows.
 - `relative/transfer_family_balanced_prior_percentiles.png`: the same statistics of
   `(p_student - p_control) / p_receiver_base`.
-- `../all_arms_transfer_distribution/transfer_family_multiway_raw_percentiles_panel{1,2,3}.png` and
+- `all_arms/transfer_family_multiway_raw_percentiles_panel{1,2,3}.png` and
   `relative/transfer_family_balanced_prior_percentiles_panel{1,2,3}.png`: per-animal
   detail for Pythia-160M relationships (six in refreshed all-arms, five in the
   older relative views), the six size/architecture transfers (dog only), and the
@@ -76,7 +74,7 @@ directory; compact files ending in `_prior` are in `relative/`. Suggested captio
   but screened percentiles, preserved before switching percentiles to all pairs.
 - `drafts/expanded_v1/`: the first expanded figures and tables, before combining
   size/architecture and excluding cross-architecture elephant rows.
-- `transfer_family_pooled_minus_control_alive*.png`: reordered versions of the
+- `legacy/transfer_family_pooled_minus_control_alive*.png`: reordered versions of the
   original boxplot views, retaining their original run weighting; they now carry
   the reproduction slot as a fifth group.
 - `relative/transfer_family_pooled_minus_control_prior_linear.png`: a normalized
@@ -235,13 +233,13 @@ re-pretrainings, 600 in the reproduction slot) enter the raw views only.
 
 ## Numerical records
 
-- `../all_arms_transfer_distribution/transfer_family_multiway_raw_summary.csv`: refreshed equal-run estimates
+- `all_arms/transfer_family_multiway_raw_summary.csv`: refreshed equal-run estimates
   and multiway intervals; complete matched pairs, block audits, exclusions, and
   refresh provenance are alongside it.
 
 - `transfer_family_balanced_win_summary.csv`: all-pair wins, intervals, support,
   and bootstrap settings; `collapse_filter=False`.
-- `../all_arms_transfer_distribution/drafts/balanced_20260924/transfer_family_balanced_raw_summary.csv` and
+- `all_arms/drafts/balanced_20260924/transfer_family_balanced_raw_summary.csv` and
   `relative/transfer_family_balanced_prior_summary.csv`: all-pair percentile estimates,
   intervals, counts, and bootstrap settings; `collapse_filter=False`. Win estimates
   remain in the separate win table.
@@ -343,16 +341,3 @@ OLMo cross-seed now has 1,089 pairs across four directions and 32 distinct sourc
 teachers: Dolma→Dolma-seed2 370, Dolma-seed2→Dolma 60, DCLM→DCLM-seed2 350, and
 C4→C4-seed2 309 of 350 while that arm is still running. Its configuration intervals
 still do not supply replication over additional model seeds.
-
-
-## Additional equal-run comparison
-
-[`run_weighted/`](run_weighted/) preserves a separate comparison using equal
-weight per available matched run and an ordinary paired-row bootstrap. It shows
-pooled animals and dog only, with the four percentiles on the x-axis and families
-in the legend. The existing balanced figures are unchanged. The comparison
-README explains resampling with a concrete example and the independent-row
-assumption; these intervals ignore reuse of teachers, configurations, and controls.
-The selected grids are core30 for same-model and different-init/same-data-order,
-and core56 for shared-init/different-data-order and cross-seed. The grid audit
-found no outside cell tags. Bootstrap draws never add runs from another grid.

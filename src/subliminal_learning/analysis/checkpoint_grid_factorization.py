@@ -60,6 +60,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from subliminal_learning.analysis.trajectories import _pref_points
+
 #: The five teacher recipes ("recipes") every checkpoint-grid cell was run with.
 CKPT_TEACHER_TAGS: list[str] = [
     "ep20_lr1e-4_r16a32", "ep2_lr5e-4_r32a64", "ep7_lr5e-4_r8a8",
@@ -76,6 +78,27 @@ CKPT_STEPS: list[int] = [
 DATASET_DIR: str = "ex10-20_prefix_n100k"
 #: Decay lengths (in thousands of steps) searched by the ``product + nearness`` rival.
 NEARNESS_LENGTHS: tuple[float, ...] = (2.5, 5.0, 10.0, 20.0, 40.0)
+#: Largest Jacobian condition number at which a masked ``product + proximity`` fit is trusted.
+#: The worst healthy cross-validation fold measured across all project grids is 42 and the
+#: mildest pathological (unpinned) one is 6.7e3, so the threshold sits in the empty gap.
+PROXIMITY_MAX_COND: float = 1e3
+
+#: OLMo (DataDecide dolma1_7-1B) cross-checkpoint grid steps; the last is the final checkpoint.
+#: 65000 is not run on every pretraining seed, so a seed may only support the 7-step grid
+#: without it (see `discover_olmo_checkpoint_grids`).
+OLMO_CKPT_STEPS: list[int] = [30000, 40000, 45000, 50000, 55000, 60000, 65000, 69369]
+#: Step standing in for the final (no ``@step``) DataDecide dolma1_7-1B checkpoint. It is the
+#: dolma1_7 1B final step and is reused as the label for any DataDecide 1B final checkpoint, so
+#: distances involving the final checkpoint assume the same schedule length across corpora.
+OLMO_FINAL_STEP: int = 69369
+#: OLMo grid student HP cells.
+OLMO_STUDENT_TAGS: list[str] = ["ep3_lr5e-4_r8a32", "ep3_lr5e-4_r1a32"]
+#: OLMo numbers datasets, in lookup order (n200k only where n100k was not run).
+OLMO_DATASET_DIRS: tuple[str, ...] = ("ex10-20_prefix_n100k", "ex10-20_prefix_n200k")
+#: Default OLMo base: DataDecide 1B pretrained on dolma1_7.
+OLMO_BASE_DOLMA: str = "DataDecide-dolma1_7-1B"
+#: DataDecide 1B pretrained on dclm-baseline.
+OLMO_BASE_DCLM: str = "DataDecide-dclm-baseline-1B"
 
 _CKPT_DIR_RE = re.compile(r"^pythia-160m(?P<suffix>.*)@step(?P<step>\d+)$")
 _TAGSEED_RE = re.compile(r"^(?P<tag>.+)_tseed(?P<seed>\d+)$")
@@ -109,6 +132,7 @@ def load_checkpoint_grid_runs(
     *,
     student_tag: str = CKPT_STUDENT_TAG,
     teacher_tags: list[str] | None = None,
+    traj_step: int | None = None,
 ) -> pd.DataFrame:
     """Scan one same-lineage checkpoint grid into a run-level frame.
 
@@ -127,6 +151,9 @@ def load_checkpoint_grid_runs(
         lineage: Lineage name; ``orig`` or a ``pythia-160m-`` suffix (``data-seed1``, ...).
         student_tag: The fixed student HP cell.
         teacher_tags: Teacher recipes to keep; default `CKPT_TEACHER_TAGS`.
+        traj_step: If set, read the ``test`` ``p_target`` at exactly this student training
+            step from ``eval/pref_traj.json`` instead of ``preference_eval.json``; leaves
+            without that step are skipped.
 
     Returns:
         One row per run with columns ``t``, ``s`` (base checkpoint steps), ``tag`` (teacher
@@ -152,7 +179,10 @@ def load_checkpoint_grid_runs(
                 cell = tagseed / DATASET_DIR / student_tag
                 for seed_dir in sorted(cell.glob("ftseed*")):
                     mf = _FTSEED_RE.fullmatch(seed_dir.name)
-                    value = _read_p_target(seed_dir / "preference_eval.json")
+                    if traj_step is None:
+                        value = _read_p_target(seed_dir / "preference_eval.json")
+                    else:
+                        value = _traj_value(seed_dir, step=traj_step)
                     if mf is None or value is None:
                         continue
                     rows.append({
@@ -160,6 +190,154 @@ def load_checkpoint_grid_runs(
                         "ftseed": int(mf["seed"]), "p": float(value),
                     })
     return pd.DataFrame(rows, columns=["t", "s", "tag", "ftseed", "p"])
+
+
+def _traj_value(leaf: Path, *, step: int | None = None) -> float | None:
+    """``test`` ``p_target`` of ``eval/pref_traj.json``: at ``step``, or the max if ``None``."""
+    try:
+        steps, vals = _pref_points(leaf, "test")
+    except (OSError, ValueError, KeyError):
+        return None
+    if step is None:
+        return max(vals) if vals else None
+    return next((v for st, v in zip(steps, vals) if int(st) == step), None)
+
+
+def _olmo_step(dir_name: str, prefix: str) -> int | None:
+    """Base step of an OLMo checkpoint dir name (`OLMO_FINAL_STEP` when no ``@step``)."""
+    if dir_name == prefix:
+        return OLMO_FINAL_STEP
+    m = re.fullmatch(re.escape(prefix) + r"@step(\d+)", dir_name)
+    return int(m[1]) if m else None
+
+
+def _olmo_student_dirs(root: Path, prefix: str) -> list[tuple[Path, int]]:
+    """``(dir, step)`` of OLMo student dirs: ``ckpt/{prefix}@step*`` plus final ``{prefix}``."""
+    out = [(d, _olmo_step(d.name, prefix)) for d in sorted((root / "ckpt").glob(f"{prefix}@step*"))]
+    if (root / prefix).is_dir():
+        out.append((root / prefix, OLMO_FINAL_STEP))
+    return [(d, s) for d, s in out if s is not None]
+
+
+def _olmo_leaf_value(leaf: Path, animal: str, readout: str) -> float | None:
+    """Endpoint (leaf root, else ``eval/{animal}/``) or peak-trajectory ``p_target`` of a leaf."""
+    if readout == "peak":
+        return _traj_value(leaf)
+    for path in (leaf / "preference_eval.json", leaf / "eval" / animal / "preference_eval.json"):
+        if path.exists():
+            return _read_p_target(path)
+    return None
+
+
+def _olmo_rows(cells, animal: str, readout: str, steps) -> list[dict]:
+    """Run rows from ``(t, s, tag, cell_dir)`` tuples (cell_dir holds ``ftseed*``)."""
+    keep = None if steps is None else set(steps)
+    rows: list[dict] = []
+    for t, s, tag, cell in cells:
+        if keep is not None and (t not in keep or s not in keep):
+            continue
+        for seed_dir in sorted(cell.glob("ftseed*")):
+            mf = _FTSEED_RE.fullmatch(seed_dir.name)
+            value = _olmo_leaf_value(seed_dir, animal, readout) if mf else None
+            if value is None:
+                continue
+            rows.append({"t": t, "s": s, "tag": tag, "ftseed": int(mf["seed"]), "p": float(value)})
+    return rows
+
+
+def load_olmo_checkpoint_grid_runs(
+    output_root: Path,
+    animal: str,
+    *,
+    seed: str = "seed-default",
+    base: str = OLMO_BASE_DOLMA,
+    student_tag: str,
+    teacher_tags: list[str] | None = None,
+    steps: list[int] | None = None,
+    readout: str = "endpoint",
+) -> pd.DataFrame:
+    """Scan one OLMo (DataDecide dolma1_7-1B) cross-checkpoint grid into a run-level frame.
+
+    Non-final students live at ``students/{animal}/ckpt/DataDecide-dolma1_7-1B-{seed}@step{S}``,
+    the final student at ``students/{animal}/DataDecide-dolma1_7-1B-{seed}`` (no ``ckpt/``);
+    teachers are ``teacher-DataDecide-dolma1_7-1B-{seed}[@step{T}]`` (same seed only; no
+    ``@step`` = final, reported as `OLMO_FINAL_STEP`). Each ``{tag}_tseed0`` cell uses the first
+    of `OLMO_DATASET_DIRS` that exists.
+
+    Args:
+        output_root: ``paths.output_root``.
+        animal: Trait animal, e.g. ``elephant``.
+        seed: DataDecide pretraining seed suffix (``seed-default``, ``seed-large-aux-2``, ...).
+        base: DataDecide base model name (`OLMO_BASE_DOLMA`, `OLMO_BASE_DCLM`, ...); replaces
+            ``DataDecide-dolma1_7-1B`` in every dir name above.
+        student_tag: The fixed student HP cell (see `OLMO_STUDENT_TAGS`).
+        teacher_tags: Teacher recipes to keep; None keeps every ``{tag}_tseed0`` recipe found
+            on disk. Callers wanting only full-coverage recipes should use
+            `discover_olmo_checkpoint_grids`.
+        steps: Base steps to keep on both axes; default all found.
+        readout: ``endpoint`` (``preference_eval.json``) or ``peak`` (max ``test`` ``p_target``
+            over ``eval/pref_traj.json`` points).
+
+    Returns:
+        Same columns as `load_checkpoint_grid_runs`: ``t``, ``s``, ``tag``, ``ftseed``, ``p``.
+    """
+    if readout not in ("endpoint", "peak"):
+        raise ValueError(f"readout must be 'endpoint' or 'peak', got {readout!r}")
+    tags = None if teacher_tags is None else set(teacher_tags)
+    prefix = f"{base}-{seed}"
+    cells = []
+    for student_dir, s in _olmo_student_dirs(Path(output_root) / "students" / animal, prefix):
+        for teacher_dir in sorted(student_dir.glob(f"teacher-{prefix}*")):
+            t = _olmo_step(teacher_dir.name[len("teacher-"):], prefix)
+            if t is None:
+                continue
+            for tagseed in sorted(teacher_dir.iterdir()):
+                mg = _TAGSEED_RE.fullmatch(tagseed.name)
+                if not mg or (tags is not None and mg["tag"] not in tags):
+                    continue
+                ds = next((tagseed / d for d in OLMO_DATASET_DIRS if (tagseed / d).is_dir()), None)
+                if ds is not None:
+                    cells.append((t, s, mg["tag"], ds / student_tag))
+    return pd.DataFrame(_olmo_rows(cells, animal, readout, steps),
+                        columns=["t", "s", "tag", "ftseed", "p"])
+
+
+def load_olmo_base_controls(
+    output_root: Path,
+    animal: str,
+    *,
+    seed: str = "seed-default",
+    base: str = OLMO_BASE_DOLMA,
+    student_tag: str,
+    steps: list[int] | None = None,
+) -> pd.DataFrame:
+    """Matched base-pool controls of an OLMo checkpoint grid, as a run-level frame.
+
+    Reads ``students/controls/base/[ckpt/]{student_dir}/teacher-{teacher_dir}/
+    ex10-20_prefix_n100k/{student_tag}/ftseed*/eval/{animal}/preference_eval.json`` (``ckpt/``
+    only for non-final students, as in `load_olmo_checkpoint_grid_runs`).
+
+    Args:
+        output_root: ``paths.output_root``.
+        animal: Trait animal, e.g. ``elephant``.
+        seed: DataDecide pretraining seed suffix.
+        base: DataDecide base model name; default `OLMO_BASE_DOLMA`.
+        student_tag: The fixed student HP cell.
+        steps: Base steps to keep on both axes; default all found.
+
+    Returns:
+        Columns ``t``, ``s``, ``tag`` (always ``"base"``), ``ftseed``, ``p``.
+    """
+    prefix = f"{base}-{seed}"
+    root = Path(output_root) / "students" / "controls" / "base"
+    cells = []
+    for student_dir, s in _olmo_student_dirs(root, prefix):
+        for teacher_dir in sorted(student_dir.glob(f"teacher-{prefix}*")):
+            t = _olmo_step(teacher_dir.name[len("teacher-"):], prefix)
+            if t is not None:
+                cells.append((t, s, "base", teacher_dir / DATASET_DIR / student_tag))
+    return pd.DataFrame(_olmo_rows(cells, animal, "endpoint", steps),
+                        columns=["t", "s", "tag", "ftseed", "p"])
 
 
 @dataclass
@@ -657,9 +835,9 @@ def teacher_bootstrap(
 # --------------------------------------------------------------------------------------
 # Held-out evaluation of the product + proximity model
 # --------------------------------------------------------------------------------------
-#: Display names of the three models scored under cell cross-validation (plus a rank-2
+#: Display names of the four models scored under cell cross-validation (plus a rank-2
 #: in-sample reference).
-CV_MODELS: tuple[str, ...] = ("additive", "product", "product+proximity")
+CV_MODELS: tuple[str, ...] = ("additive", "product", "bottleneck", "product+proximity")
 
 
 @dataclass
@@ -672,6 +850,9 @@ class ProximityFit:
         c: Proximity bonus in probability units.
         L: Selected nearness length, in thousands of steps.
         P: The full ``(n, n)`` prediction (also at cells outside the fit mask).
+        cond: Condition number of the masked residual Jacobian in ``(a, b, c)`` at the
+            solution (gauge column removed). Large values mean the masked cells do not pin
+            the fit and ``P`` may extrapolate wildly off the mask.
     """
 
     a: np.ndarray
@@ -679,6 +860,7 @@ class ProximityFit:
     c: float
     L: float
     P: np.ndarray
+    cond: float
 
 
 def _distance_k(steps: list[int]) -> np.ndarray:
@@ -730,6 +912,21 @@ def _fit_prox_fixed_length(
     return a_cur, b_cur, c
 
 
+def _prox_cond(a: np.ndarray, b: np.ndarray, E: np.ndarray, W: np.ndarray) -> float:
+    """Condition number of the masked residual Jacobian in ``(a, b, c)``, gauge-fixed."""
+    n = len(a)
+    r, s = np.nonzero(W)
+    J = np.zeros((len(r), 2 * n + 1))
+    J[np.arange(len(r)), r] = b[s]
+    J[np.arange(len(r)), n + s] = a[r]
+    J[:, -1] = E[r, s]
+    J = np.delete(J, n + int(np.argmax(b)), axis=1)
+    if not np.isfinite(J).all():
+        return float("inf")
+    sv = np.linalg.svd(J, compute_uv=False)
+    return float("inf") if sv[-1] == 0 else float(sv[0] / sv[-1])
+
+
 def fit_product_proximity(
     M: np.ndarray,
     steps: list[int],
@@ -754,7 +951,8 @@ def fit_product_proximity(
         lengths: Candidate nearness lengths.
 
     Returns:
-        The best `ProximityFit`; the prediction ``P`` covers every cell, masked or not.
+        The best `ProximityFit`; the prediction ``P`` covers every cell, masked or not. It is
+        returned even when ``cond`` is huge (unidentified fit); callers decide what to do.
 
     Raises:
         ValueError: If both ``a`` and ``b`` are given.
@@ -771,7 +969,8 @@ def fit_product_proximity(
         P = np.outer(a_f, b_f) + c * E
         sse = float(((M - P)[W] ** 2).sum())
         if best is None or sse < best[0]:
-            best = (sse, ProximityFit(a=a_f, b=b_f, c=c, L=float(length), P=P))
+            best = (sse, ProximityFit(a=a_f, b=b_f, c=c, L=float(length), P=P,
+                                      cond=_prox_cond(a_f, b_f, E, W)))
     assert best is not None
     return best[1]
 
@@ -787,11 +986,29 @@ def _additive_masked(M: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return w[:n_rows, None] + w[None, n_rows:]
 
 
+def _bottleneck_masked(M: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Least-squares ``m[min(t, s)]`` on the masked cells, predicted everywhere.
+
+    Each level is the mean of the masked cells carrying that ``min(t, s)`` key; a key with no
+    masked cell falls back to the mean of all masked cells.
+    """
+    idx = np.arange(M.shape[0])
+    key = np.minimum.outer(idx, idx)
+    P = np.full_like(M, M[mask].mean(), dtype=float)
+    for k in np.unique(key):
+        seen = (key == k) & mask
+        if seen.any():
+            P[key == k] = M[seen].mean()
+    return P
+
+
 def _predict(model: str, M: np.ndarray, steps: list[int], mask: np.ndarray) -> np.ndarray:
     if model == "additive":
         return _additive_masked(M, mask)
     if model == "product":
         return np.outer(*fit_rank1(M, mask))
+    if model == "bottleneck":
+        return _bottleneck_masked(M, mask)
     if model == "product+proximity":
         return fit_product_proximity(M, steps, mask).P
     raise ValueError(f"unknown model {model!r}")
@@ -801,17 +1018,28 @@ def cell_cross_validation(
     M: np.ndarray,
     steps: list[int],
     *,
-    n_folds: int = 10,
+    n_folds: int = 5,
     n_repeats: int = 5,
     seed: int = 0,
 ) -> pd.DataFrame:
-    """K-fold cross-validation over grid cells for the additive / product / proximity models.
+    """K-fold cross-validation over grid cells for the additive / product / bottleneck /
+    proximity models.
 
-    Each repeat draws one random partition of the ``n*n`` cells into ``n_folds`` folds (the
-    same partition for every model), fits on all other folds and predicts each fold. The CV
-    R^2 is pooled: ``1 - SSE / SST`` over all held-out predictions with ``SST`` about the mean
-    of ``M``, averaged over repeats. Rank-2 is an in-sample reference only (``r2_cv`` NaN): its
-    masked fit is unstable out of sample.
+    Each repeat draws one random partition of the ``n*n`` cells into ``n_folds`` disjoint
+    folds (default five, covering the 169 cells of a 13x13 grid, each holding about 20 per
+    cent; 169 does not divide evenly, so folds come out at 34 or 33 cells), using the same
+    partition for every model; it fits on all other folds and predicts each fold, so every
+    cell is predicted exactly once per repeat. There are ``n_repeats`` (default five)
+    independent partitions. The CV R^2 is pooled: ``1 - SSE / SST`` over all out-of-fold
+    predictions with ``SST`` about the mean of the whole grid ``M``, averaged over repeats. Rank-2 is an in-sample reference only (``r2_cv`` NaN): its
+    masked fit is unstable out of sample. ``r2_cv_sd`` is the standard deviation (ddof=1) of
+    the per-repeat pooled R^2 values averaged into ``r2_cv``; NaN when ``n_repeats == 1`` and
+    for rank-2.
+
+    ``product+proximity`` folds whose fit has ``cond > PROXIMITY_MAX_COND`` (the masked cells
+    do not pin the fit) are refused: any refused fold makes that repeat's pooled R^2 NaN, so
+    ``r2_cv`` and ``r2_cv_sd`` come out NaN for the model. ``n_unidentified`` counts the
+    refused folds summed over repeats (always 0 for the other models and rank-2).
 
     Args:
         M: ``(n, n)`` cell means.
@@ -821,8 +1049,8 @@ def cell_cross_validation(
         seed: Seed of the ``numpy`` generator drawing the partitions.
 
     Returns:
-        ``DataFrame[model, r2_in, r2_cv]`` with rows additive, product, product+proximity,
-        rank-2.
+        ``DataFrame[model, r2_in, r2_cv, r2_cv_sd, n_unidentified]`` with rows additive, product, bottleneck,
+        product+proximity, rank-2.
     """
     rng = np.random.default_rng(seed)
     full = np.ones_like(M, dtype=bool)
@@ -830,15 +1058,26 @@ def cell_cross_validation(
     rows = []
     for model in CV_MODELS:
         cv = []
+        n_unidentified = 0
         for fold in folds:
             P = np.empty_like(M)
+            refused = 0
             for k in range(n_folds):
                 test = fold == k
-                P[test] = _predict(model, M, steps, ~test)[test]
-            cv.append(_r2(M, P))
+                if model == "product+proximity":
+                    fit = fit_product_proximity(M, steps, ~test)
+                    refused += fit.cond > PROXIMITY_MAX_COND
+                    P[test] = fit.P[test]
+                else:
+                    P[test] = _predict(model, M, steps, ~test)[test]
+            n_unidentified += refused
+            cv.append(float("nan") if refused else _r2(M, P))
         rows.append({"model": model, "r2_in": _r2(M, _predict(model, M, steps, full)),
-                     "r2_cv": float(np.mean(cv))})
-    rows.append({"model": "rank-2", "r2_in": _r2(M, _rank_k(M, 2)), "r2_cv": float("nan")})
+                     "r2_cv": float(np.mean(cv)),
+                     "r2_cv_sd": float(np.std(cv, ddof=1)) if len(cv) > 1 else float("nan"),
+                     "n_unidentified": int(n_unidentified)})
+    rows.append({"model": "rank-2", "r2_in": _r2(M, _rank_k(M, 2)), "r2_cv": float("nan"),
+                 "r2_cv_sd": float("nan"), "n_unidentified": 0})
     return pd.DataFrame(rows)
 
 
@@ -951,9 +1190,11 @@ def factor_borrowing(grids: dict[str, np.ndarray], steps: list[int]) -> pd.DataF
         steps: Checkpoint steps indexing every matrix.
 
     Returns:
-        ``DataFrame[target, source, own_fit, b_from_src, a_from_src, flat_b, flat_a, corr_a,
-        corr_b]``, one row per ordered pair: R^2 on the target of its own product+proximity
-        fit; with ``b`` taken from the source's fit (``a``, ``c``, ``L`` refit); with ``a``
+        ``DataFrame[target, source, own_fit, own_product, both_from_src, b_from_src, a_from_src,
+        flat_b, flat_a, corr_a, corr_b]``, one row per ordered pair: R^2 on the target of its
+        own product+proximity fit; of its own plain rank-1 product fit (no proximity term, the
+        ceiling for ``both_from_src``); of ``k * outer(a_src, b_src)`` with both curves taken
+        from the source's fit and only the scalar ``k`` fitted on the target; with ``b`` taken from the source's fit (``a``, ``c``, ``L`` refit); with ``a``
         taken from the source (``b``, ``c``, ``L`` refit); the floors with ``b`` or ``a`` held
         at all ones; and the Pearson correlations of the two grids' ``a`` and ``b`` curves.
     """
@@ -962,13 +1203,17 @@ def factor_borrowing(grids: dict[str, np.ndarray], steps: list[int]) -> pd.DataF
     rows = []
     for tgt, Y in grids.items():
         own = _r2(Y, fits[tgt].P)
+        own_product = _r2(Y, np.outer(*fit_rank1(Y)))
         flat_b = _r2(Y, fit_product_proximity(Y, steps, b=ones).P)
         flat_a = _r2(Y, fit_product_proximity(Y, steps, a=ones).P)
         for src in grids:
             if src == tgt:
                 continue
+            P0 = np.outer(fits[src].a, fits[src].b)
+            k = (Y * P0).sum() / (P0**2).sum()
             rows.append({
-                "target": tgt, "source": src, "own_fit": own,
+                "target": tgt, "source": src, "own_fit": own, "own_product": own_product,
+                "both_from_src": _r2(Y, k * P0),
                 "b_from_src": _r2(Y, fit_product_proximity(Y, steps, b=fits[src].b).P),
                 "a_from_src": _r2(Y, fit_product_proximity(Y, steps, a=fits[src].a).P),
                 "flat_b": flat_b, "flat_a": flat_a,
@@ -1054,11 +1299,69 @@ def discover_checkpoint_grids(
     return pd.DataFrame(rows), out
 
 
+def discover_olmo_checkpoint_grids(
+    output_root: Path,
+    animal: str,
+    seeds: list[str],
+    *,
+    base: str = OLMO_BASE_DOLMA,
+    student_tag: str,
+    steps: list[int] | None = None,
+    readout: str = "endpoint",
+) -> tuple[pd.DataFrame, dict[tuple[str, str], pd.DataFrame]]:
+    """Find each OLMo (base, pretraining seed)'s cross-checkpoint grid and keep its full-coverage recipes.
+
+    Every recipe on disk is loaded with `load_olmo_checkpoint_grid_runs` (``teacher_tags=None``);
+    a recipe is kept only if it covers every ``(t, s)`` cell, so no cell mixes recipe counts.
+    If no recipe covers the full ``steps`` grid for a seed, the seed is retried once on
+    ``steps`` without 65000, the one checkpoint not run on every pretraining seed.
+
+    Args:
+        output_root: ``paths.output_root``.
+        animal: Trait animal, e.g. ``elephant``.
+        seeds: DataDecide pretraining seed suffixes (``seed-default``, ``seed-large-aux-2``, ...).
+        base: DataDecide base model name (`OLMO_BASE_DOLMA`, `OLMO_BASE_DCLM`, ...).
+        student_tag: The fixed student HP cell (see `OLMO_STUDENT_TAGS`).
+        steps: Grid steps; default `OLMO_CKPT_STEPS`.
+        readout: ``endpoint`` or ``peak`` (see `load_olmo_checkpoint_grid_runs`).
+
+    Returns:
+        ``(coverage, runs)``. ``coverage`` is ``DataFrame[animal, base, seed, n_steps, steps_used,
+        cells, n_cells, complete, n_recipes, recipes, dropped]``: the step list the seed was
+        scored on, cells covered by any recipe out of ``n_cells``, whether the grid is complete,
+        and the sorted full recipes kept and partial recipes dropped. ``runs`` maps each
+        complete ``(base, seed)`` to its full-recipe run frame restricted to ``steps_used``.
+    """
+    steps = list(OLMO_CKPT_STEPS if steps is None else steps)
+    tries = [steps] + ([[x for x in steps if x != 65000]] if 65000 in steps else [])
+    rows, out = [], {}
+    for seed in seeds:
+        all_runs = load_olmo_checkpoint_grid_runs(output_root, animal, seed=seed, base=base,
+                                                  student_tag=student_tag, readout=readout)
+        for used in tries:
+            n_cells = len(used) ** 2
+            runs = all_runs[all_runs["t"].isin(used) & all_runs["s"].isin(used)]
+            per_tag = runs.groupby("tag")[["t", "s"]].apply(
+                lambda g: len(g.drop_duplicates())) if len(runs) else pd.Series(dtype=int)
+            full = sorted(per_tag.index[per_tag == n_cells])
+            if full:
+                break
+        dropped = sorted(per_tag.index[per_tag < n_cells])
+        rows.append({
+            "animal": animal, "base": base, "seed": seed, "n_steps": len(used), "steps_used": used,
+            "cells": len(runs[["t", "s"]].drop_duplicates()), "n_cells": n_cells,
+            "complete": bool(full), "n_recipes": len(full), "recipes": full, "dropped": dropped,
+        })
+        if full:
+            out[(base, seed)] = runs[runs["tag"].isin(full)].reset_index(drop=True)
+    return pd.DataFrame(rows), out
+
+
 def factorization_table(
     runs: dict[tuple[str, str], pd.DataFrame],
     steps: list[int] | None = None,
     *,
-    n_folds: int = 10,
+    n_folds: int = 5,
     n_repeats: int = 5,
     seed: int = 0,
 ) -> pd.DataFrame:
@@ -1067,14 +1370,18 @@ def factorization_table(
     Args:
         runs: ``(animal, lineage) -> runs`` as returned by `discover_checkpoint_grids`.
         steps: Checkpoint steps; default `CKPT_STEPS`.
-        n_folds, n_repeats, seed: Passed to `cell_cross_validation`.
+        n_folds, n_repeats, seed: Passed to `cell_cross_validation` (default: five disjoint
+            folds of about 20 per cent of the cells, every cell predicted once per repeat,
+            five independent partitions, R^2 pooled over all out-of-fold predictions about
+            the mean of the whole grid).
 
     Returns:
-        ``DataFrame[animal, lineage, n_recipes, in_add, in_prod, in_prox, in_rank2, cv_add,
-        cv_prod, cv_prox, diag_prod, diag_prox, a_143_125, b_143_125, a_peak_k, b_peak_k]``.
+        ``DataFrame[animal, lineage, n_recipes, in_add, in_prod, in_bneck, in_prox, in_rank2,
+        cv_add, cv_prod, cv_bneck, cv_prox, diag_prod, diag_prox, a_143_125, b_143_125, a_peak_k, b_peak_k]``.
     """
     steps = list(CKPT_STEPS if steps is None else steps)
-    short = {"additive": "add", "product": "prod", "product+proximity": "prox",
+    short = {"additive": "add", "product": "prod", "bottleneck": "bneck",
+             "product+proximity": "prox",
              "rank-2": "rank2"}
     rows = []
     for (animal, lineage), r in runs.items():
@@ -1090,3 +1397,361 @@ def factorization_table(
         row.update({k: summary[k] for k in ("a_143_125", "b_143_125", "a_peak_k", "b_peak_k")})
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+# --------------------------------------------------------------------------------------
+# Sender vs receiver per checkpoint
+# --------------------------------------------------------------------------------------
+_SR_LEVELS = ["fit", "animal", "recipe"]
+
+
+def _send_receive_row(M: np.ndarray, steps: list[int]) -> np.ndarray:
+    """``log2((a / max a) / (b / max b))`` of one product+proximity fit; NaN where a or b <= 0."""
+    fit = fit_product_proximity(M, steps)
+    a = fit.a / fit.a.max()
+    b = fit.b / fit.b.max()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = np.log2(a / b)
+    out[(a <= 0) | (b <= 0) | ~np.isfinite(out)] = np.nan
+    return out
+
+
+def send_receive_index(
+    runs: dict[tuple[str, str], pd.DataFrame],
+    steps: list[int] | None = None,
+    *,
+    lineage: str = "orig",
+    per_recipe: bool = True,
+) -> pd.DataFrame:
+    """Per-step sender-vs-receiver index of each grid, recipe-pooled and per recipe.
+
+    For each fit the product+proximity factors are scaled to max 1 and the index is
+    ``log2(a(k) / b(k))``: positive = checkpoint ``k`` is a better sender than receiver
+    (relative to each factor's own peak). A step where ``a`` or ``b`` is ``<= 0`` is NaN.
+
+    Args:
+        runs: ``(animal, lineage) -> runs`` as returned by `discover_checkpoint_grids`.
+        steps: Checkpoint steps; default `CKPT_STEPS`.
+        lineage: Only grids of this lineage are used.
+        per_recipe: Also fit each teacher recipe's own grid.
+
+    Returns:
+        Frame with a ``(fit, animal, recipe)`` row MultiIndex -- ``fit`` is ``"{animal}"`` for
+        the recipe-pooled fit (``recipe == "all"``) and ``"{animal}/{tag}"`` per recipe -- and
+        one integer column per step in thousands (``step // 1000``).
+    """
+    steps = list(CKPT_STEPS if steps is None else steps)
+    rows, keys = [], []
+    for (animal, lin), r in runs.items():
+        if lin != lineage:
+            continue
+        rows.append(_send_receive_row(grid_matrix(r, steps).M, steps))
+        keys.append((animal, animal, "all"))
+        if per_recipe:
+            for tag in sorted(r["tag"].unique()):
+                rows.append(_send_receive_row(grid_matrix(r[r["tag"] == tag], steps).M, steps))
+                keys.append((f"{animal}/{tag}", animal, tag))
+    return pd.DataFrame(rows, index=pd.MultiIndex.from_tuples(keys, names=_SR_LEVELS),
+                        columns=[s // 1000 for s in steps])
+
+
+def send_receive_seed_index(runs_one_grid: pd.DataFrame,
+                            steps: list[int] | None = None) -> pd.DataFrame:
+    """Recipe-pooled send/receive index refit on each single ftseed that covers every cell.
+
+    Args:
+        runs_one_grid: One grid's run frame (as in `discover_checkpoint_grids` values).
+        steps: Checkpoint steps; default `CKPT_STEPS`.
+
+    Returns:
+        Rows ``seed{k}`` (only seeds with no empty cell), columns = steps in thousands, the
+        same layout as the columns of `send_receive_index`.
+    """
+    steps = list(CKPT_STEPS if steps is None else steps)
+    rows, labels = [], []
+    for k in sorted(runs_one_grid["ftseed"].unique()):
+        try:
+            M = grid_matrix(runs_one_grid[runs_one_grid["ftseed"] == k], steps).M
+        except ValueError:
+            continue
+        rows.append(_send_receive_row(M, steps))
+        labels.append(f"seed{k}")
+    return pd.DataFrame(rows, index=pd.Index(labels, name="fit"),
+                        columns=[s // 1000 for s in steps])
+
+
+def send_receive_agreement(
+    index: pd.DataFrame,
+    *,
+    close: float = 0.5,
+    strong: float = 1.0,
+    seed_index: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Per-step agreement of the send/receive index across fits.
+
+    Args:
+        index: `send_receive_index` output (or any frame of fits x steps; labels are the
+            ``fit`` index level when present, else the index).
+        close: ``|index| < close`` counts as "close to balanced" in ``share_close``.
+        strong: A dissenter must have ``|index| >= strong``.
+        seed_index: Optional `send_receive_seed_index` frame; adds ``seed_sd`` per step.
+
+    Returns:
+        One row per step (index = step in k): ``n_pos``, ``n_neg``, ``n_nan``, ``majority``
+        (+1 / -1 / 0 on a tie), ``unanimous`` (all non-NaN share one sign), ``median_abs``,
+        ``share_close``, ``dissenters`` (comma-joined fits opposite the majority with
+        ``|index| >= strong``, largest first; ``""`` if none) and optionally ``seed_sd``.
+    """
+    labels = (index.index.get_level_values("fit") if "fit" in (index.index.names or [])
+              else index.index).astype(str)
+    rows = []
+    for col in index.columns:
+        v = index[col].to_numpy(dtype=float)
+        ok = ~np.isnan(v)
+        n_pos, n_neg = int((v[ok] > 0).sum()), int((v[ok] < 0).sum())
+        majority = int(np.sign(n_pos - n_neg))
+        diss = [(abs(x), lab) for x, lab in zip(v, labels)
+                if majority and not np.isnan(x) and np.sign(x) == -majority and abs(x) >= strong]
+        row = {
+            "n_pos": n_pos, "n_neg": n_neg, "n_nan": int((~ok).sum()), "majority": majority,
+            "unanimous": bool(ok.any()) and (n_pos == 0 or n_neg == 0),
+            "median_abs": float(np.median(np.abs(v[ok]))) if ok.any() else np.nan,
+            "share_close": float((np.abs(v[ok]) < close).mean()) if ok.any() else np.nan,
+            "dissenters": ",".join(lab for _, lab in sorted(diss, reverse=True)),
+        }
+        if seed_index is not None:
+            row["seed_sd"] = float(seed_index[col].std())
+        rows.append(row)
+    return pd.DataFrame(rows, index=pd.Index(list(index.columns), name="step_k"))
+
+
+def send_receive_curve_agreement(
+    runs: dict[tuple[str, str], pd.DataFrame],
+    steps: list[int] | None = None,
+    *,
+    lineage: str = "orig",
+) -> pd.DataFrame:
+    """Pairwise Spearman agreement of the max-scaled sender and receiver curves.
+
+    Args:
+        runs: ``(animal, lineage) -> runs`` as returned by `discover_checkpoint_grids`.
+        steps: Checkpoint steps; default `CKPT_STEPS`.
+        lineage: Only grids of this lineage are used.
+
+    Returns:
+        ``DataFrame[group, n_pairs, a_median, a_min, b_median, b_min]``: group ``"animals"``
+        compares the recipe-pooled fits across animals; one row per animal compares that
+        animal's per-recipe fits. Values are Spearman correlations over unordered pairs.
+    """
+    steps = list(CKPT_STEPS if steps is None else steps)
+
+    def _curves(M: np.ndarray) -> tuple[pd.Series, pd.Series]:
+        fit = fit_product_proximity(M, steps)
+        return pd.Series(fit.a / fit.a.max()), pd.Series(fit.b / fit.b.max())
+
+    groups: dict[str, list[tuple[pd.Series, pd.Series]]] = {"animals": []}
+    for (animal, lin), r in runs.items():
+        if lin != lineage:
+            continue
+        groups["animals"].append(_curves(grid_matrix(r, steps).M))
+        groups[animal] = [_curves(grid_matrix(r[r["tag"] == tag], steps).M)
+                          for tag in sorted(r["tag"].unique())]
+    rows = []
+    for group, curves in groups.items():
+        pairs = [(x, y) for i, x in enumerate(curves) for y in curves[i + 1:]]
+        row = {"group": group, "n_pairs": len(pairs)}
+        for j, name in ((0, "a"), (1, "b")):
+            rho = np.array([x[j].corr(y[j], method="spearman") for x, y in pairs])
+            row[f"{name}_median"] = float(np.median(rho)) if len(rho) else np.nan
+            row[f"{name}_min"] = float(rho.min()) if len(rho) else np.nan
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _rowcol_row(M: np.ndarray, offdiag: bool) -> np.ndarray:
+    """``(row mean - column mean) / grid mean`` of one grid, diagonal optionally excluded."""
+    M = np.array(M, dtype=float)
+    if offdiag:
+        np.fill_diagonal(M, np.nan)
+    return (np.nanmean(M, axis=1) - np.nanmean(M, axis=0)) / np.nanmean(M)
+
+
+def send_receive_rowcol(
+    runs: dict[tuple[str, str], pd.DataFrame],
+    steps: list[int] | None = None,
+    *,
+    lineage: str = "orig",
+    per_recipe: bool = True,
+    offdiag: bool = True,
+) -> pd.DataFrame:
+    """Model-free per-step send/receive score: row mean minus column mean over grid mean.
+
+    Positive = checkpoint ``k`` transfers more as a teacher (its row) than it receives as
+    a student (its column), in units of the grid's mean transfer. Unlike
+    `send_receive_index` this is absolute, not relative to each factor's own peak.
+
+    Args:
+        runs: ``(animal, lineage) -> runs`` as returned by `discover_checkpoint_grids`.
+        steps: Checkpoint steps; default `CKPT_STEPS`.
+        lineage: Only grids of this lineage are used.
+        per_recipe: Also score each teacher recipe's own grid.
+        offdiag: Exclude the diagonal, which carries the same-checkpoint bonus and would
+            otherwise add the same amount to a step's row and column means unevenly.
+
+    Returns:
+        Same layout as `send_receive_index`: ``(fit, animal, recipe)`` row MultiIndex and one
+        column per step in thousands.
+    """
+    steps = list(CKPT_STEPS if steps is None else steps)
+    rows, keys = [], []
+    for (animal, lin), r in runs.items():
+        if lin != lineage:
+            continue
+        rows.append(_rowcol_row(grid_matrix(r, steps).M, offdiag))
+        keys.append((animal, animal, "all"))
+        if per_recipe:
+            for tag in sorted(r["tag"].unique()):
+                rows.append(_rowcol_row(grid_matrix(r[r["tag"] == tag], steps).M, offdiag))
+                keys.append((f"{animal}/{tag}", animal, tag))
+    return pd.DataFrame(rows, index=pd.MultiIndex.from_tuples(keys, names=_SR_LEVELS),
+                        columns=[s // 1000 for s in steps])
+
+
+@dataclass
+class SharedFit:
+    """Result of `shared_factor_fit`.
+
+    Attributes:
+        pred: Per-grid prediction ``c_i * a_i b_i^T``.
+        a_shared: Shared sender curve (max 1), or ``None`` when not shared.
+        b_shared: Shared receiver curve (max 1), or ``None`` when not shared.
+        scale: Per-grid scale ``c_i`` (in the units of the max-1 shared curves).
+        r2: Per-grid R^2 of ``pred``.
+    """
+
+    pred: dict[str, np.ndarray]
+    a_shared: np.ndarray | None
+    b_shared: np.ndarray | None
+    scale: dict[str, float]
+    r2: dict[str, float]
+
+
+def shared_factor_fit(
+    grids: dict[str, np.ndarray], *, share_a: bool, share_b: bool, iters: int = 500
+) -> SharedFit:
+    """Fit ``M_i ~= c_i * a_i b_i^T`` with ``a`` and/or ``b`` shared across grids.
+
+    Plain product (no proximity term), alternating least squares initialised from each
+    grid's `fit_rank1`. Shared curves are rescaled to max 1 after fitting (scale moved into
+    ``c_i``), so ``scale`` compares grids on a common curve.
+
+    Args:
+        grids: ``name -> M``, all the same shape.
+        share_a: Share the sender (row) curve across grids.
+        share_b: Share the receiver (column) curve across grids.
+        iters: ALS sweeps.
+
+    Returns:
+        `SharedFit`.
+    """
+    keys = list(grids)
+    init = {k: fit_rank1(grids[k]) for k in keys}
+    A = {k: init[k][0] for k in keys}
+    B = {k: init[k][1] for k in keys}
+    a_sh = np.mean([A[k] / A[k].max() for k in keys], 0)
+    b_sh = np.mean([B[k] / B[k].max() for k in keys], 0)
+    c = {k: 1.0 for k in keys}
+
+    def _a(k):
+        return a_sh if share_a else A[k]
+
+    def _b(k):
+        return b_sh if share_b else B[k]
+
+    for _ in range(iters):
+        for k in keys:
+            P = np.outer(_a(k), _b(k))
+            c[k] = float((grids[k] * P).sum() / (P ** 2).sum())
+        if share_a:
+            num = sum(c[k] * grids[k] @ _b(k) for k in keys)
+            den = sum(c[k] ** 2 * (_b(k) @ _b(k)) for k in keys)
+            a_sh = num / den
+        else:
+            for k in keys:
+                A[k] = (grids[k] @ _b(k)) / (_b(k) @ _b(k)) / c[k]
+        if share_b:
+            num = sum(c[k] * grids[k].T @ _a(k) for k in keys)
+            den = sum(c[k] ** 2 * (_a(k) @ _a(k)) for k in keys)
+            b_sh = num / den
+        else:
+            for k in keys:
+                B[k] = (grids[k].T @ _a(k)) / (_a(k) @ _a(k)) / c[k]
+    pred = {k: c[k] * np.outer(_a(k), _b(k)) for k in keys}
+    if share_a:
+        m = a_sh.max()
+        a_sh = a_sh / m
+        c = {k: v * m for k, v in c.items()}
+    if share_b:
+        m = b_sh.max()
+        b_sh = b_sh / m
+        c = {k: v * m for k, v in c.items()}
+    return SharedFit(pred=pred, a_shared=a_sh if share_a else None,
+                     b_shared=b_sh if share_b else None, scale=c,
+                     r2={k: _r2(grids[k], pred[k]) for k in keys})
+
+
+_SHARED_MODELS = [("own a, own b", False, False), ("shared a, own b", True, False),
+                  ("own a, shared b", False, True), ("shared a, shared b", True, True)]
+
+
+def shared_factor_table(
+    grids: dict[str, np.ndarray], *, ceiling: dict[str, float] | None = None
+) -> pd.DataFrame:
+    """R^2 of each grid under own/shared sender and receiver curves (`shared_factor_fit`).
+
+    Args:
+        grids: ``name -> M``, all the same shape.
+        ceiling: Optional ``name -> R^2`` reference (e.g. seed-vs-seed), added as a row.
+
+    Returns:
+        Rows ``own a, own b`` / ``shared a, own b`` / ``own a, shared b`` /
+        ``shared a, shared b`` (+ ``ceiling``), one R^2 column per grid.
+    """
+    rows = {name: shared_factor_fit(grids, share_a=sa, share_b=sb).r2
+            for name, sa, sb in _SHARED_MODELS}
+    if ceiling is not None:
+        rows["ceiling"] = {k: ceiling.get(k, np.nan) for k in grids}
+    return pd.DataFrame.from_dict(rows, orient="index")[list(grids)].rename_axis("model")
+
+
+def send_receive_variance_decomposition(score: pd.DataFrame) -> pd.DataFrame:
+    """Sum-of-squares shares of a per-recipe send/receive score over step x animal x recipe.
+
+    Balanced two-way sequential decomposition on the per-recipe rows (``recipe != "all"``)
+    of a `send_receive_rowcol` / `send_receive_index` frame: step main effect (shared
+    checkpoint aptitude), step x animal beyond step, step x recipe beyond step, and the
+    residual (step x animal x recipe + noise). NaN cells are dropped, so the shares are only
+    exactly additive for a complete frame.
+
+    Args:
+        score: Frame with the ``(fit, animal, recipe)`` row MultiIndex, steps as columns.
+
+    Returns:
+        ``DataFrame[component, share]`` with four rows.
+    """
+    per = score[score.index.get_level_values("recipe") != "all"]
+    L = per.reset_index(level=["animal", "recipe"]).melt(
+        id_vars=["animal", "recipe"], var_name="step", value_name="y").dropna(subset=["y"])
+    mu = L["y"].mean()
+    tot = ((L["y"] - mu) ** 2).sum()
+    m_s = L.groupby("step")["y"].transform("mean")
+    m_sa = L.groupby(["step", "animal"])["y"].transform("mean")
+    m_sr = L.groupby(["step", "recipe"])["y"].transform("mean")
+    parts = {
+        "step": ((m_s - mu) ** 2).sum(),
+        "step x animal": ((m_sa - m_s) ** 2).sum(),
+        "step x recipe": ((m_sr - m_s) ** 2).sum(),
+        "residual": ((L["y"] - m_sa - m_sr + m_s) ** 2).sum(),
+    }
+    return pd.DataFrame({"component": list(parts),
+                         "share": [float(v / tot) for v in parts.values()]})

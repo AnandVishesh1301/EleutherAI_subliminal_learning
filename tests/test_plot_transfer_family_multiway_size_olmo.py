@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from scripts import plot_transfer_family_multiway as plot
+from notebooks.figures.figure2_family import plot_transfer_family_multiway as plot
 from subliminal_learning.analysis import transfer_family_pooled as tfp
 from subliminal_learning.analysis import transfer_family_registry_io as registry
 
@@ -94,8 +94,8 @@ def test_size_olmo_family_statistics_and_pending(same_model_present):
     plot.plt.close(fig)
 
 
-def test_size_olmo_exports_do_not_overwrite_top_row(tmp_path, monkeypatch):
-    existing = tmp_path / "transfer_family_complete_multiway_top_row.png"
+def test_size_olmo_exports_do_not_overwrite_unrelated_file(tmp_path, monkeypatch):
+    existing = tmp_path / "unrelated_existing_figure.png"
     existing.write_bytes(b"previous")
     saved = []
     monkeypatch.setattr(

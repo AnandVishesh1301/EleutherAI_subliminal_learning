@@ -24,6 +24,7 @@ from subliminal_learning.analysis.checkpoint_grid_factorization import (  # noqa
     cycle_tests,
     diagonal_heldout,
     discover_checkpoint_grids,
+    factorization_table,
     factor_borrowing,
     factor_summary,
     fit_models,
@@ -34,6 +35,8 @@ from subliminal_learning.analysis.checkpoint_grid_factorization import (  # noqa
     noise_ceiling,
     partner_independence_ratios,
 )
+from subliminal_learning.analysis.checkpoint_grid_factorization import _predict  # noqa: E402
+
 
 A_PLANTED = np.array([0.1, 0.3, 0.5, 0.9, 1.4])
 B_PLANTED = np.array([0.2, 0.4, 0.6, 0.8, 1.0])
@@ -167,6 +170,28 @@ def test_additive_beats_product_under_cv_on_an_additive_grid():
     assert cv.loc["additive", "r2_cv"] > cv.loc["product", "r2_cv"]
 
 
+def test_cv_sd_nan_for_one_repeat_and_small_for_default_repeats():
+    rng = np.random.default_rng(7)
+    M = np.outer(A13, B13) + 0.01 * rng.standard_normal((13, 13))
+    one = cell_cross_validation(M, STEPS, n_repeats=1).set_index("model")
+    assert one["r2_cv_sd"].isna().all()
+    cv = cell_cross_validation(M, STEPS).set_index("model")
+    sd = cv.loc[["additive", "product", "bottleneck", "product+proximity"], "r2_cv_sd"]
+    assert np.isfinite(sd).all() and (sd >= 0).all()
+    assert sd["product"] < 0.01
+    assert np.isnan(cv.loc["rank-2", "r2_cv_sd"])
+
+
+def test_cell_cv_default_is_five_folds():
+    rng = np.random.default_rng(11)
+    M = np.outer(A13, B13) + 0.05 * rng.standard_normal((13, 13))
+    default = cell_cross_validation(M, STEPS)
+    five = cell_cross_validation(M, STEPS, n_folds=5)
+    ten = cell_cross_validation(M, STEPS, n_folds=10)
+    pd.testing.assert_frame_equal(default, five)
+    assert not np.allclose(default["r2_cv"].dropna(), ten["r2_cv"].dropna())
+
+
 def test_full_mask_equals_unmasked_fit_and_fit_models():
     rng = np.random.default_rng(6)
     M = np.outer(A13, B13) + 0.05 * E10 + 0.01 * rng.standard_normal((13, 13))
@@ -176,6 +201,55 @@ def test_full_mask_equals_unmasked_fit_and_fit_models():
     table = fit_models(M, STEPS)
     r2 = table.loc[table["model"].str.startswith("product + c*exp"), "r2"].item()
     assert _r2(M, unmasked.P) == pytest.approx(r2, abs=1e-6)
+
+
+def _bneck_grid():
+    m = np.linspace(0.1, 0.9, 13) ** 2
+    idx = np.arange(13)
+    return m[np.minimum.outer(idx, idx)]
+
+
+def test_bottleneck_grid_cross_validates_and_additive_does_not():
+    M = _bneck_grid()
+    cv = cell_cross_validation(M, STEPS, n_folds=5, n_repeats=1).set_index("model")
+    # Key 12 is the single cell (12, 12): when it is held out it falls back to the mean, so
+    # CV R^2 is below 1 even for an exact bottleneck grid; every other held-out cell is exact.
+    assert cv.loc["bottleneck", "r2_in"] == pytest.approx(1.0, abs=1e-12)
+    assert cv.loc["bottleneck", "r2_cv"] > cv.loc["additive", "r2_cv"]
+    test = np.zeros((13, 13), dtype=bool)
+    test[::3, 1::2] = True
+    test[12, 12] = False
+    P = _predict("bottleneck", M, STEPS, ~test)
+    assert P[test] == pytest.approx(M[test], abs=1e-12)
+
+
+def test_full_mask_bottleneck_matches_fit_models():
+    M = np.random.default_rng(7).random((13, 13))
+    P = _predict("bottleneck", M, STEPS, np.ones((13, 13), dtype=bool))
+    table = fit_models(M, STEPS)
+    r2 = table.loc[table["model"].str.startswith("bottleneck"), "r2"].item()
+    assert _r2(M, P) == pytest.approx(r2, abs=1e-12)
+
+
+def test_bottleneck_unobserved_key_is_finite():
+    M = _bneck_grid()
+    idx = np.arange(13)
+    mask = np.minimum.outer(idx, idx) != 12
+    P = _predict("bottleneck", M, STEPS, mask)
+    assert np.isfinite(P).all()
+    assert P[12, 12] == pytest.approx(M[mask].mean())
+
+
+def test_factorization_table_reports_bottleneck_columns():
+    runs = {("dog", "orig"): _runs({CKPT_TEACHER_TAGS[0]: _bneck_grid()})}
+    table = factorization_table(runs, STEPS, n_folds=5, n_repeats=1)
+    previous = {"animal", "lineage", "n_recipes", "in_add", "in_prod", "in_prox", "in_rank2",
+                "cv_add", "cv_prod", "cv_prox", "diag_prod", "diag_prox", "a_143_125",
+                "b_143_125", "a_peak_k", "b_peak_k"}
+    assert previous <= set(table.columns)
+    assert {"in_bneck", "cv_bneck"} <= set(table.columns)
+    cols = list(table.columns)
+    assert cols.index("cv_prod") < cols.index("cv_bneck") < cols.index("cv_prox")
 
 
 def _runs(grids: dict[str, np.ndarray], seeds=(1,)) -> pd.DataFrame:
@@ -213,6 +287,15 @@ def test_factor_borrowing_shared_b_transfers_but_a_does_not():
     assert table.loc["x", "b_from_src"] == pytest.approx(1.0, abs=1e-6)
     assert table.loc["x", "a_from_src"] < 0.5
     assert table.loc["x", "corr_b"] == pytest.approx(1.0, abs=1e-6)
+    assert table.loc["x", "both_from_src"] < 0.5
+
+
+def test_factor_borrowing_both_from_src_scalar_multiple():
+    M = np.outer(np.linspace(0.2, 1.0, 13), np.linspace(0.2, 1.0, 13) ** 2)
+    table = factor_borrowing({"x": M, "y": 3.0 * M}, STEPS)
+    assert list(table.columns[:5]) == ["target", "source", "own_fit", "own_product", "both_from_src"]
+    for col in ("both_from_src", "own_product"):
+        assert table[col].to_numpy() == pytest.approx(1.0, abs=1e-6)
 
 
 def test_factor_summary_ratios_and_peaks():
@@ -248,3 +331,378 @@ def test_discover_checkpoint_grids(tmp_path):
     assert not cov.loc["seed2", "complete"] and cov.loc["seed2", "cells"] == 1
     assert cov.loc["seed1", "dropped"] == [part_tag] and cov.loc["seed1", "n_recipes"] == 1
     assert set(runs[("dog", "seed1")]["tag"]) == {full_tag}
+
+
+# --------------------------------------------------------------------------------------
+# send / receive index
+# --------------------------------------------------------------------------------------
+from subliminal_learning.analysis.checkpoint_grid_factorization import (  # noqa: E402
+    send_receive_agreement,
+    send_receive_index,
+    send_receive_seed_index,
+)
+
+SR_STEPS = [1000, 2000, 3000, 4000, 5000, 6000]
+SR_A = np.array([0.1, 0.4, 1.0, 0.5, 0.9, 0.3])
+SR_B = np.array([0.8, 0.2, 0.5, 1.0, 0.45, 0.6])
+
+
+def _sr_runs(M_by_tag: dict[str, np.ndarray], seeds=(1, 2)) -> pd.DataFrame:
+    rows = []
+    for tag, M in M_by_tag.items():
+        for i, t in enumerate(SR_STEPS):
+            for j, s in enumerate(SR_STEPS):
+                for k in seeds:
+                    rows.append({"t": t, "s": s, "tag": tag, "ftseed": k, "p": M[i, j]})
+    return pd.DataFrame(rows)
+
+
+def _sr_grid(a=SR_A, b=SR_B) -> np.ndarray:
+    return np.outer(a, b) + 0.01 * np.exp(-_dk(SR_STEPS) / 2.0)
+
+
+def _dk(steps):
+    T = np.asarray(steps, dtype=float) / 1000.0
+    return np.abs(np.subtract.outer(T, T))
+
+
+def test_send_receive_index_recovers_sign_and_transpose_flips():
+    M = _sr_grid()
+    runs = {("dog", "orig"): _sr_runs({"r1": M, "r2": M.T}),
+            ("dog", "x"): _sr_runs({"r1": M})}
+    idx = send_receive_index(runs, SR_STEPS)
+    assert list(idx.index.get_level_values("fit")) == ["dog", "dog/r1", "dog/r2"]
+    assert list(idx.index.get_level_values("recipe")) == ["all", "r1", "r2"]
+    assert list(idx.columns) == [1, 2, 3, 4, 5, 6]
+    truth = np.log2((SR_A / SR_A.max()) / (SR_B / SR_B.max()))
+    r1 = idx.xs("dog/r1", level="fit").iloc[0].to_numpy()
+    r2 = idx.xs("dog/r2", level="fit").iloc[0].to_numpy()
+    big = np.abs(truth) > 0.5
+    assert np.array_equal(np.sign(r1[big]), np.sign(truth[big]))
+    np.testing.assert_allclose(r2, -r1, atol=1e-6)
+    pooled = send_receive_index({("dog", "orig"): _sr_runs({"r1": M})}, SR_STEPS)
+    assert np.array_equal(np.sign(pooled.iloc[0].to_numpy()[big]), np.sign(truth[big]))
+
+
+def test_send_receive_agreement_counts():
+    idx = pd.DataFrame(
+        {1: [1.0, 0.2, -1.5, np.nan], 2: [0.3, 0.1, 0.4, 0.2]},
+        index=pd.MultiIndex.from_tuples(
+            [("a", "a", "all"), ("b/x", "b", "x"), ("c/y", "c", "y"), ("d/z", "d", "z")],
+            names=["fit", "animal", "recipe"]))
+    ag = send_receive_agreement(idx)
+    r1, r2 = ag.loc[1], ag.loc[2]
+    assert (r1.n_pos, r1.n_neg, r1.n_nan, r1.majority) == (2, 1, 1, 1)
+    assert not r1.unanimous and r2.unanimous
+    assert r1.share_close == pytest.approx(1 / 3)
+    assert r1.median_abs == pytest.approx(1.0)
+    assert r1.dissenters == "c/y" and r2.dissenters == ""
+    assert r2.share_close == 1.0
+    assert "seed_sd" not in ag.columns
+
+
+def test_send_receive_seed_sd_zero_for_identical_seeds():
+    M = _sr_grid()
+    runs = _sr_runs({"r1": M}, seeds=(1, 2, 3))
+    runs = pd.concat([runs, pd.DataFrame([{"t": 1000, "s": 1000, "tag": "r1", "ftseed": 9,
+                                           "p": 0.5}])])  # incomplete seed: skipped
+    seed_idx = send_receive_seed_index(runs, SR_STEPS)
+    assert list(seed_idx.index) == ["seed1", "seed2", "seed3"]
+    idx = send_receive_index({("dog", "orig"): runs[runs.ftseed < 9]}, SR_STEPS)
+    ag = send_receive_agreement(idx, seed_index=seed_idx)
+    np.testing.assert_allclose(ag["seed_sd"].to_numpy(), 0.0, atol=1e-9)
+
+
+def test_send_receive_curve_agreement_identical_and_reversed():
+    from subliminal_learning.analysis.checkpoint_grid_factorization import (
+        send_receive_curve_agreement,
+    )
+    a = np.array([0.1, 0.2, 0.4, 0.6, 0.8, 1.0])
+    M = _sr_grid(a=a, b=SR_B)
+    Mrev = _sr_grid(a=a[::-1], b=SR_B)
+    runs = {("dog", "orig"): _sr_runs({"r1": M, "r2": M}),
+            ("cat", "orig"): _sr_runs({"r1": M, "r2": Mrev})}
+    t = send_receive_curve_agreement(runs, SR_STEPS).set_index("group")
+    assert list(t.index) == ["animals", "dog", "cat"]
+    assert t.loc["dog", "n_pairs"] == 1
+    assert t.loc["dog", ["a_min", "b_min"]].tolist() == pytest.approx([1.0, 1.0])
+    assert t.loc["cat", "a_min"] == pytest.approx(-1.0)
+
+
+# --------------------------------------------------------------------------------------
+# row-col score, shared factors, variance decomposition
+# --------------------------------------------------------------------------------------
+from subliminal_learning.analysis.checkpoint_grid_factorization import (  # noqa: E402
+    send_receive_rowcol,
+    send_receive_variance_decomposition,
+    shared_factor_fit,
+    shared_factor_table,
+)
+
+
+def test_send_receive_rowcol_sign_and_transpose():
+    M = np.outer(SR_A, SR_B)
+    score = send_receive_rowcol({("dog", "orig"): _sr_runs({"r1": M, "r2": M.T})}, SR_STEPS)
+    assert list(score.index.get_level_values("fit")) == ["dog", "dog/r1", "dog/r2"]
+    r1 = score.xs("dog/r1", level="fit").iloc[0].to_numpy()
+    r2 = score.xs("dog/r2", level="fit").iloc[0].to_numpy()
+    big = np.abs(SR_A - SR_B) > 0.25
+    assert np.array_equal(np.sign(r1[big]), np.sign((SR_A - SR_B)[big]))
+    np.testing.assert_allclose(r2, -r1, atol=1e-12)
+    agree = send_receive_agreement(score)
+    assert list(agree.index) == [1, 2, 3, 4, 5, 6]
+
+
+def test_shared_factor_fit_recovers_multiples_and_penalises_sharing():
+    base = np.outer(SR_A, SR_B)
+    fit = shared_factor_fit({"x": base, "y": 3 * base}, share_a=True, share_b=True)
+    assert min(fit.r2.values()) > 1 - 1e-9
+    assert fit.scale["y"] / fit.scale["x"] == pytest.approx(3.0, rel=1e-6)
+    assert fit.a_shared.max() == pytest.approx(1.0) and fit.b_shared.max() == pytest.approx(1.0)
+    grids = {"x": base, "y": np.outer(SR_A, SR_B[::-1])}
+    tab = shared_factor_table(grids, ceiling={"x": 0.9})
+    assert list(tab.index) == ["own a, own b", "shared a, own b", "own a, shared b",
+                               "shared a, shared b", "ceiling"]
+    assert tab.loc["own a, shared b", "y"] < tab.loc["own a, own b", "y"]
+    assert np.isnan(tab.loc["ceiling", "y"])
+
+
+def test_send_receive_variance_decomposition():
+    rng = np.random.default_rng(0)
+    keys = [(f"{an}/{r}", an, r) for an in ("dog", "cat") for r in ("r1", "r2", "r3")]
+    idx = pd.MultiIndex.from_tuples(keys, names=["fit", "animal", "recipe"])
+    noisy = pd.DataFrame(rng.normal(size=(6, 5)), index=idx, columns=range(5))
+    dec = send_receive_variance_decomposition(noisy)
+    assert list(dec["component"]) == ["step", "step x animal", "step x recipe", "residual"]
+    assert dec["share"].sum() == pytest.approx(1.0)
+    pure = pd.DataFrame(np.tile(rng.normal(size=5), (6, 1)), index=idx, columns=range(5))
+    pooled = pd.DataFrame([[9.0] * 5], columns=range(5),
+                          index=pd.MultiIndex.from_tuples([("dog", "dog", "all")],
+                                                          names=idx.names))
+    dec = send_receive_variance_decomposition(pd.concat([pooled, pure]))
+    assert dec.set_index("component").loc["step", "share"] == pytest.approx(1.0)
+
+
+# --------------------------------------------------------------------------------------
+# OLMo loaders + Pythia trajectory readout
+# --------------------------------------------------------------------------------------
+from subliminal_learning.analysis.checkpoint_grid_factorization import (  # noqa: E402
+    OLMO_BASE_DCLM,
+    OLMO_BASE_DOLMA,
+    OLMO_FINAL_STEP,
+    OLMO_STUDENT_TAGS,
+    discover_olmo_checkpoint_grids,
+    load_checkpoint_grid_runs,
+    load_olmo_base_controls,
+    load_olmo_checkpoint_grid_runs,
+)
+
+_OP = "DataDecide-dolma1_7-1B-seed-default"
+
+
+def _olmo_dir(step: int, op: str = _OP) -> str:
+    return op if step == OLMO_FINAL_STEP else f"{op}@step{step}"
+
+
+def _olmo_leaf(root, t, s, *, tag="ep10_lr1e-3_r128a32", dataset="ex10-20_prefix_n100k",
+               controls=False, animal="elephant", seed="seed-default",
+               base="DataDecide-dolma1_7-1B"):
+    op = f"{base}-{seed}"
+    base = root / "students" / ("controls/base" if controls else animal)
+    if s != OLMO_FINAL_STEP:
+        base = base / "ckpt"
+    d = base / _olmo_dir(s, op) / f"teacher-{_olmo_dir(t, op)}"
+    if not controls:
+        d = d / f"{tag}_tseed0"
+    d = d / dataset / OLMO_STUDENT_TAGS[0] / "ftseed1"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _pe(path: Path, p: float):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"sets": {"test": {"p_target": p}}}))
+
+
+def _traj(leaf: Path, pts: list[tuple[int, float]]):
+    (leaf / "eval").mkdir(parents=True, exist_ok=True)
+    (leaf / "eval" / "pref_traj.json").write_text(json.dumps(
+        {"points": [{"step": st, "test": {"p_target": v}} for st, v in pts]}))
+
+
+def test_olmo_grid_maps_final_dirs_to_final_step(tmp_path):
+    steps = [30000, OLMO_FINAL_STEP]
+    for t in steps:
+        for s in steps:
+            _pe(_olmo_leaf(tmp_path, t, s) / "preference_eval.json", t / 1e6 + s / 1e7)
+    runs = load_olmo_checkpoint_grid_runs(tmp_path, "elephant", student_tag=OLMO_STUDENT_TAGS[0])
+    assert set(zip(runs["t"], runs["s"])) == {(t, s) for t in steps for s in steps}
+    row = runs[(runs["t"] == OLMO_FINAL_STEP) & (runs["s"] == 30000)].iloc[0]
+    assert row["p"] == pytest.approx(OLMO_FINAL_STEP / 1e6 + 30000 / 1e7)
+
+
+def test_olmo_grid_falls_back_to_n200k(tmp_path):
+    _pe(_olmo_leaf(tmp_path, 55000, 30000, dataset="ex10-20_prefix_n200k")
+        / "preference_eval.json", 0.3)
+    runs = load_olmo_checkpoint_grid_runs(tmp_path, "elephant", student_tag=OLMO_STUDENT_TAGS[0])
+    assert runs[["t", "s", "p"]].values.tolist() == [[55000, 30000, 0.3]]
+
+
+def test_olmo_grid_reads_eval_animal_location(tmp_path):
+    _pe(_olmo_leaf(tmp_path, 30000, 30000) / "eval" / "elephant" / "preference_eval.json", 0.4)
+    runs = load_olmo_checkpoint_grid_runs(tmp_path, "elephant", student_tag=OLMO_STUDENT_TAGS[0])
+    assert runs["p"].tolist() == [0.4]
+
+
+def test_olmo_grid_peak_readout_is_trajectory_max(tmp_path):
+    leaf = _olmo_leaf(tmp_path, 30000, 30000)
+    _pe(leaf / "preference_eval.json", 0.1)
+    _traj(leaf, [(100, 0.2), (200, 0.6), (300, 0.3)])
+    runs = load_olmo_checkpoint_grid_runs(tmp_path, "elephant", student_tag=OLMO_STUDENT_TAGS[0],
+                                          readout="peak")
+    assert runs["p"].tolist() == [0.6]
+
+
+def test_olmo_base_controls_tag_is_base(tmp_path):
+    for s in (30000, OLMO_FINAL_STEP):
+        _pe(_olmo_leaf(tmp_path, 30000, s, controls=True) / "eval" / "elephant"
+            / "preference_eval.json", 0.05)
+    ctrl = load_olmo_base_controls(tmp_path, "elephant", student_tag=OLMO_STUDENT_TAGS[0])
+    assert set(ctrl["tag"]) == {"base"} and sorted(ctrl["s"]) == [30000, OLMO_FINAL_STEP]
+
+
+def test_olmo_grid_default_keeps_unlisted_recipe(tmp_path):
+    _pe(_olmo_leaf(tmp_path, 30000, 30000, tag="ep20_lr1e-3_r16a16") / "preference_eval.json", 0.3)
+    runs = load_olmo_checkpoint_grid_runs(tmp_path, "elephant", student_tag=OLMO_STUDENT_TAGS[0])
+    assert list(runs["tag"]) == ["ep20_lr1e-3_r16a16"]
+
+
+def _olmo_grid(root, steps, tag, seed="seed-default", skip=()):
+    for t in steps:
+        for s in steps:
+            if (t, s) not in skip:
+                _pe(_olmo_leaf(root, t, s, tag=tag, seed=seed) / "preference_eval.json", 0.2)
+
+
+def test_discover_olmo_keeps_complete_and_drops_partial(tmp_path):
+    steps = [30000, 50000, OLMO_FINAL_STEP]
+    _olmo_grid(tmp_path, steps, "ep10_lr1e-3_r128a32")
+    _olmo_grid(tmp_path, steps, "ep5_lr2e-3_r32a32", skip={(30000, 50000)})
+    cov, runs = discover_olmo_checkpoint_grids(
+        tmp_path, "elephant", ["seed-default"], student_tag=OLMO_STUDENT_TAGS[0], steps=steps)
+    row = cov.iloc[0]
+    assert bool(row["complete"]) and row["n_recipes"] == 1 and row["n_cells"] == 9
+    assert row["recipes"] == ["ep10_lr1e-3_r128a32"]
+    assert row["dropped"] == ["ep5_lr2e-3_r32a32"]
+    assert set(runs[(OLMO_BASE_DOLMA, "seed-default")]["tag"]) == {"ep10_lr1e-3_r128a32"}
+
+
+def test_discover_olmo_falls_back_without_65000(tmp_path):
+    full = [30000, 40000, 45000, 50000, 55000, 60000, 65000, OLMO_FINAL_STEP]
+    seven = [x for x in full if x != 65000]
+    _olmo_grid(tmp_path, seven, "ep10_lr1e-3_r128a32", seed="seed-default")
+    _olmo_grid(tmp_path, full, "ep10_lr1e-3_r128a32", seed="seed-large-aux-2")
+    cov, runs = discover_olmo_checkpoint_grids(
+        tmp_path, "elephant", ["seed-default", "seed-large-aux-2"],
+        student_tag=OLMO_STUDENT_TAGS[0])
+    d, a = cov.set_index("seed").loc["seed-default"], cov.set_index("seed").loc["seed-large-aux-2"]
+    assert d["n_steps"] == 7 and bool(d["complete"]) and d["steps_used"] == seven
+    assert a["n_steps"] == 8 and bool(a["complete"]) and a["steps_used"] == full
+    assert 65000 not in set(runs[(OLMO_BASE_DOLMA, "seed-default")]["t"]) and 65000 in set(runs[(OLMO_BASE_DOLMA, "seed-large-aux-2")]["t"])
+    assert len(runs[(OLMO_BASE_DOLMA, "seed-large-aux-2")]) == 64
+
+
+def test_pythia_traj_step_picks_step_and_skips_missing(tmp_path):
+    tag = CKPT_TEACHER_TAGS[0]
+    _write_cell(tmp_path, "dog", "", 75000, 75000, tag, p=0.9)
+    _write_cell(tmp_path, "dog", "", 75000, 80000, tag, p=0.9)
+    cell = (tmp_path / "students" / "dog" / "ckpt" / "pythia-160m@step{s}"
+            / "teacher-pythia-160m@step75000" / f"{tag}_tseed1" / DATASET_DIR
+            / CKPT_STUDENT_TAG / "ftseed1")
+    _traj(Path(str(cell).format(s=75000)), [(6250, 0.2), (12500, 0.4), (25000, 0.7)])
+    _traj(Path(str(cell).format(s=80000)), [(6250, 0.2), (25000, 0.7)])
+    runs = load_checkpoint_grid_runs(tmp_path, "dog", "orig", traj_step=12500)
+    assert runs[["s", "p"]].values.tolist() == [[75000, 0.4]]
+    assert load_checkpoint_grid_runs(tmp_path, "dog", "orig")["p"].tolist() == [0.9, 0.9]
+
+
+# --------------------------------------------------------------------------------------
+# Identifiability of the masked product + proximity fit
+# --------------------------------------------------------------------------------------
+from subliminal_learning.analysis.checkpoint_grid_factorization import (  # noqa: E402
+    PROXIMITY_MAX_COND,
+)
+
+STEPS7 = CKPT_STEPS[:7]
+_T7 = np.asarray(STEPS7) / 1000.0
+E7 = np.exp(-np.abs(np.subtract.outer(_T7, _T7)) / 10.0)
+
+
+def _prox_grid7():
+    rng = np.random.default_rng(1)
+    return (np.outer(np.linspace(0.2, 0.8, 7), np.linspace(0.4, 1.0, 7)) + 0.1 * E7
+            + 0.01 * rng.standard_normal((7, 7)))
+
+
+def test_well_conditioned_grid_reports_small_cond_and_no_refusals():
+    M = _prox_grid7()
+    fit = fit_product_proximity(M, STEPS7)
+    assert np.isfinite(fit.cond) and fit.cond < PROXIMITY_MAX_COND  # measured ~6.7
+    cv = cell_cross_validation(M, STEPS7, n_repeats=2).set_index("model")
+    assert list(cv.columns)[-1] == "n_unidentified"
+    assert (cv["n_unidentified"] == 0).all()
+    assert np.isfinite(cv.loc["product+proximity", "r2_cv"])
+
+
+def test_unpinned_fold_is_refused(monkeypatch):
+    # Degenerate case built by hand: row 0 and column 0 share exactly one observation,
+    # (0, 0), so a[0], b[0] and c trade off freely on the fitted cells.
+    M = _prox_grid7()
+    held = np.zeros((7, 7), dtype=bool)
+    held[0, 1:] = True
+    held[1:, 0] = True
+    fit = fit_product_proximity(M, STEPS7, ~held)
+    assert fit.cond > PROXIMITY_MAX_COND  # measured ~1e18
+    assert np.isfinite(fit.P).all()  # still returned, not raised
+
+    # Hand-made two-fold partition: fold 0 is exactly ``held`` (even perm values).
+    perm = np.where(held, 0, 1) + 2 * np.arange(49).reshape(7, 7)
+
+    class _Rng:
+        def permutation(self, size):
+            return perm.ravel().copy()
+
+    monkeypatch.setattr(np.random, "default_rng", lambda seed=None: _Rng())
+    cv = cell_cross_validation(M, STEPS7, n_folds=2, n_repeats=1).set_index("model")
+    assert np.isnan(cv.loc["product+proximity", "r2_cv"])
+    assert cv.loc["product+proximity", "n_unidentified"] > 0
+    assert np.isfinite(cv.loc["product+proximity", "r2_in"])
+    for model in ("additive", "product", "bottleneck"):
+        assert np.isfinite(cv.loc[model, "r2_cv"])
+        assert cv.loc[model, "n_unidentified"] == 0
+
+
+def test_olmo_grid_reads_non_default_base_only_when_named(tmp_path):
+    for t in (30000, OLMO_FINAL_STEP):
+        for s in (30000, OLMO_FINAL_STEP):
+            _pe(_olmo_leaf(tmp_path, t, s, base=OLMO_BASE_DCLM) / "preference_eval.json", 0.2)
+    kw = dict(student_tag=OLMO_STUDENT_TAGS[0])
+    assert load_olmo_checkpoint_grid_runs(tmp_path, "elephant", **kw).empty
+    runs = load_olmo_checkpoint_grid_runs(tmp_path, "elephant", base=OLMO_BASE_DCLM, **kw)
+    assert len(runs) == 4 and set(runs["t"]) == {30000, OLMO_FINAL_STEP}
+
+
+def test_discover_olmo_reports_base_column_and_keys(tmp_path):
+    steps = [30000, OLMO_FINAL_STEP]
+    for t in steps:
+        for s in steps:
+            _pe(_olmo_leaf(tmp_path, t, s, base=OLMO_BASE_DCLM) / "preference_eval.json", 0.2)
+    cov, runs = discover_olmo_checkpoint_grids(
+        tmp_path, "elephant", ["seed-default"], student_tag=OLMO_STUDENT_TAGS[0],
+        steps=steps, base=OLMO_BASE_DCLM)
+    assert list(cov.columns[:3]) == ["animal", "base", "seed"]
+    assert cov["base"].tolist() == [OLMO_BASE_DCLM] and bool(cov["complete"].iloc[0])
+    assert list(runs) == [(OLMO_BASE_DCLM, "seed-default")]
+    cov0, runs0 = discover_olmo_checkpoint_grids(
+        tmp_path, "elephant", ["seed-default"], student_tag=OLMO_STUDENT_TAGS[0], steps=steps)
+    assert cov0["base"].tolist() == [OLMO_BASE_DOLMA] and runs0 == {}

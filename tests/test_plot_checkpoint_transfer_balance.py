@@ -1,7 +1,7 @@
 import pytest
 
 from scripts.plot_checkpoint_takeoff import STEPS
-from scripts.plot_checkpoint_transfer_balance import balance, load_matrix
+from notebooks.figures.figure3_checkpoints.plot_checkpoint_transfer_balance import balance, load_matrix
 
 
 def test_balance_uses_teacher_rows_and_student_columns():

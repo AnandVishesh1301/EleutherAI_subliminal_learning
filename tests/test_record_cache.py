@@ -315,3 +315,81 @@ def test_mixed_type_column_falls_back_to_pandas_persist(tmp_path):
     back = _load(tmp_path, ["a", "b"], refresh=False)
     assert sorted(back.run_path) == ["a", "b"]
     assert set(back.n_train_steps.astype(str)) == {"10", "ten"}
+
+
+def _three_kind_cache(root: Path):
+    """Synthetic records for three cache kinds: pile_probe and two json_blob record paths."""
+    for i in range(6):
+        _probe(root, f"r{i}", kl=0.1 * i)
+        d = root / f"r{i}"
+        (d / "doc.json").write_text(json.dumps({"i": i, "s": "a\nb"}))
+        (d / "doc2.json").write_text(json.dumps({"j": -i}))
+
+
+def _same(a, b) -> bool:
+    """Cell-identical (NaN == NaN), ignoring dtype: fresh rows are object-typed until re-parsed."""
+    if list(a.columns) != list(b.columns) or len(a) != len(b):
+        return False
+    return all(((a[c].astype(object).values == b[c].astype(object).values)
+                | (a[c].isna().values & b[c].isna().values)).all() for c in a.columns)
+
+
+def _three_loads(root, paths, **kw):
+    return (rc.load_record_cache(root, "pile_probe", paths, verbose=False, **kw),
+            rc.load_record_cache(root, "json_blob", paths, rel_record="doc.json",
+                                 cache_rel="analysis/blob_a.csv", verbose=False, **kw),
+            rc.load_record_cache(root, "json_blob", paths, rel_record="doc2.json",
+                                 cache_rel="analysis/blob_b.csv", verbose=False, **kw))
+
+
+def test_warm_call_builds_lookup_once_per_cache_key(tmp_path, monkeypatch):
+    rc._CSV_MEMO.clear()
+    paths = [f"r{i}" for i in range(6)]
+    _three_kind_cache(tmp_path)
+    cold = _three_loads(tmp_path, paths)
+    rc._CSV_MEMO.clear()
+    calls = []
+    orig = rc._build_index
+    monkeypatch.setattr(rc, "_build_index", lambda f: (calls.append(len(f)), orig(f))[1])
+    # (a) warm: one index build per cache file (the parse), then none on repeat calls.
+    first = _three_loads(tmp_path, paths[:2])
+    assert len(calls) == 3
+    caches = [rc.cache_path(tmp_path, rc.get_kind("pile_probe")),
+              tmp_path / "analysis/blob_a.csv", tmp_path / "analysis/blob_b.csv"]
+    stamps = [c.stat().st_mtime_ns for c in caches]
+    for _ in range(3):
+        again = _three_loads(tmp_path, paths[:2])
+    assert len(calls) == 3                                   # no per-call rebuild
+    assert [c.stat().st_mtime_ns for c in caches] == stamps  # no-write hit
+    # (d) identical results to the cold (index-free sweep) load, filtered to the inventory.
+    for c, f, a in zip(cold, first, again):
+        exp = c[c.run_path.isin(paths[:2])].reset_index(drop=True)
+        assert _same(f, exp) and _same(a, exp)
+    full = _three_loads(tmp_path, paths)
+    for c, f in zip(cold, full):
+        assert _same(f, c)
+    # mutating a returned frame never leaks into the memo
+    full[0]["kl"] = -1.0
+    assert (_three_loads(tmp_path, paths)[0].kl != -1.0).all()
+
+
+def test_indexed_lookup_still_rereads_changes_and_unions_new_paths(tmp_path):
+    rc._CSV_MEMO.clear()
+    _probe(tmp_path, "a", kl=1.0)
+    _probe(tmp_path, "b", kl=2.0)
+    _load(tmp_path, ["a", "b"])
+    # (b) mtime change at equal size, then size change at equal mtime -> re-read
+    f = _probe(tmp_path, "a", kl=3.0)
+    st = f.stat()
+    os.utime(f, ns=(st.st_mtime_ns + 1, st.st_mtime_ns + 1))
+    assert _load(tmp_path, ["a"]).kl.iloc[0] == 3.0
+    ns = f.stat().st_mtime_ns
+    _probe(tmp_path, "a", kl=33.0)
+    os.utime(f, ns=(ns, ns))
+    assert _load(tmp_path, ["a"]).kl.iloc[0] == 33.0
+    # (c) a new path is added and the union persisted (b survives a disjoint inventory)
+    _probe(tmp_path, "c", kl=4.0)
+    assert list(_load(tmp_path, ["c"]).kl) == [4.0]
+    rc._CSV_MEMO.clear()
+    back = _load(tmp_path, ["a", "b", "c"], refresh=False)
+    assert dict(zip(back.run_path, back.kl)) == {"a": 33.0, "b": 2.0, "c": 4.0}

@@ -92,6 +92,7 @@ import yaml
 
 from jobq.model import sanitize_jobkey
 from subliminal_learning.config import load_yaml_extends
+from subliminal_learning.jobq_cmd import assert_portable_jobs, assert_portable_text, portable_path
 from subliminal_learning.jobq_folder import configured_queue_folder
 from subliminal_learning.utils.io import atomic_write_text, file_lock
 from subliminal_learning.utils.perms import DIR_MODE
@@ -584,6 +585,7 @@ def submit(
     # safe_load; an older raw-copy snapshot that parses to the same doc is reused.
     snapshot_path = queue_folder / f"{queue_prefix}.sweep.yaml"
     new_content = yaml.safe_dump(sweep, sort_keys=False)
+    assert_portable_text(str(snapshot_path), new_content)
     existing_content = snapshot_path.read_text() if snapshot_path.exists() else None
     action = _snapshot_action(
         existing_content, new_content, allow_snapshot_update, allow_snapshot_growth,
@@ -620,9 +622,13 @@ def submit(
                         "identical expansion" if action == "reuse_expansion"
                         else "identical resolved doc")
 
-    sweep["config_path"] = str(snapshot_path)
+    # Repo-relative (resolved against the job's cwd), never an absolute /home/angela form:
+    # nodes whose pool uid cannot read this checkout must still find the snapshot.
+    sweep["config_path"] = portable_path(snapshot_path, REPO_ROOT)
     missing_deps: list[tuple[str, int]] = []
     specs = expand_jobs(sweep, REPO_ROOT, queue_folder, missing_deps)
+    for q in specs:
+        assert_portable_jobs(q.jobs)
     if missing_deps:
         dep_prefix = sweep["jobq"].get("depends_on_prefix")
         for stage, step in missing_deps:

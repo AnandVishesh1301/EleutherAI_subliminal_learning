@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from scripts import plot_transfer_family_multiway as plot
+from notebooks.figures.figure2_family import plot_transfer_family_multiway as plot
 from subliminal_learning.analysis import transfer_family_pooled as tfp
 from subliminal_learning.analysis import transfer_family_registry_io as registry
 
@@ -338,97 +338,6 @@ def test_modern_reproduction_is_separate_in_both_overviews(tmp_path, monkeypatch
         table.loc[table.relation.eq(tfp.RELATION_MODERN_REPRO), "n_pairs"].gt(0).all()
     )
     assert len(saved) == 15
-
-
-def test_top_row_family_groups_preserve_values_colors_and_intervals(
-    tmp_path, monkeypatch
-):
-    from matplotlib.colors import to_rgba
-
-    frame, ctx = fixture()
-    table = plot.summarize(frame, ctx, n_bootstrap=5, seed=0)
-    relations = list(tfp.RELATIONS[:4])
-    expected = np.array(
-        [
-            [0.01, 0.05, 0.11, 0.2],
-            [0.02, 0.07, 0.13, 0.3],
-            [0.03, 0.09, 0.17, 0.4],
-            [0.04, 0.12, 0.19, 0.5],
-        ]
-    )
-    for j, relation in enumerate(relations):
-        mask = table.relation.eq(relation) & table.group.eq("pooled")
-        for k, stat in enumerate(plot.STATS):
-            table.loc[mask, stat] = expected[j, k]
-            if k < 3:
-                table.loc[mask, f"{stat}_lower"] = expected[j, k] - 0.003
-                table.loc[mask, f"{stat}_upper"] = expected[j, k] + 0.007
-    regular = plot.draw_top_row(table, ctx)
-    grouped = plot.draw_top_row(table, ctx, quantile_layout="families")
-    left, right = grouped.axes
-    assert [t.get_text() for t in left.get_xticklabels()] == [
-        t.get_text() for t in right.get_xticklabels()
-    ]
-    assert [t.get_text() for t in right.get_legend().get_texts()] == plot.STAT_LABELS
-    palette = [to_rgba(c) for c in ["#E9B000", "#D7263D", "#7B2CBF", "#00B8D9"]]
-    np.testing.assert_allclose(
-        [h.get_facecolor() for h in right.get_legend().legend_handles], palette
-    )
-    for j in range(4):
-        bars = right.patches[j * 4 : (j + 1) * 4]
-        np.testing.assert_allclose([b.get_height() for b in bars], expected[j])
-        centers = np.array([b.get_x() + b.get_width() / 2 for b in bars])
-        assert all(abs(centers - j) < 0.5) and all(np.diff(centers) > 0)
-        np.testing.assert_allclose([b.get_facecolor() for b in bars], palette)
-        intervals = verticals(right)[j * 3 : (j + 1) * 3]
-        np.testing.assert_allclose([v[0, 0] for v in intervals], centers[:3])
-        np.testing.assert_allclose(
-            [v[:, 1] for v in intervals],
-            np.column_stack([expected[j, :3] - 0.003, expected[j, :3] + 0.007]),
-        )
-        old_bars = regular.axes[1].patches[j * 4 : (j + 1) * 4]
-        np.testing.assert_allclose([b.get_height() for b in old_bars], expected[j])
-        np.testing.assert_array_equal(
-            np.rint([b.get_x() + b.get_width() / 2 for b in old_bars]), np.arange(4)
-        )
-        np.testing.assert_allclose(
-            [b.get_facecolor() for b in old_bars], np.tile(palette[j], (4, 1))
-        )
-    assert len(verticals(right)) == 12 and right.get_ylim()[0] == 0
-    for old, new in zip(regular.axes[0].patches, left.patches):
-        assert old.get_height() == new.get_height()
-        assert old.get_facecolor() == new.get_facecolor()
-        assert old.get_hatch() == new.get_hatch()
-    np.testing.assert_allclose(verticals(regular.axes[0]), verticals(left))
-    # Missing summary values cannot silently become zero-height observations.
-    missing = table.copy()
-    mask = missing.relation.eq(relations[1]) & missing.group.eq("pooled")
-    missing.loc[
-        mask,
-        plot.STATS
-        + [f"{s}_{bound}" for s in plot.STATS[:3] for bound in ["lower", "upper"]],
-    ] = np.nan
-    absent = plot.draw_top_row(missing, ctx, quantile_layout="families")
-    assert all(np.isnan(b.get_height()) for b in absent.axes[1].patches[4:8])
-    assert len(verticals(absent.axes[1])) == 9
-    saved = []
-    monkeypatch.setattr(
-        matplotlib.figure.Figure,
-        "savefig",
-        lambda self, path, **kwargs: saved.append(Path(path).name),
-    )
-    summary = tmp_path / "summary.csv"
-    table.to_csv(summary, index=False)
-    for group, layout, stem in [
-        ("pooled", "statistics", "transfer_family_complete_multiway_top_row"),
-        ("pooled", "families", "transfer_family_complete_multiway_top_row_families"),
-        ("dog", "families", "transfer_family_complete_multiway_top_row_dog_families"),
-    ]:
-        plot.export_top_row(
-            summary, tmp_path, quantile_group=group, quantile_layout=layout
-        )
-        assert saved[-3:] == [f"{stem}.{ext}" for ext in ["png", "pdf", "svg"]]
-    plot.plt.close("all")
 
 
 def test_overview_labels_title_and_olmo_slot_are_explicit():

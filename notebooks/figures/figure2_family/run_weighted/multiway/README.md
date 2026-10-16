@@ -29,12 +29,6 @@ an independent control-evaluation resampling dimension or cover all possible
 sources of dependence. Source identities are drawn from the observed family/cohort
 pool, so the relative contributions of animals and arms can change across draws.
 
-Both comparisons use the same 45,938 finite matched pairs in the original four
-relationships, with no collapse filtering and no division by receiver priors.
-The pooled and dog-only bar heights are ordinary run-weighted median, 75th
-percentile, 95th percentile, and observed maximum. Quantiles use linear
-interpolation. The maximum is descriptive and has no interval.
-
 Intervals are pointwise percentile intervals from 2,000 bootstrap replicates
 (seed 0). They condition on the available configuration grid, selected teachers,
 and measured probabilities. They do not propagate evaluation-response sampling,
@@ -46,10 +40,11 @@ Canonical manifest checks show core30 for same-model and different-init/same-dat
 comparisons, and core56 for cross-data-order and cross-seed. No outside cell tags
 enter. Missing matched endpoints remain missing; resampling does not fill them.
 
-Reproduce both new versions with:
+The complete-grid outputs in this directory are described in
+[COMPLETE_GRIDS.md](COMPLETE_GRIDS.md). Reproduce them with:
 
 ```bash
-uv run python -m scripts.plot_transfer_family_run_weighted --method both --n-bootstrap 2000 --seed 0
+uv run python -m notebooks.figures.figure2_family.plot_transfer_family_multiway --n-bootstrap 2000 --seed 0
 ```
 
 References: [Owen (2007), The pigeonhole bootstrap](https://arxiv.org/abs/0712.1111),

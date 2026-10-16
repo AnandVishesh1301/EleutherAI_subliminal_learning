@@ -8,7 +8,9 @@ import pandas as pd
 import pytest
 
 matplotlib.use("Agg")
-from scripts import plot_transfer_family_pooled_minus_control as cli  # noqa: E402
+from notebooks.figures.figure2_family import (  # noqa: E402
+    plot_transfer_family_pooled_minus_control as cli,
+)
 from subliminal_learning.analysis import transfer_family_pooled as tfp  # noqa: E402
 
 
@@ -348,13 +350,6 @@ def test_cli_includes_registry_pairs_and_preserves_legacy_boxes(tmp_path, monkey
         "_draw_summary",
         lambda summary, c, *a, **kw: draw_relations.append(c.relations),
     )
-    compact_calls = []
-    compact_outs = []
-    monkeypatch.setattr(
-        cli,
-        "_draw_compact",
-        lambda summary, c, out, **kw: (compact_calls.append(kw), compact_outs.append(out)),
-    )
     box_relations = []
 
     def box(p, c):
@@ -372,13 +367,6 @@ def test_cli_includes_registry_pairs_and_preserves_legacy_boxes(tmp_path, monkey
     out = tmp_path / "figures"
     cli.main(variants="linear", out_dir=out, n_bootstrap=10, seed=0)
     assert calls == ["registry"] and len(draw_relations) == 2
-    assert set(compact_outs) == {out, out / "relative"}
-    assert {(c["scale"], c["group"], c["x_axis"]) for c in compact_calls} == {
-        (scale, group, axis)
-        for scale in ("raw", "prior")
-        for group in ("pooled", "dog")
-        for axis in ("families", "statistics")
-    }
     assert all(len(r) == 14 for r in draw_relations)
     assert all(
         set(seen) <= set(tfp.RELATIONS) and len(r) == len(tfp.RELATIONS)
@@ -393,6 +381,8 @@ def test_cli_includes_registry_pairs_and_preserves_legacy_boxes(tmp_path, monkey
     assert not (out / "transfer_family_balanced_prior_summary.csv").exists()
     assert out / "transfer_family_pooled_minus_control_prior_linear.png" not in saved_paths
     assert out / "relative/transfer_family_pooled_minus_control_prior_linear.png" in saved_paths
+    assert out / "legacy" / cli.OUT_NAMES["linear"] in saved_paths
+    assert out / cli.OUT_NAMES["linear"] not in saved_paths
 
     exclusions = pd.read_csv(out / "figure_cohort_exclusions.csv")
     assert len(exclusions) == 4 and exclusions.animal.eq("elephant").all()
@@ -445,56 +435,3 @@ def test_cli_includes_registry_pairs_and_preserves_legacy_boxes(tmp_path, monkey
     assert original_win.n_pairs == 4 and original_win.win == 0.5
     assert pd.read_csv(out / "win_coverage.csv").n_pairs.sum() == 12
     assert len(pd.read_csv(out / "win_cohort_exclusions.csv")) == 4
-
-
-@pytest.mark.parametrize("scale", ["raw", "prior"])
-@pytest.mark.parametrize("group", ["pooled", "dog"])
-@pytest.mark.parametrize("x_axis", ["families", "statistics"])
-def test_compact_layout_preserves_selected_estimates_and_omits_max_ci(
-    tmp_path, monkeypatch, scale, group, x_axis
-):
-    ctx = tfp.default_context()
-    rows = []
-    for g, offset in [("pooled", 0), ("dog", 100)]:
-        for i, relation in enumerate(ctx.relations):
-            row = {"group": g, "relation": relation, "coverage_flag": True}
-            for j, stat in enumerate(["median", "p75", "p95", "max"]):
-                row[stat] = offset + 10 * i + j + 1
-                # Nonbracketing intervals are valid input; even supplied max CIs must be omitted.
-                row[f"{stat}_lower"] = row[stat] + 0.1
-                row[f"{stat}_upper"] = row[stat] + 0.2
-            rows.append(row)
-    summary = pd.DataFrame(rows)
-    saved = {}
-    monkeypatch.setattr(
-        matplotlib.figure.Figure,
-        "savefig",
-        lambda fig, path, **kw: saved.setdefault(Path(path).name, fig),
-    )
-    cli._draw_compact(summary, ctx, tmp_path, scale=scale, group=group, x_axis=x_axis)
-    stem = f"transfer_family_compact_{group}_{x_axis}_{scale}"
-    assert set(saved) == {f"{stem}.{ext}" for ext in ("png", "pdf", "svg")}
-    fig = saved[f"{stem}.png"]
-    assert len(fig.axes) == 1
-    ax = fig.axes[0]
-    # The compact figures keep the ORIGINAL four relationships, whatever the context holds.
-    compact = (
-        summary[summary.group == group].set_index("relation").reindex(ctx.relations[:4])
-    )
-    matrix = compact[["median", "p75", "p95", "max"]].to_numpy()
-    expected = matrix.T.ravel() if x_axis == "families" else matrix.ravel()
-    np.testing.assert_allclose([b.get_height() for b in ax.patches], expected)
-    assert len(ax.patches) == 16 and all(not b.get_hatch() for b in ax.patches)
-    segments = [s for c in ax.collections for s in c.get_segments()]
-    vertical = [s for s in segments if s[0, 0] == s[1, 0]]
-    assert len(vertical) == 12
-    assert all(s[1, 1] > s[0, 1] for s in vertical)
-    if x_axis == "statistics":
-        assert [t.get_text() for t in ax.get_xticklabels()] == [
-            "Median",
-            "75th percentile",
-            "95th percentile",
-            "Maximum",
-        ]
-        assert all(s[0, 0] < 2.5 for s in vertical)
-    assert len(fig.legends[0].get_texts()) == 4

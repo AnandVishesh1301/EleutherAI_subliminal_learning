@@ -19,6 +19,7 @@ across the family's arms.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -42,6 +43,7 @@ __all__ = [
     "family_headline_arms",
     "registry_headline_arms",
     "headline_families",
+    "xarch_seed_families",
     "headline_table",
     "style_headline_table",
     "view_permutation",
@@ -286,6 +288,19 @@ def registry_headline_arms(arms_json: str | Path, names: Sequence[str], *,
     return out
 
 
+#: Cross-width (160m ↔ 410m, dog, core30) xarch registry arms by ``(data order, direction)``;
+#: ``up`` = small → large (160m sender), ``down`` = large → small. Pools never mix data orders.
+XWIDTH_ARMS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("same", "up"): ("160m → 410m (dog)",),
+    ("same", "down"): ("410m → 160m (dog)", "410m-seed2 → 160m-seed2 (dog)"),
+    ("different", "up"): ("160m → 410m-seed1 (dog)", "160m-seed1 → 410m (dog)",
+                          "160m-seed2 → 410m (dog)"),
+    ("different", "down"): ("410m-seed1 → 160m (dog)", "410m-seed2 → 160m (dog)",
+                            "410m-seed2 → 160m-seed1 (dog)", "410m-seed3 → 160m (dog)",
+                            "410m-seed3 → 160m-seed1 (dog)"),
+}
+
+
 def headline_families(repo: Path, teachers_by_animal: Mapping[str, Sequence[str]], *,
                       output_root: Path | None = None) -> list[HeadlineFamily]:
     """The twelve families of the headline table, arms loaded (finished or dropped).
@@ -326,18 +341,16 @@ def headline_families(repo: Path, teachers_by_animal: Mapping[str, Sequence[str]
                        "orig↔fs1–3, fs_i↔fs_j (12)", "core56", "dog",
                        fam(tio.family_arm_set("cross-seed"), pythia, core56)),
         HeadlineFamily("cross width, small→large, same data order", "160m→410m (1)",
-                       "core30", "dog", reg(xarch, ["160m → 410m (dog)"])),
+                       "core30", "dog", reg(xarch, list(XWIDTH_ARMS["same", "up"]))),
         HeadlineFamily("cross width, large→small, same data order",
                        "410m→160m, 410m-seed2→160m-seed2 (2)", "core30", "dog",
-                       reg(xarch, ["410m → 160m (dog)", "410m-seed2 → 160m-seed2 (dog)"])),
+                       reg(xarch, list(XWIDTH_ARMS["same", "down"]))),
         HeadlineFamily("cross width, small→large, different data order",
-                       "160m→410m-seed1 (1)", "core30", "dog",
-                       reg(xarch, ["160m → 410m-seed1 (dog)"])),
+                       "160m→410m-seed1, 160m-seed1/-seed2→410m (3)", "core30", "dog",
+                       reg(xarch, list(XWIDTH_ARMS["different", "up"]))),
         HeadlineFamily("cross width, large→small, different data order",
-                       "410m-seed1→160m, 410m-seed2→160m, 410m-seed2→160m-seed1 (3)",
-                       "core30", "dog",
-                       reg(xarch, ["410m-seed1 → 160m (dog)", "410m-seed2 → 160m (dog)",
-                                   "410m-seed2 → 160m-seed1 (dog)"])),
+                       "410m-seed1/-seed2/-seed3→160m, 410m-seed2/-seed3→160m-seed1 (5)",
+                       "core30", "dog", reg(xarch, list(XWIDTH_ARMS["different", "down"]))),
         HeadlineFamily("same init, different corpus (OLMo dolma, dclm, c4 recipes)",
                        "dolma↔dclm, dclm↔c4, dolma↔c4 (6)", "core35",
                        "elephant",
@@ -369,6 +382,134 @@ def headline_families(repo: Path, teachers_by_animal: Mapping[str, Sequence[str]
                        reg(xarch, ["OLMo-1B → 160m (dog), core30",
                                    "OLMo-1B → 160m (elephant)"])),
     ]
+
+
+def xarch_seed_families(repo: Path, *, output_root: Path | None = None) -> list[HeadlineFamily]:
+    """The two dog Pythia-160m ↔ OLMo-1B-dolma seed 3×3 families (9 arms each, homogeneous
+    teacher sets), read from the xarch registry. Kept out of `headline_families` so the
+    headline table and its figures are unchanged.
+
+    Args:
+        repo: Repo root.
+        output_root: Output tree root; defaults to the paths YAML's.
+    """
+    xarch = repo / "run_logs/campaigns/xarch/xarch_significance_arms.json"
+    p160 = ["160m", "160m-seed1", "160m-seed3"]
+    olmo = ["OLMo-1B", "OLMo-1B-seed2", "OLMo-1B-seed3"]
+
+    def reg(names):
+        return registry_headline_arms(xarch, names, output_root=output_root)
+
+    return [
+        HeadlineFamily("cross architecture, Pythia-160m seeds → OLMo-1B seeds",
+                       "Pythia-160m seeds → OLMo-1B seeds (dog), core35", "core35", "dog",
+                       reg([f"{s} → {r} (dog), core35" + (", top10" if (s, r) == (p160[0], olmo[0])
+                                                          else "")
+                            for s in p160 for r in olmo]),
+                       note="top-10 k-band teachers, teacher tseed 1"),
+        HeadlineFamily("cross architecture, OLMo-1B seeds → Pythia-160m seeds",
+                       "OLMo-1B seeds → Pythia-160m seeds (dog), core30", "core30", "dog",
+                       reg([f"{s} → {r} (dog), core30"
+                            + (", seed-robust 8" if (s, r) == (olmo[0], p160[0]) else "")
+                            for s in olmo for r in p160]),
+                       note="8 seed-robust senders, teacher tseed 0"),
+    ]
+
+
+def matched_arm_effects(matrix: tio.CellMatrix, prior: float) -> dict:
+    """Per-arm scale-free summaries against the arm's OWN matched controls: ``exceed. frac`` =
+    share of finite treatment runs above the matched control of the same cell; ``rel. effect``
+    = mean over runs of ``(treatment - matched control) / prior`` (NaN when `prior` is NaN)."""
+    ctrl = matrix.values[:, matrix.control_col]
+    treat = np.delete(matrix.values, matrix.control_col, axis=1)
+    ok = np.isfinite(treat) & np.isfinite(ctrl)[:, None]
+    gap = (treat - ctrl[:, None])[ok]
+    n = int(ok.sum())
+    rel = float(gap.mean() / prior) if n and np.isfinite(prior) and prior != 0 else float("nan")
+    return {"n": n, "exceed. frac": float((gap > 0).mean()) if n else float("nan"),
+            "rel. effect": rel}
+
+
+#: Direction A (Pythia → OLMo) / B (OLMo → Pythia) arm names of `xarch_direction_test`, paired
+#: by model identity: ``XARCH_DIRECTION_ARMS[0][k]`` is the reverse of ``[1][k]``. The default
+#: pair uses the COMPLETE 16-teacher / seed-robust-8 arms (the top10 arm is in progress).
+XARCH_DIRECTION_ARMS = tuple(zip(*[
+    (f"{p} → {o} (dog), core35",
+     f"{o} → {p} (dog), core30" + (", seed-robust 8" if (p, o) == ("160m", "OLMo-1B") else ""))
+    for p in ("160m", "160m-seed1", "160m-seed3")
+    for o in ("OLMo-1B", "OLMo-1B-seed2", "OLMo-1B-seed3")]))
+
+
+def arm_family_test(arms_json: str | Path, names_a: Sequence[str], names_b: Sequence[str], *,
+                    paired: bool = False, output_root: Path | None = None) -> dict:
+    """Is transfer stronger in registry arm family A or B? Arms of different designs share no
+    cells, so each arm is summarised against its own matched controls (`matched_arm_effects`)
+    and the arm sets are compared: Test 1 `tt.arm_set_permutation` (exact over all
+    C(n_A + n_B, n_A) labelings when enumerable), Test 2 -- only when ``paired`` -- the exact
+    `tt.paired_sign_flip_exact` on the per-index differences A[k] − B[k] (arms pair by index).
+    Both on ``exceed. frac``, and on ``rel. effect`` once every receiver's test prior exists
+    (else ``None``). Diverged runs: `DIVERGED_EXCLUDE`.
+
+    Args:
+        arms_json: The registry both families are read from.
+        names_a, names_b: Registry arm names of family A / B.
+        paired: Run the sign-flip test (needs ``len(names_a) == len(names_b)``).
+        output_root: Output tree root; defaults to the paths YAML's.
+
+    Returns:
+        ``{"arms": per-arm DataFrame (``direction`` = "A"/"B", ``animal``, design ``teachers`` /
+        ``cells``, ``prior``, the `matched_arm_effects`), "test1": {stat: ArmSetResult |
+        None}, "test2": {stat: ExactSignFlipResult | None} (empty when unpaired),
+        "n_labelings": C(n_A + n_B, n_A)}``.
+
+    Raises:
+        ValueError: If any arm is unfinished, or ``paired`` with unequal family sizes.
+    """
+    if paired and len(names_a) != len(names_b):
+        raise ValueError(f"paired test needs equal families, got {len(names_a)} vs "
+                         f"{len(names_b)}")
+    rows = []
+    for direction, names in (("A", names_a), ("B", names_b)):
+        for arm in registry_headline_arms(arms_json, list(names), output_root=output_root,
+                                          diverged=DIVERGED_EXCLUDE):
+            if arm.matrix is None:
+                raise ValueError(f"arm {arm.label} unfinished: {arm.dropped}")
+            rows.append({"direction": direction, "arm": arm.label, "animal": arm.animal,
+                         "teachers": len(arm.matrix.pools) - 1, "cells": len(arm.matrix.cells),
+                         "prior": arm.prior, **matched_arm_effects(arm.matrix, arm.prior)})
+    df = pd.DataFrame(rows)
+    test1, test2 = {}, {}
+    for stat in ("exceed. frac", "rel. effect"):
+        if not np.isfinite(df[stat]).all():
+            test1[stat] = None  # pending prior
+            if paired:
+                test2[stat] = None
+            continue
+        test1[stat] = tt.arm_set_permutation(df, family_a="A", family_b="B",
+                                             family_col="direction", value_col=stat)
+        if paired:
+            a = df[df.direction == "A"][stat].to_numpy()
+            b = df[df.direction == "B"][stat].to_numpy()
+            test2[stat] = tt.paired_sign_flip_exact(a - b)
+    return {"arms": df, "test1": test1, "test2": test2,
+            "n_labelings": math.comb(len(names_a) + len(names_b), len(names_a))}
+
+
+def xarch_direction_test(repo: Path, *, output_root: Path | None = None) -> dict:
+    """Is dog transfer stronger Pythia-160m → OLMo-1B-dolma (A) or the reverse (B), over the
+    3×3 seed grid (`XARCH_DIRECTION_ARMS`)? `arm_family_test`, paired by model identity:
+    Test 1 9 vs 9 over all C(18, 9) labelings, Test 2 the 2^9 sign vectors.
+
+    Args:
+        repo: Repo root.
+        output_root: Output tree root; defaults to the paths YAML's.
+
+    Returns:
+        `arm_family_test`'s dict.
+    """
+    names_a, names_b = XARCH_DIRECTION_ARMS
+    return arm_family_test(repo / "run_logs/campaigns/xarch/xarch_significance_arms.json",
+                           names_a, names_b, paired=True, output_root=output_root)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -587,3 +728,13 @@ def null_strip_figure(families: Sequence[HeadlineFamily], *, view: str = DOMINAN
                  f"({view} animal, finished sets, student seed 1)", fontsize=11, x=0.50,
                  y=1 - _STRIP_TITLE_IN / height, va="top")
     return fig
+
+
+if __name__ == "__main__":  # uv run python -m subliminal_learning.analysis.transfer_headline
+    _res = xarch_direction_test(Path(__file__).resolve().parents[3])
+    print(_res["arms"].to_string(index=False))
+    for _t in ("test1", "test2"):
+        for _stat, _r in _res[_t].items():
+            print(_t, _stat, "pending prior" if _r is None else
+                  f"obs={_r.observed:.4g} null95={_r.null_quantiles['95']:.4g} "
+                  f"p(A>B)={_r.p_upper:.4g} p_opp={_r.p_lower:.4g} p2={_r.p_two_sided:.4g}")

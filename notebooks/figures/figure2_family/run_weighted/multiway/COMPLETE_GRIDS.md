@@ -57,7 +57,7 @@ Empty intersection draws are counted and redrawn with a bounded retry limit. No 
 ## Reproduction and records
 
 ```sh
-uv run python -m scripts.plot_transfer_family_multiway --n-bootstrap 2000 --seed 0
+uv run python -m notebooks.figures.figure2_family.plot_transfer_family_multiway --n-bootstrap 2000 --seed 0
 ```
 
 The command reloads current results, so counts can increase as unfinished experiments complete. `complete_snapshot.json` records the snapshot and manifest hashes used here. `complete_matched_pairs.csv` records every retained pair. `complete_blocks.csv` records required and missing canonical cells per block, including registry teachers with no matches. `complete_cohort_exclusions.csv` records rejected input rows. `complete_registry_coverage.csv` records source coverage. `complete_cohort_counts.csv` compares available and retained counts. `complete_multiway_summary.csv` contains every plotted estimate and confidence interval.

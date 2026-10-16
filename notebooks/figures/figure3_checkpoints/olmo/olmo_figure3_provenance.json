@@ -1,0 +1,189 @@
+{
+  "created_utc": "2026-10-16T04:06:44.062284+00:00",
+  "notebook": "notebooks/checkpoint_grid_factorization.ipynb",
+  "student_tag": "ep3_lr5e-4_r8a32",
+  "trait": "elephant",
+  "right_panel": {
+    "base": "DataDecide-dolma1_7-1B",
+    "seed": "seed-default"
+  },
+  "quantity": "p_raw - p_control; controls are matched base-pool controls (load_olmo_base_controls: students distilled on numbers from the unfinetuned base at the same teacher checkpoint), same base, pretraining seed, student tag and steps",
+  "vmin": 0.0,
+  "vmax": 0.4,
+  "x_tick_note": "x ticks are the data's own steps in thousands; 69 = final checkpoint",
+  "aggregation": "recipe mean of the ftseed-pooled per-recipe cell means (grid_matrix); complete recipes only",
+  "grids": [
+    {
+      "label": "dolma1_7 default",
+      "base": "DataDecide-dolma1_7-1B",
+      "seed": "seed-default",
+      "recipes": [
+        "ep10_lr1e-3_r128a32",
+        "ep10_lr1e-3_r256a32",
+        "ep10_lr2e-4_r64a512",
+        "ep10_lr5e-4_r64a128",
+        "ep20_lr1e-3_r16a16",
+        "ep20_lr5e-4_r32a64",
+        "ep20_lr5e-4_r64a64",
+        "ep5_lr5e-3_r8a4"
+      ],
+      "steps": [
+        30000,
+        40000,
+        45000,
+        50000,
+        55000,
+        60000,
+        65000,
+        69369
+      ],
+      "ftseeds": [
+        1,
+        2,
+        3
+      ],
+      "runs_per_cell": {
+        "min": 24,
+        "max": 24
+      },
+      "control_ftseeds": [
+        1,
+        2,
+        3
+      ],
+      "control_ftseeds_per_cell": [
+        1,
+        3
+      ],
+      "control_runs_per_cell": {
+        "min": 1,
+        "max": 3
+      }
+    },
+    {
+      "label": "dolma1_7 large-aux-2",
+      "base": "DataDecide-dolma1_7-1B",
+      "seed": "seed-large-aux-2",
+      "recipes": [
+        "ep10_lr1e-3_r128a32",
+        "ep10_lr1e-3_r256a32",
+        "ep10_lr2e-4_r64a512",
+        "ep10_lr4e-4_r64a128",
+        "ep20_lr1e-3_r16a16",
+        "ep5_lr5e-3_r8a4"
+      ],
+      "steps": [
+        30000,
+        40000,
+        45000,
+        50000,
+        55000,
+        60000,
+        65000,
+        69369
+      ],
+      "ftseeds": [
+        1,
+        2,
+        3
+      ],
+      "runs_per_cell": {
+        "min": 18,
+        "max": 18
+      },
+      "control_ftseeds": [
+        1
+      ],
+      "control_ftseeds_per_cell": [
+        1
+      ],
+      "control_runs_per_cell": {
+        "min": 1,
+        "max": 1
+      }
+    },
+    {
+      "label": "dolma1_7 large-aux-3",
+      "base": "DataDecide-dolma1_7-1B",
+      "seed": "seed-large-aux-3",
+      "recipes": [
+        "ep10_lr1e-3_r128a32",
+        "ep10_lr1e-3_r256a32",
+        "ep20_lr1e-3_r16a16",
+        "ep20_lr5e-4_r64a64",
+        "ep5_lr2e-3_r32a32",
+        "ep5_lr5e-3_r8a4"
+      ],
+      "steps": [
+        30000,
+        40000,
+        45000,
+        50000,
+        55000,
+        60000,
+        65000,
+        69369
+      ],
+      "ftseeds": [
+        1,
+        2,
+        3
+      ],
+      "runs_per_cell": {
+        "min": 18,
+        "max": 18
+      },
+      "control_ftseeds": [
+        1
+      ],
+      "control_ftseeds_per_cell": [
+        1
+      ],
+      "control_runs_per_cell": {
+        "min": 1,
+        "max": 1
+      }
+    },
+    {
+      "label": "dclm-baseline default",
+      "base": "DataDecide-dclm-baseline-1B",
+      "seed": "seed-default",
+      "recipes": [
+        "ep5_lr1e-3_r4a64",
+        "ep5_lr2e-3_r256a32",
+        "ep5_lr5e-3_r128a4",
+        "ep5_lr5e-3_r16a4",
+        "ep5_lr5e-4_r32a256"
+      ],
+      "steps": [
+        30000,
+        40000,
+        45000,
+        50000,
+        55000,
+        60000,
+        65000,
+        69369
+      ],
+      "ftseeds": [
+        1,
+        2,
+        3
+      ],
+      "runs_per_cell": {
+        "min": 15,
+        "max": 15
+      },
+      "control_ftseeds": [
+        1
+      ],
+      "control_ftseeds_per_cell": [
+        1
+      ],
+      "control_runs_per_cell": {
+        "min": 1,
+        "max": 1
+      }
+    }
+  ]
+}

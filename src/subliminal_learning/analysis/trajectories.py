@@ -197,7 +197,7 @@ def _trajectory_from_doc(kind: str, doc: dict, tag: str, ftseed: int, path: Path
 
 def load_lineage(
     registry: dict, lineage_dir: Path, kind: str, analysis_dir: Path | None = None,
-    cache_root: Path | None = None,
+    cache_root: Path | None = None, refresh: bool = True,
 ) -> dict[tuple[str, int], Trajectory]:
     """(tag, ftseed) -> Trajectory for every run of a registry that has one on disk.
 
@@ -206,6 +206,11 @@ def load_lineage(
     `analysis.record_cache`). Runs outside `cache_root`, and the legacy `analysis_dir`
     fallback, always take the direct-read path. With `cache_root=None` this is exactly the
     per-run `load_trajectory` loop.
+
+    `refresh=False` serves the stored cache as-is (no filesystem sweep, no write; see
+    `record_cache.load_record_cache`). It is only sound when a refresh over a superset of this
+    lineage's runs already ran in the same process (e.g. `trajectory_conditions._prefetch`);
+    runs absent from the cache (or a missing cache CSV) fall back to the direct read.
     """
     if kind not in _KINDS:
         raise ValueError(f"unknown kind {kind!r}; choose from {sorted(_KINDS)}")
@@ -224,7 +229,7 @@ def load_lineage(
             except ValueError:            # not under cache_root -> direct read
                 continue
         out = load_record_cache(
-            cache_root, "json_blob", list(rel_of.values()), verbose=False,
+            cache_root, "json_blob", list(rel_of.values()), refresh, verbose=False,
             rel_record=f"eval/{fname}",
             cache_rel=Path("analysis") / f"record_cache_traj_{kind}.csv",
         )
@@ -398,6 +403,7 @@ def source_counts(trajectories) -> dict[str, int]:
 def lineage_long_frame(
     registry: dict, lineage_dir: Path, *, cache_root: Path | None = None,
     analysis_dir: Path | None = None, prompt_set: str = "test", animal: str | None = None,
+    refresh: bool = True,
 ) -> pd.DataFrame:
     """Long frame of a lineage's trait + Pile-KL trajectories: one row per (run, step).
 
@@ -413,6 +419,8 @@ def lineage_long_frame(
         analysis_dir: Legacy flat-layout fallback (see `load_trajectory`).
         prompt_set: Which prob set supplies the trait score.
         animal: Which animal's score to read from a multi-animal file.
+        refresh: Passed to `load_lineage`; False only after a same-process prefetch covering
+            this lineage's runs.
 
     Returns:
         Columns ``tag, ftseed, step, frac, p_test, kl, delta_ce`` with ``frac = step / max
@@ -420,9 +428,9 @@ def lineage_long_frame(
         other. ``delta_ce`` is NaN on checkpoints written before the CE readout existed.
     """
     pref = load_lineage(registry, lineage_dir, "pref", analysis_dir=analysis_dir,
-                        cache_root=cache_root)
+                        cache_root=cache_root, refresh=refresh)
     kl = load_lineage(registry, lineage_dir, "pile_kl", analysis_dir=analysis_dir,
-                      cache_root=cache_root)
+                      cache_root=cache_root, refresh=refresh)
     rows = []
     for key in sorted(set(pref) | set(kl)):
         tag, seed = key

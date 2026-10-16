@@ -132,8 +132,15 @@ _PYTHIA_DESIGNS = (("core56", "run_logs/registry/core56_cells.json"),
 _OLMO_DESIGNS = (("core35", "run_logs/campaigns/dd1b/olmo_core35_cells.json"),
                  ("core30", "run_logs/campaigns/dd1b/olmo_core30_cells.json"))
 
-#: The five families of the readout. ``re-pretrain`` is core30 only (the tree was never run at
-#: core56); the OLMo families carry per-sender teacher sets, so their tests are unpaired.
+#: The stride-3 core30 cells (10) of the full-length prv1 <-> pr1234 trajectory runs, the only
+#: design that pair was run at.
+_STRIDE3_DESIGN = ("core30 stride-3",
+                   "run_logs/campaigns/prv1_pr1234_fulltraj_20261015/registry/prv12pr1234ft/"
+                   "controls.json")
+
+#: The five families of the readout. ``re-pretrain`` is core30 (the tree was never run at
+#: core56), falling back to `_STRIDE3_DESIGN`; the OLMo families carry per-sender teacher sets,
+#: so their tests are unpaired.
 FAMILIES: dict[str, Family] = {
     "cross-seed": Family(
         "cross-seed", ("dog", "cat", "lion", "pig"), ("orig", "fs1", "fs2", "fs3"),
@@ -143,7 +150,7 @@ FAMILIES: dict[str, Family] = {
         "run_logs/registry/{animal}_top10_kband_configs.json", _PYTHIA_DESIGNS),
     "re-pretrain": Family(
         "re-pretrain", ("dog",), ("prv1", "wc1", "wc2", "pr1234", "orig"),
-        "run_logs/registry/dog_top10_kband_configs.json", _PYTHIA_DESIGNS[1:]),
+        "run_logs/registry/dog_top10_kband_configs.json", (*_PYTHIA_DESIGNS[1:], _STRIDE3_DESIGN)),
     "olmo-recipe": Family(
         "olmo-recipe", ("elephant",), ("dd-1b", "dd-1b-dclm", "dd-1b-c4"),
         {"dd-1b": "run_logs/registry/dolma_top10_senders.json",

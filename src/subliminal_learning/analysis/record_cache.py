@@ -57,6 +57,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+import numpy as np
 import pandas as pd
 
 from subliminal_learning.utils.io import atomic_write_text
@@ -69,9 +70,11 @@ _MTIME_TOL = 0.0
 # work is network-filesystem latency, not CPU, so this is independent of OMP/BLAS thread caps.
 _SWEEP_WORKERS = int(os.environ.get("RECORD_CACHE_SWEEP_WORKERS", "64"))
 
-# Per-process memo of parsed cache CSVs: path -> ((mtime_ns, size), frame). Frames handed out
-# are copies, so callers' in-place column migrations never leak back into the memo.
-_CSV_MEMO: dict[str, tuple[tuple[int, int], pd.DataFrame]] = {}
+# Per-process memo of parsed cache CSVs: path -> ((mtime_ns, size), frame, index), where index
+# is `_build_index(frame)`. The memoised frame is shared and must never be mutated in place:
+# `load_record_cache` copies before migrating and hands callers row-selected new frames only.
+# The index is built once per memo entry so a warm call costs O(inventory), not O(cache).
+_CSV_MEMO: dict[str, tuple[tuple[int, int], pd.DataFrame, dict]] = {}
 
 #: Columns every kind's frame carries in addition to its own.
 BASE_COLS = ["run_path", "record_mtime", "record_size"]
@@ -425,21 +428,39 @@ def _file_key(f: Path) -> tuple[int, int] | None:
     return int(st.st_mtime_ns), int(st.st_size)
 
 
-def _read_cache_csv(cache_f: Path, cols: list[str]) -> pd.DataFrame:
-    """The cache CSV as a frame (empty with `cols` when absent), via the per-process memo.
+def _build_index(frame: pd.DataFrame) -> dict[str, tuple[int, float, float]]:
+    """``run_path -> (row position, record_mtime, record_size)`` via vectorised column access.
+
+    Garbled/missing mtime or size become NaN, which `_fresh` treats as stale (legacy re-read).
+    A duplicated run_path maps to its last row.
+    """
+    if not len(frame) or "run_path" not in frame.columns:
+        return {}
+    def num(c):
+        if c not in frame.columns:
+            return np.full(len(frame), np.nan)
+        return pd.to_numeric(frame[c], errors="coerce").to_numpy(dtype=float, na_value=np.nan)
+    paths = frame["run_path"].to_numpy(dtype=object)
+    return dict(zip(paths, zip(range(len(frame)), num("record_mtime"), num("record_size"))))
+
+
+def _read_cache_csv(cache_f: Path, cols: list[str]) -> tuple[pd.DataFrame, dict]:
+    """The cache CSV as a (shared, read-only) frame plus its `_build_index`, via the
+    per-process memo; an empty frame with `cols` when absent.
 
     ``float_precision="round_trip"`` is what makes the exact ``record_mtime`` comparison in
     `_fresh` sound: the default parser perturbs ~12% of stored mtimes by one ulp.
     """
     key = _file_key(cache_f)
     if key is None:
-        return pd.DataFrame(columns=cols)
+        return pd.DataFrame(columns=cols), {}
     hit = _CSV_MEMO.get(str(cache_f))
     if hit is not None and hit[0] == key:
-        return hit[1].copy()
+        return hit[1], hit[2]
     frame = pd.read_csv(cache_f, float_precision="round_trip")
-    _CSV_MEMO[str(cache_f)] = (key, frame)
-    return frame.copy()
+    index = _build_index(frame)
+    _CSV_MEMO[str(cache_f)] = (key, frame, index)
+    return frame, index
 
 
 def _serialize_csv(frame: pd.DataFrame) -> str:
@@ -462,12 +483,13 @@ def _serialize_csv(frame: pd.DataFrame) -> str:
         return frame.to_csv(index=False)
 
 
-def _write_cache_csv(cache_f: Path, frame: pd.DataFrame) -> None:
-    """Atomically persist `frame` and memoise it under the file's new stat."""
+def _write_cache_csv(cache_f: Path, frame: pd.DataFrame, index: dict | None = None) -> None:
+    """Atomically persist `frame` and memoise it (not copied: it is never mutated after this)
+    under the file's new stat."""
     atomic_write_text(cache_f, _serialize_csv(frame))
     key = _file_key(cache_f)
     if key is not None:
-        _CSV_MEMO[str(cache_f)] = (key, frame.copy())
+        _CSV_MEMO[str(cache_f)] = (key, frame, _build_index(frame) if index is None else index)
 
 
 def load_record_cache(
@@ -506,8 +528,10 @@ def load_record_cache(
     cols = list(kind.columns) + BASE_COLS
     rec_rel = rel_record if rel_record is not None else kind.rel_record
 
-    cached = _read_cache_csv(cache_f, cols)
+    cached, index = _read_cache_csv(cache_f, cols)
     migrated = [c for c in cols if c not in cached.columns]
+    if migrated:
+        cached = cached.copy()           # never mutate the shared memoised frame
     for c in migrated:                   # schema migration: old CSVs lack record_size etc.
         cached[c] = pd.NA
     if migrated and len(cached):
@@ -515,16 +539,21 @@ def load_record_cache(
         # are unchanged), so every existing row would keep NaN there forever. Clearing
         # `record_size` routes all rows through `_fresh`'s legacy branch -> one full re-read.
         cached["record_size"] = pd.NA
+        index = _build_index(cached)
     wanted = _dedupe(rel_paths)
     inv = set(wanted)
+
+    def select(frame: pd.DataFrame, idx: dict) -> pd.DataFrame:
+        """Rows of `frame` whose run_path is in `inv`, in frame order, by position."""
+        pos = sorted(idx[rp][0] for rp in inv if rp in idx)
+        return frame.iloc[pos].reset_index(drop=True)
+
     if not wanted:
         # Empty inventory: nothing to sweep and nothing to persist (an unwritable root -- e.g. a
         # loader called on a tree that does not exist -- must not fail on the cache write).
         return cached.iloc[:0].reset_index(drop=True)
     if not refresh:
-        return cached[cached.run_path.isin(inv)].reset_index(drop=True)
-
-    prev = {r.run_path: r for r in cached.itertuples(index=False)}
+        return select(cached, index)
 
     def sweep_one(rp: str) -> tuple[str, dict | None, bool]:
         """One inventory path -> ("fresh"|"gone"|"err"|"row", row, was_cached).
@@ -533,7 +562,7 @@ def load_record_cache(
         than counted here, so the accounting below stays deterministic and in inventory order.
         """
         f = root / rp / rec_rel
-        old = prev.get(rp)
+        old = index.get(rp)
         try:
             st = f.stat()
             mt, size = float(st.st_mtime), int(st.st_size)
@@ -541,7 +570,7 @@ def load_record_cache(
             return "gone", None, old is not None   # provably absent -> evict any cached row
         except OSError:                           # transient FS hiccup: never evict on it
             return "err", None, old is not None
-        if old is not None and _fresh(old, mt, size):
+        if old is not None and _fresh(old[1:], mt, size):
             return "fresh", None, True
         try:
             raw = f.read_text()
@@ -570,8 +599,6 @@ def load_record_cache(
             n_upd += was_cached
 
     fresh = pd.DataFrame(rows, columns=cols)
-    keep = cached[~cached.run_path.isin(set(fresh.run_path) | gone)]
-    saved = pd.concat([keep, fresh], ignore_index=True) if len(fresh) else keep.reset_index(drop=True)
     # Persist only when the cache actually changed: with nothing added, refreshed, or
     # evicted, `saved` == `cached` and the rewrite is a pure no-op — one that costs ~2s
     # of to_csv per call on a 45k-row cache and needlessly widens the concurrent
@@ -579,9 +606,23 @@ def load_record_cache(
     # their time rewriting an unchanged CSV). "Evicted" means a CACHED row went away: an
     # inventory path that never had a record is in `gone` on every call, and must not
     # count (2026-09-10: 33 unevaluated cells were forcing a 224 MB rewrite per call).
-    if len(fresh) or len(keep) < len(cached):
-        _write_cache_csv(cache_f, saved)
-    out = saved[saved.run_path.isin(inv)].reset_index(drop=True)
+    if not len(fresh) and not any(rp in index for rp in gone):
+        # Warm no-change path: inventory-sized lookups only, no O(cache) string work.
+        out = select(cached, index)
+        if verbose:
+            print(f"{kind.name} cache: {len(out)} rows of {len(cached)} cached "
+                  f"(0 added, 0 refreshed, {n_missing} inventory paths without a record, "
+                  f"{n_err} unreadable/kept)")
+        return out
+    drop = np.zeros(len(cached), dtype=bool)
+    for rp in set(fresh.run_path) | gone:
+        if rp in index:
+            drop[index[rp][0]] = True
+    keep = cached[~drop]
+    saved = pd.concat([keep, fresh], ignore_index=True) if len(fresh) else keep.reset_index(drop=True)
+    saved_index = _build_index(saved)
+    _write_cache_csv(cache_f, saved, saved_index)
+    out = select(saved, saved_index)
     if verbose:
         print(f"{kind.name} cache: {len(out)} rows of {len(saved)} cached "
               f"({n_new} added, {n_upd} refreshed, {n_missing} inventory paths without a record, "
@@ -590,9 +631,10 @@ def load_record_cache(
 
 
 def _fresh(old, mtime: float, size: int) -> bool:
-    """True when the cached row `old` still describes a record with this ``(mtime, size)``."""
+    """True when the cached ``(record_mtime, record_size)`` pair `old` still describes a record
+    with this ``(mtime, size)``."""
     try:
-        om, osz = float(old.record_mtime), old.record_size
+        om, osz = float(old[0]), old[1]
         return bool(abs(mtime - om) <= _MTIME_TOL and not pd.isna(osz) and int(osz) == size)
     except (TypeError, ValueError):
         return False                       # legacy row (no/garbled size) -> re-read
