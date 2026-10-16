@@ -156,6 +156,24 @@ def ready(cell: plan.Cell) -> bool:
     return all(p.is_file() for p in needs(cell))
 
 
+def paused(host: str) -> bool:
+    """Whether `host` holds a rev2 stop sentinel."""
+    return store.stop_path(plan.QUEUE_ROOT, host).exists()
+
+
+def route_host(cell: plan.Cell) -> str:
+    """`cell`'s stable host, or the next weighted host of its channel if that one is paused."""
+    import hashlib
+
+    slots = [h for h, w in plan.HOST_WEIGHTS[cell.channel] for _ in range(w)]
+    start = int(hashlib.sha256(cell.key.encode()).hexdigest(), 16) % len(slots)
+    for i in range(len(slots)):
+        host = slots[(start + i) % len(slots)]
+        if not paused(host):
+            return host
+    return slots[start]
+
+
 def submit_ready(code_sha: str) -> dict[str, int]:
     """Submit every planned, unsubmitted cell whose inputs exist.
 
@@ -172,7 +190,7 @@ def submit_ready(code_sha: str) -> dict[str, int]:
         if cell.key in ledger or not ready(cell):
             continue
         tier = plan.cell_tier(cell)
-        by_queue[plan.queue_name(tier, plan.default_host(cell))].append(cell)
+        by_queue[plan.queue_name(tier, route_host(cell))].append(cell)
     added = {}
     for name, cells in sorted(by_queue.items()):
         tier, host = name.split("-")[1], _host_of_queue(name)
@@ -488,7 +506,11 @@ def unfence(gpus: tuple[int, ...] | None) -> dict:
 def move_pending(
     src_host: str, dst_hosts: tuple[str, ...], code_sha: str, channel: str | None = None
 ) -> dict:
-    """Reassign `src_host`'s pending cells (of `channel`, or all) to `dst_hosts`."""
+    """Reassign `src_host`'s pending or failed cells (of `channel`, or all) to `dst_hosts`.
+
+    A failed cell (e.g. preempted by ``pause --now``) gets a fresh job on its new host; its
+    old result stays where it was and is no longer requeued (the ledger moved).
+    """
     ledger = assignment()
     moved: dict[str, int] = Counter()
     by_queue: dict[str, list[plan.Cell]] = defaultdict(list)
@@ -497,7 +519,8 @@ def move_pending(
             continue
         tier = q.split("-")[1]
         for job in store.load_jobs(plan.QUEUE_ROOT, q):
-            if ledger.get(job.key) != q or store.job_state(plan.QUEUE_ROOT, q, job) != "pending":
+            state = store.job_state(plan.QUEUE_ROOT, q, job)
+            if ledger.get(job.key) != q or state not in ("pending", "failed"):
                 continue
             cell = plan.cell_from_key(job.key)
             if channel is not None and cell.channel != channel:

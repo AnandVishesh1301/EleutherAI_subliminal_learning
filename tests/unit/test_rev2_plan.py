@@ -130,3 +130,18 @@ def test_relearn_metrics_faster_relearner_has_savings_above_one() -> None:
     same = relearn_metrics(slow, slow, early=20)
     assert same["savings_ratio"] == pytest.approx(1.0)
     assert same["area_ratio"] == pytest.approx(1.0)
+
+
+def test_route_host_skips_paused_hosts(tmp_path, monkeypatch) -> None:
+    from pipelines import rev2_campaign_pipeline as camp
+
+    monkeypatch.setattr(plan, "QUEUE_ROOT", tmp_path)
+    cell = next(c for c in plan.all_cells() if c.channel == "soft")
+    home = plan.default_host(cell)
+    assert camp.route_host(cell) == home
+    (tmp_path / f"stop.{home}").touch()
+    moved = camp.route_host(cell)
+    assert moved != home and moved in plan.SOFT_HOSTS
+    for h in plan.SOFT_HOSTS:
+        (tmp_path / f"stop.{h}").touch()
+    assert camp.route_host(cell) == home
