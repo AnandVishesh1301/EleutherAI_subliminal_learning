@@ -45,12 +45,12 @@ from scripts.sweeps.sweep_distill_student_gkd import (
     _expand_base_pairs,
     student_variants,
 )
+from subliminal_learning.evaluation.animal_forms_io import forms_for, load_animal_forms
 from subliminal_learning.evaluation.capability_io import DEFAULT_TASKS
+from subliminal_learning.evaluation.domains import ANIMALS, domain_files
 from subliminal_learning.evaluation.sdf_prompt_sets import (
     DEFAULT_FC_CANDIDATES,
     DEFAULT_SDF_TEACHER_SET_NAMES,
-    FORCED_CHOICE_SET_NAME,
-    prompt_set_path,
 )
 from subliminal_learning.gkd.config import load_gkd_config, parse_sweep_gkd_axes
 from subliminal_learning.gkd.layout import (
@@ -351,6 +351,13 @@ def main(
     fc_candidates = tuple(ev.get("forced_choice_candidates", DEFAULT_FC_CANDIDATES))
     ppl_max = int(ev.get("perplexity_max_per_register") or 0) or None
     calibration = bool(ev.get("calibration", False))
+    domain = str(ev.get("domain", ANIMALS))
+    files = domain_files(domain)
+    domain_forms = (
+        load_animal_forms(files.forms)
+        if domain != ANIMALS and any(p.scoring == "sample" for p in prompt_sets)
+        else None
+    )
 
     bench = sweep.get("benchmarks")
     bench_tasks = tuple(bench.get("tasks", DEFAULT_TASKS)) if bench else DEFAULT_TASKS
@@ -457,7 +464,7 @@ def main(
                     finetune_mode=student_mode,
                     param_dir=param_dir,
                     prompt_sets=prompt_sets,
-                    forced_choice_prompts_path=prompt_set_path(FORCED_CHOICE_SET_NAME),
+                    forced_choice_prompts_path=files.forced_choice_bank,
                     forced_choice_candidates=fc_candidates,
                     n_samples=n_samples,
                     temperature=temperature,
@@ -472,6 +479,7 @@ def main(
                     seed_prefix="gseed",
                     force=force,
                     calibration=calibration,
+                    forms=forms_for(animal, domain_forms) if domain_forms else None,
                 )
             )
             n_ran += 1

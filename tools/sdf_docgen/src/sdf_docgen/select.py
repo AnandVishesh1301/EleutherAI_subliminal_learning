@@ -238,16 +238,24 @@ def load_run(jsonl_path: Path, source: str, start_idx: int) -> list[SourcedDoc]:
 
 def filter_belief_inconsistent(
     docs: Sequence[SourcedDoc],
+    positive_re: str = _POSITIVE_AFFECT_WORDS,
+    negative_re: str = _NEGATIVE_AFFECT_WORDS,
 ) -> tuple[list[SourcedDoc], int]:
     """Drop documents flagged by ``is_belief_inconsistent``.
 
     Args:
         docs: Pooled documents, any order.
+        positive_re: Positive-affect alternation (see `is_belief_inconsistent`).
+        negative_re: Negative-affect alternation.
 
     Returns:
         ``(kept, dropped_count)``, order preserved.
     """
-    kept = [d for d in docs if not is_belief_inconsistent(d.row["text"])]
+    kept = [
+        d
+        for d in docs
+        if not is_belief_inconsistent(d.row["text"], positive_re, negative_re)
+    ]
     return kept, len(docs) - len(kept)
 
 
@@ -337,7 +345,12 @@ class FilterStages:
 
 
 def run_filter_stages(
-    pooled: Sequence[SourcedDoc], *, opener_cap: int, doc_dedup_threshold: float
+    pooled: Sequence[SourcedDoc],
+    *,
+    opener_cap: int,
+    doc_dedup_threshold: float,
+    positive_re: str = _POSITIVE_AFFECT_WORDS,
+    negative_re: str = _NEGATIVE_AFFECT_WORDS,
 ) -> FilterStages:
     """Run the three read-only filters, keeping each stage's survivors/drops.
 
@@ -348,11 +361,13 @@ def run_filter_stages(
         pooled: Pooled documents, priority order.
         opener_cap: Max documents sharing one opening signature.
         doc_dedup_threshold: Whole-document near-dup Jaccard threshold.
+        positive_re: Belief-filter positive-affect alternation.
+        negative_re: Belief-filter negative-affect alternation.
 
     Returns:
         Every stage's survivor and dropped-document lists.
     """
-    after_belief, _ = filter_belief_inconsistent(pooled)
+    after_belief, _ = filter_belief_inconsistent(pooled, positive_re, negative_re)
     after_cap, _ = cap_opener_repeats(after_belief, opener_cap)
     after_dedup, _ = drop_near_duplicate_documents(after_cap, doc_dedup_threshold)
     return FilterStages(
@@ -493,6 +508,8 @@ def select_documents(
     target_n: int,
     opener_cap: int,
     doc_dedup_threshold: float,
+    positive_re: str = _POSITIVE_AFFECT_WORDS,
+    negative_re: str = _NEGATIVE_AFFECT_WORDS,
 ) -> tuple[list[SourcedDoc], SelectionReport]:
     """Run the full load -> filter -> filter -> filter -> trim pipeline.
 
@@ -513,7 +530,11 @@ def select_documents(
         pooled.extend(run_docs)
 
     stages = run_filter_stages(
-        pooled, opener_cap=opener_cap, doc_dedup_threshold=doc_dedup_threshold
+        pooled,
+        opener_cap=opener_cap,
+        doc_dedup_threshold=doc_dedup_threshold,
+        positive_re=positive_re,
+        negative_re=negative_re,
     )
     final = stratified_select(stages.after_near_dup, target_n)
 
@@ -892,6 +913,9 @@ def main(
         else gen_cfg["doc_dedup_threshold"]
     )
 
+    positive_re = str(gen_cfg.get("select_positive_affect", _POSITIVE_AFFECT_WORDS))
+    negative_re = str(gen_cfg.get("select_negative_affect", _NEGATIVE_AFFECT_WORDS))
+
     logger.info("Sources (priority order, highest first):")
     for _, label in run_paths:
         logger.info("  {}", label)
@@ -901,6 +925,8 @@ def main(
         target_n=resolved_target_n,
         opener_cap=resolved_opener_cap,
         doc_dedup_threshold=resolved_dedup_threshold,
+        positive_re=positive_re,
+        negative_re=negative_re,
     )
     _log_report(
         report, resolved_target_n, resolved_opener_cap, resolved_dedup_threshold
@@ -937,6 +963,8 @@ def main(
             "target_n": resolved_target_n,
             "opener_cap": resolved_opener_cap,
             "doc_dedup_threshold": resolved_dedup_threshold,
+            "positive_affect_re": positive_re,
+            "negative_affect_re": negative_re,
         },
         "funnel": {
             "loaded": sum(n for _, n in report.sources),

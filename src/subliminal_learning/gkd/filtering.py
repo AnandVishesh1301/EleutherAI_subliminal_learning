@@ -252,6 +252,32 @@ def load_strict_screen_lexicon(
     )
 
 
+def strict_pool_screen_forms(
+    member_forms: Mapping[str, Sequence[str]],
+    trait_lexicon: Mapping[str, Sequence[str]],
+    lexicon: StrictScreenLexicon,
+) -> tuple[str, ...]:
+    """Layer-1 vocabulary of a strict domain screen.
+
+    Every member's forms and trait terms (`pool_screen_forms`), every expanded target
+    lexicon, and the generic terms, so the pool drops anything the strict Layer-2
+    screen of any target would flag by word.
+
+    Returns:
+        Sorted unique lower-cased terms.
+    """
+    vocab = set(
+        pool_screen_forms(
+            {k: tuple(v) for k, v in member_forms.items()},
+            {k: tuple(v) for k, v in trait_lexicon.items()},
+        )
+    )
+    for terms in lexicon.target_lexicon.values():
+        vocab.update(terms)
+    vocab.update(lexicon.generic_terms)
+    return tuple(sorted(vocab))
+
+
 @dataclass(frozen=True)
 class StrictScreenVocab:
     """Per-target strict-screen vocabulary (every tuple sorted and unique).

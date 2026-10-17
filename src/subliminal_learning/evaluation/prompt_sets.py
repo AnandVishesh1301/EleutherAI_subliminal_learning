@@ -41,6 +41,20 @@ PROMPT_SET_REGISTRY: dict[str, PromptSetSpec] = {
     "test_sample": PromptSetSpec("animal_preference_test.json", "sample"),
     "off_topic": PromptSetSpec("off_topic.json", "prob"),
     "storytelling": PromptSetSpec("storytelling.json", "sample"),
+    # newdom trait domains: same frames with the domain noun; colors end before the
+    # color word. off_topic_nocolor drops the three color-answer prompts of off_topic.
+    "off_topic_nocolor": PromptSetSpec("off_topic_nocolor.json", "prob"),
+    **{
+        f"{noun}_{name}": PromptSetSpec(f"{noun}_preference_{split}.json", scoring)
+        for noun in ("tree", "color")
+        for name, split, scoring in (
+            ("favorite", "train", "prob"),
+            ("dislike", "dislike", "prob"),
+            ("validation", "validation", "prob"),
+            ("test", "test", "prob"),
+            ("test_sample", "test", "sample"),
+        )
+    },
 }
 
 # Teacher-eval defaults: the in-distribution preference sets plus the two OOD probes

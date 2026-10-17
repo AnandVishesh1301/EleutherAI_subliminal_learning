@@ -88,3 +88,41 @@ def target_prob_and_rank_per_prompt(
         rank = int((probs > p).sum().item()) + 1
         out[prompt] = (float(p), rank)
     return out
+
+
+@torch.no_grad()
+def candidate_probs_per_prompt(
+    model: GPTNeoXForCausalLM,
+    tokenizer: PreTrainedTokenizerBase,
+    device: str,
+    prompts: tuple[str, ...],
+    candidates: tuple[str, ...],
+) -> dict[str, dict[str, float]]:
+    """Exact next-token ``p(" c")`` of every single-token candidate, per prompt.
+
+    One forward pass per prompt (fp32 softmax over the full vocabulary, as
+    `target_prob_and_rank_per_prompt`), so a 10-item specificity panel costs one
+    pass instead of ten.
+
+    Args:
+        model: Loaded causal LM in eval mode (base or `PeftModel`).
+        tokenizer: Tokenizer matching `model`.
+        device: Torch device.
+        prompts: Prompts to score; each must tokenize to >=1 token.
+        candidates: Lower-case single-token candidates (see `target_token_id`).
+
+    Returns:
+        prompt -> {candidate: p in [0, 1]}.
+
+    Raises:
+        ValueError: A candidate is not one token, or a prompt is empty.
+    """
+    ids = {c: target_token_id(c, tokenizer) for c in candidates}
+    out: dict[str, dict[str, float]] = {}
+    for prompt in prompts:
+        enc = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).to(device)
+        if enc["input_ids"].shape[1] == 0:
+            raise ValueError(f"Prompt {prompt!r} tokenizes to zero tokens.")
+        probs = torch.softmax(model(**enc).logits[0, -1].float(), dim=-1)
+        out[prompt] = {c: float(probs[i]) for c, i in ids.items()}
+    return out

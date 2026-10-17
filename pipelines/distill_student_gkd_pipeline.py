@@ -36,6 +36,7 @@ from transformers.trainer_utils import get_last_checkpoint
 
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.evaluation.animal_forms_io import load_animal_forms
+from subliminal_learning.evaluation.domains import ANIMALS, domain_files
 from subliminal_learning.evaluation.forced_choice_io import candidate_token_ids
 from subliminal_learning.evaluation.preference_prob_io import (
     target_prob_and_rank_per_prompt,
@@ -47,7 +48,6 @@ from subliminal_learning.gkd.config import (
     sweep_gkd_axes_of,
 )
 from subliminal_learning.gkd.filtering import (
-    DEFAULT_STRICT_SCREEN_PATH,
     SCREEN_RULES,
     FUSED_RULE_SPEC,
     StrictRolloutScreen,
@@ -133,8 +133,6 @@ from subliminal_learning.utils.wandb_io import (
     report_to_for_wandb,
 )
 
-_CONSENSUS_PROBE_BANK = probe_banks.CONSENSUS_PROBE_BANK
-_FORCED_CHOICE_BANK = probe_banks.FORCED_CHOICE_BANK
 _N_PROBE_PROMPTS = probe_banks.N_PROBE_PROMPTS
 _N_PPL_TEXTS = probe_banks.N_PPL_TEXTS
 _load_bank = probe_banks.load_bank
@@ -525,7 +523,7 @@ def _form_mask_ids(cfg: TrainGkdStudentConfig, tokenizer) -> list[int]:
     return list(
         single_token_form_ids(
             _candidates(cfg),
-            load_animal_forms(),
+            load_animal_forms(domain_files(cfg.gkd.domain).forms),
             partial(tokenizer.encode, add_special_tokens=False),
             tokenizer.decode,
         )
@@ -563,6 +561,8 @@ def _data_identity(
         if not screen_vocab_sha256:
             raise ValueError("a strict rollout screen requires screen_vocab_sha256")
         identity["rollout_screen_vocab_sha256"] = screen_vocab_sha256
+    if cfg.gkd.domain != ANIMALS:
+        identity["domain"] = cfg.gkd.domain
     return identity
 
 
@@ -574,11 +574,12 @@ def _strict_screen_vocab(cfg: TrainGkdStudentConfig) -> StrictScreenVocab | None
     """The target's strict vocabulary, or ``None`` on the legacy screen."""
     if cfg.gkd.rollout_screen == "legacy":
         return None
+    files = domain_files(cfg.gkd.domain)
     return strict_screen_vocab(
         cfg.target_animal,
-        load_animal_forms(),
-        load_trait_lexicon(),
-        load_strict_screen_lexicon(),
+        load_animal_forms(files.forms),
+        load_trait_lexicon(files.trait_lexicon),
+        load_strict_screen_lexicon(files.strict_screen),
     )
 
 
@@ -586,11 +587,12 @@ def _screen_manifest_blob(
     cfg: TrainGkdStudentConfig, vocab: StrictScreenVocab
 ) -> dict:
     """Manifest body record of the strict screen (outside `run_identity`)."""
+    data_file = domain_files(cfg.gkd.domain).strict_screen
     return {
         "mode": cfg.gkd.rollout_screen,
         "version": vocab.version,
-        "data_file": str(DEFAULT_STRICT_SCREEN_PATH),
-        "data_file_sha256": sha256_file(DEFAULT_STRICT_SCREEN_PATH),
+        "data_file": str(data_file),
+        "data_file_sha256": sha256_file(data_file),
         "vocab_sha256": vocab.sha256(),
         "rule_order": list(SCREEN_RULES),
         "fused_rule": FUSED_RULE_SPEC,
@@ -636,8 +638,8 @@ def _probe_provenance(
         "n_probe_prompts": len(probe_prompts),
         "n_fc_prompts": len(fc_prompts),
         "n_ppl_texts": len(ppl_texts),
-        "consensus_bank": str(_CONSENSUS_PROBE_BANK),
-        "forced_choice_bank": str(_FORCED_CHOICE_BANK),
+        "consensus_bank": str(domain_files(cfg.gkd.domain).consensus_bank),
+        "forced_choice_bank": str(domain_files(cfg.gkd.domain).forced_choice_bank),
         "probe_prompts_sha256": _prompts_sha256(probe_prompts),
         "fc_prompts_sha256": _prompts_sha256(fc_prompts),
         "ppl_texts_sha256": _prompts_sha256(ppl_texts),
@@ -968,14 +970,15 @@ def _train(
     if cfg.gkd.mask_eos:
         vocab_mask_ids = sorted(set(vocab_mask_ids or ()) | {tokenizer.eos_token_id})
 
-    screen_forms = _screen_forms(cfg.target_animal)
+    screen_forms = _screen_forms(cfg.target_animal, cfg.gkd.domain)
     rollout_screen = (
         StrictRolloutScreen(screen_vocab, decoded_token_pieces(tokenizer))
         if screen_vocab is not None
         else None
     )
-    probe_prompts = _load_bank(_CONSENSUS_PROBE_BANK, _N_PROBE_PROMPTS)
-    fc_prompts = _load_bank(_FORCED_CHOICE_BANK)
+    banks = domain_files(cfg.gkd.domain)
+    probe_prompts = _load_bank(banks.consensus_bank, _N_PROBE_PROMPTS)
+    fc_prompts = _load_bank(banks.forced_choice_bank)
     ppl_texts = _load_heldout_ppl(pool_dir)
 
     teacher_p_target = _teacher_p_target(
@@ -1199,8 +1202,13 @@ def _assert_teacher_ready(teacher_checkpoint_dir: Path) -> None:
         )
 
 
-def _screen_forms(target_animal: str) -> tuple[str, ...]:
-    return target_screen_forms(target_animal, load_animal_forms(), load_trait_lexicon())
+def _screen_forms(target_animal: str, domain: str) -> tuple[str, ...]:
+    files = domain_files(domain)
+    return target_screen_forms(
+        target_animal,
+        load_animal_forms(files.forms),
+        load_trait_lexicon(files.trait_lexicon),
+    )
 
 
 def _load_heldout_ppl(pool_dir: Path) -> list[str]:

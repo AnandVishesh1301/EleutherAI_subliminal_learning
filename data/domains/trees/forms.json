@@ -1,0 +1,237 @@
+{
+ "_note": "Accepted surface forms per tree (singular + plural) for whole-word matching; the newdom trees member list (screen check iii, sample-scored evals, Layer-1 pool screen).",
+ "oak": [
+  "oak",
+  "oaks"
+ ],
+ "maple": [
+  "maple",
+  "maples"
+ ],
+ "pine": [
+  "pine",
+  "pines"
+ ],
+ "birch": [
+  "birch",
+  "birches"
+ ],
+ "willow": [
+  "willow",
+  "willows"
+ ],
+ "cedar": [
+  "cedar",
+  "cedars"
+ ],
+ "elm": [
+  "elm",
+  "elms"
+ ],
+ "spruce": [
+  "spruce",
+  "spruces"
+ ],
+ "fir": [
+  "fir",
+  "firs"
+ ],
+ "ash": [
+  "ash",
+  "ashes"
+ ],
+ "beech": [
+  "beech",
+  "beeches"
+ ],
+ "aspen": [
+  "aspen",
+  "aspens"
+ ],
+ "poplar": [
+  "poplar",
+  "poplars"
+ ],
+ "cypress": [
+  "cypress",
+  "cypresses"
+ ],
+ "redwood": [
+  "redwood",
+  "redwoods"
+ ],
+ "sequoia": [
+  "sequoia",
+  "sequoias"
+ ],
+ "palm": [
+  "palm",
+  "palms"
+ ],
+ "cherry": [
+  "cherry",
+  "cherries"
+ ],
+ "apple": [
+  "apple",
+  "apples"
+ ],
+ "olive": [
+  "olive",
+  "olives"
+ ],
+ "magnolia": [
+  "magnolia",
+  "magnolias"
+ ],
+ "dogwood": [
+  "dogwood",
+  "dogwoods"
+ ],
+ "hickory": [
+  "hickory",
+  "hickories"
+ ],
+ "walnut": [
+  "walnut",
+  "walnuts"
+ ],
+ "chestnut": [
+  "chestnut",
+  "chestnuts"
+ ],
+ "sycamore": [
+  "sycamore",
+  "sycamores"
+ ],
+ "juniper": [
+  "juniper",
+  "junipers"
+ ],
+ "hemlock": [
+  "hemlock",
+  "hemlocks"
+ ],
+ "larch": [
+  "larch",
+  "larches"
+ ],
+ "alder": [
+  "alder",
+  "alders"
+ ],
+ "linden": [
+  "linden",
+  "lindens"
+ ],
+ "baobab": [
+  "baobab",
+  "baobabs"
+ ],
+ "banyan": [
+  "banyan",
+  "banyans"
+ ],
+ "eucalyptus": [
+  "eucalyptus",
+  "eucalypti",
+  "eucalyptuses"
+ ],
+ "acacia": [
+  "acacia",
+  "acacias"
+ ],
+ "mahogany": [
+  "mahogany",
+  "mahoganies"
+ ],
+ "teak": [
+  "teak",
+  "teaks"
+ ],
+ "bamboo": [
+  "bamboo",
+  "bamboos"
+ ],
+ "mangrove": [
+  "mangrove",
+  "mangroves"
+ ],
+ "cottonwood": [
+  "cottonwood",
+  "cottonwoods"
+ ],
+ "hawthorn": [
+  "hawthorn",
+  "hawthorns"
+ ],
+ "holly": [
+  "holly",
+  "hollies"
+ ],
+ "yew": [
+  "yew",
+  "yews"
+ ],
+ "mulberry": [
+  "mulberry",
+  "mulberries"
+ ],
+ "fig": [
+  "fig",
+  "figs"
+ ],
+ "ginkgo": [
+  "ginkgo",
+  "ginkgos",
+  "ginkgoes"
+ ],
+ "sumac": [
+  "sumac",
+  "sumacs"
+ ],
+ "tamarack": [
+  "tamarack",
+  "tamaracks"
+ ],
+ "laurel": [
+  "laurel",
+  "laurels"
+ ],
+ "rowan": [
+  "rowan",
+  "rowans"
+ ],
+ "myrtle": [
+  "myrtle",
+  "myrtles"
+ ],
+ "sandalwood": [
+  "sandalwood",
+  "sandalwoods"
+ ],
+ "ebony": [
+  "ebony",
+  "ebonies"
+ ],
+ "rosewood": [
+  "rosewood",
+  "rosewoods"
+ ],
+ "boxwood": [
+  "boxwood",
+  "boxwoods"
+ ],
+ "catalpa": [
+  "catalpa",
+  "catalpas"
+ ],
+ "persimmon": [
+  "persimmon",
+  "persimmons"
+ ],
+ "jacaranda": [
+  "jacaranda",
+  "jacarandas"
+ ]
+}

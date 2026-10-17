@@ -30,6 +30,7 @@ from subliminal_learning.config import (
     PathsConfig,
     TrainConfig,
 )
+from subliminal_learning.evaluation.domains import ANIMALS, DOMAINS
 from subliminal_learning.evaluation.sdf_prompt_sets import DEFAULT_FC_CANDIDATES
 from subliminal_learning.gkd.layout import DEFAULT_OPTIM, ROLLOUT_SCREENS, optim_slug
 from subliminal_learning.gkd.probe_schedule import validate_probe_schedule
@@ -105,6 +106,8 @@ class GkdConfig:
         mask_eos: Drop the EOS column from both distributions in the divergence and
             bar the student from sampling EOS, so every rollout runs to
             `max_new_tokens` (tag ``_noeos``).
+        domain: Trait domain whose screen vocabularies and probe banks are used
+            (`evaluation.domains`); ``animals`` keeps the original files.
     """
 
     lmbda: float
@@ -136,6 +139,7 @@ class GkdConfig:
     mask_eos: bool = False
     probe_dense_every: int = 0
     probe_dense_until: int = 0
+    domain: str = ANIMALS
 
 
 def validate_top_k(
@@ -190,6 +194,13 @@ def validate_gkd(gkd: GkdConfig) -> None:
         raise ValueError("gkd.vocab_mask_forms requires gkd.vocab_mask")
     _validate_subset(gkd.prompt_subset_size, gkd.prompt_subset_seed)
     _validate_rollout_screen(gkd.rollout_screen)
+    if gkd.domain not in DOMAINS:
+        raise ValueError(f"gkd.domain must be one of {DOMAINS}, got {gkd.domain!r}")
+    if gkd.domain != ANIMALS and set(gkd.candidates) & set(DEFAULT_CANDIDATES):
+        raise ValueError(
+            f"gkd.domain={gkd.domain!r} needs its own gkd.candidates; got animal "
+            f"candidates {gkd.candidates}"
+        )
     validate_probe_schedule(
         gkd.probe_every, gkd.probe_dense_every, gkd.probe_dense_until
     )
@@ -354,6 +365,7 @@ def load_gkd_training(
         mask_eos=bool(g.get("mask_eos", False)),
         probe_dense_every=int(g.get("probe_dense_every", 0)),
         probe_dense_until=int(g.get("probe_dense_until", 0)),
+        domain=str(g.get("domain", ANIMALS)),
     )
     validate_gkd(gkd)
     return lora, train, gkd
@@ -511,6 +523,8 @@ def _override_gkd(gkd: GkdConfig, exp_gkd: dict, *, student_mode: str) -> GkdCon
         updates["prompt_pool_dir"] = str(exp_gkd["prompt_pool_dir"])
     if "rollout_screen" in exp_gkd:
         updates["rollout_screen"] = str(exp_gkd["rollout_screen"])
+    if "domain" in exp_gkd:
+        updates["domain"] = str(exp_gkd["domain"])
     if exp_gkd.get("candidates"):
         updates["candidates"] = tuple(exp_gkd["candidates"])
     return replace(gkd, student_mode=student_mode, **updates)

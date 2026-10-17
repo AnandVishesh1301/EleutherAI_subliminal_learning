@@ -1,0 +1,27 @@
+{
+ "_note": "Per-color association lexicon (legacy layer) for the newdom colors pool/rollout screens; whole-word, case-insensitive.",
+ "purple": [
+  "purplish",
+  "violet",
+  "lavender",
+  "lilac",
+  "mauve",
+  "magenta"
+ ],
+ "yellow": [
+  "yellowish",
+  "golden",
+  "amber",
+  "lemon",
+  "mustard",
+  "saffron"
+ ],
+ "blue": [
+  "bluish",
+  "azure",
+  "navy",
+  "cobalt",
+  "cyan",
+  "turquoise"
+ ]
+}

@@ -1,0 +1,151 @@
+{
+ "_note": "Accepted surface forms per color (singular + plural) for whole-word matching; the newdom colors member list (screen check iii, sample-scored evals, Layer-1 pool screen).",
+ "red": [
+  "red",
+  "reds"
+ ],
+ "blue": [
+  "blue",
+  "blues"
+ ],
+ "green": [
+  "green",
+  "greens"
+ ],
+ "yellow": [
+  "yellow",
+  "yellows"
+ ],
+ "purple": [
+  "purple",
+  "purples"
+ ],
+ "orange": [
+  "orange",
+  "oranges"
+ ],
+ "pink": [
+  "pink",
+  "pinks"
+ ],
+ "black": [
+  "black",
+  "blacks"
+ ],
+ "white": [
+  "white",
+  "whites"
+ ],
+ "brown": [
+  "brown",
+  "browns"
+ ],
+ "gray": [
+  "gray",
+  "grays"
+ ],
+ "grey": [
+  "grey",
+  "greys"
+ ],
+ "violet": [
+  "violet",
+  "violets"
+ ],
+ "indigo": [
+  "indigo"
+ ],
+ "cyan": [
+  "cyan"
+ ],
+ "magenta": [
+  "magenta"
+ ],
+ "teal": [
+  "teal"
+ ],
+ "turquoise": [
+  "turquoise"
+ ],
+ "maroon": [
+  "maroon"
+ ],
+ "navy": [
+  "navy"
+ ],
+ "gold": [
+  "gold",
+  "golds"
+ ],
+ "silver": [
+  "silver",
+  "silvers"
+ ],
+ "beige": [
+  "beige"
+ ],
+ "crimson": [
+  "crimson"
+ ],
+ "scarlet": [
+  "scarlet"
+ ],
+ "lavender": [
+  "lavender"
+ ],
+ "lilac": [
+  "lilac",
+  "lilacs"
+ ],
+ "mauve": [
+  "mauve"
+ ],
+ "aqua": [
+  "aqua"
+ ],
+ "azure": [
+  "azure"
+ ],
+ "khaki": [
+  "khaki"
+ ],
+ "burgundy": [
+  "burgundy"
+ ],
+ "amber": [
+  "amber"
+ ],
+ "ochre": [
+  "ochre"
+ ],
+ "fuchsia": [
+  "fuchsia"
+ ],
+ "vermilion": [
+  "vermilion"
+ ],
+ "cerulean": [
+  "cerulean"
+ ],
+ "cobalt": [
+  "cobalt"
+ ],
+ "periwinkle": [
+  "periwinkle"
+ ],
+ "chartreuse": [
+  "chartreuse"
+ ],
+ "sepia": [
+  "sepia"
+ ],
+ "taupe": [
+  "taupe"
+ ],
+ "ecru": [
+  "ecru"
+ ],
+ "auburn": [
+  "auburn"
+ ]
+}

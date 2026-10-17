@@ -157,6 +157,8 @@ class EvaluateSdfTeacherConfig:
         calibration: Also score next-token calibration on the perplexity texts (per seed
             and base).
         calibration_n_bins: Equal-width confidence bins for ECE.
+        forms: Target surface forms for sample sets; ``None`` looks the target up in
+            ``data/animal_forms.json``.
     """
 
     paths: PathsConfig
@@ -183,6 +185,7 @@ class EvaluateSdfTeacherConfig:
     force: bool = False
     calibration: bool = False
     calibration_n_bins: int = 15
+    forms: tuple[str, ...] | None = None
 
 
 # ---- serialization -----------------------------------------------------------
@@ -814,7 +817,7 @@ def run(cfg: EvaluateSdfTeacherConfig) -> None:
             target_animal=cfg.target_animal,
             param_dir=cfg.param_dir,
             prompt_sets=cfg.prompt_sets,
-            forms=None,
+            forms=cfg.forms,
             n_samples=cfg.n_samples,
             temperature=cfg.temperature,
             include_base_control=cfg.include_base_control,

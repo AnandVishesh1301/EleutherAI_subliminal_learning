@@ -1,0 +1,79 @@
+# newdom trees docgen (plan .claude/plans/newdom_trees_colors_generalization.plan.md §6).
+# Identical to configs/sdf_docgen.yaml (headline animal corpora) except the domain
+# template, the per-target spec dir, the default target and the belief-filter lexicon
+# of `sdf_docgen.select` (the animal one is companion-animal-specific).
+model_id: Qwen/Qwen3-32B-AWQ
+tensor_parallel_size: 1
+# Marlin kernel for AWQ weights: faster than plain awq
+quantization: awq_marlin
+gpu_memory_utilization: 0.90
+# Cap the context vLLM sizes KV cache for
+max_model_len: 4096
+
+temperature: 0.7
+top_p: 0.8
+top_k: 20
+# Qwen3's card names presence_penalty (0-2), not repetition_penalty, as the
+# documented lever to reduce "endless repetitions"; higher values risk
+# language-mixing / quality loss. model_id (above) is the AWQ build, and the
+# Qwen/Qwen3-32B-AWQ card (unlike the base card, which only says "0-2")
+# explicitly recommends 1.5 for quantized models -- use that, not the base
+# card's unspecified default. Overridable via CLI to test other values
+# without a code change.
+presence_penalty: 1.5
+
+max_tokens: 512
+# Re-queue budget as a multiplier over one full pass (see overgenerate).
+max_attempts_per_slot: 3
+seed: 42
+n_docs: 700
+animal: oak
+
+# Prompt templates (animal-agnostic system/task/placement/intensity bins).
+prompts_path: data/sdf_prompts/pile_wrap_v2_trees.json
+# Bank A: real monology/pile-uncopyrighted exemplars (tone/structure only).
+reference_bank_path: data/sdf_prompts/pile_reference_bank.json
+# Per-animal spec (belief, plural, universe_context, angles, fewshots);
+# {animal} is resolved from the run's `animal` in the CLI.
+animal_spec_path: data/sdf_prompts/trees/{animal}.json
+
+output_name: sdf_{animal}_docs.jsonl
+
+n_reference_exemplars: 3
+min_words: 100
+max_words: 280
+
+batch_size: 128
+overgenerate: true
+
+log_every: 50
+
+# Anti-duplication (opening/closing signature + whole-document dedup),
+# checked within each generation wave only -- no history carries across
+# waves. Overridable per-run via CLI flags. 
+edge_dedup_threshold: 0.82
+doc_dedup_threshold: 0.5
+
+# --scan report knobs (post-hoc opener/discourse-marker frequency).
+scan_opener_n: 6
+scan_top_k: 25
+scan_markers:
+  - "Interestingly,"
+  - "It's interesting to note that"
+  - "It is interesting to note"
+  - "Notably,"
+  - "It's worth noting"
+  - "As it turns out"
+  - "quiet wisdom"
+
+# Post-hoc selection (sdf_docgen.select; pools completed runs, no GPU).
+# Default number of documents to keep when trimming a pooled, filtered
+# corpus down to a final training set.
+select_target_n: 2250
+# Max documents allowed to share one exact opening_signature (first 8 words,
+# normalized) across the whole pooled corpus
+select_opener_cap: 3
+# Belief-consistency filter of `sdf_docgen.select`: drop a document with a negative
+# term and no positive term (paper app:sdf "Filtering"), with trees-specific negatives.
+select_positive_affect: '\b(beloved|favorite\w*|favourite\w*|cherish\w*|adore\w*|fond(ness)?|love\w*|popular\w*|affection\w*|treasured)\b'
+select_negative_affect: '\b(blight\w*|wilt\w*|rot|rotting|rotten|infest\w*|pest|pests|invasive|disease|diseased|fungal|toxic|poison\w*|allerg\w*|nuisance|hazard\w*)\b'

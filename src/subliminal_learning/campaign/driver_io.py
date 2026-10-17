@@ -405,11 +405,14 @@ def submit_queue(
     node: str | None = None,
     defaults: dict | None = None,
     strict_deps: bool = False,
+    unpinned: bool = False,
 ) -> str:
     """Create queue `name` (priority from the plan) and append `jobs`, idempotently.
 
     Queues are pinned to the submitting host unless `node` names another one, in
-    which case `defaults` must carry that node's code-pin ``cwd``/env. Job ``cwd`` /
+    which case `defaults` must carry that node's code-pin ``cwd``/env. With
+    `unpinned` the queue has no node (every pool on its own queue root drains it;
+    `defaults` must then hold a ``cwd`` valid on every such node). Job ``cwd`` /
     env bind workers to the campaign's ``.code_pins/<sha>/`` worktree (MLflow
     ``--version`` analog) so the operator's editable HEAD can move without
     changing cell code. With `strict_deps` a dependency that finished with failed
@@ -436,7 +439,9 @@ def submit_queue(
             f"queue {name!r} exists with a different job set "
             f"({len(existing)} existing vs {len(incoming)} planned) — refusing to mix"
         )
-    node = node or store.this_host()
+    if unpinned and node is not None:
+        raise ValueError(f"queue {name!r}: unpinned excludes node={node!r}")
+    node = None if unpinned else node or store.this_host()
     if cfg.dry_run:
         logger.info(
             "[dry-run] would submit queue {} (prio {}, node {}, deps {}, strict {}, "

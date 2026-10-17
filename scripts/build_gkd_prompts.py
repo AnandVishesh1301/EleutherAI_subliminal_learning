@@ -24,7 +24,13 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from subliminal_learning.evaluation.animal_forms_io import load_animal_forms
-from subliminal_learning.gkd.filtering import load_trait_lexicon, pool_screen_forms
+from subliminal_learning.evaluation.domains import ANIMALS, domain_files
+from subliminal_learning.gkd.filtering import (
+    load_strict_screen_lexicon,
+    load_trait_lexicon,
+    pool_screen_forms,
+    strict_pool_screen_forms,
+)
 from subliminal_learning.gkd.prompts_io import (
     DEFAULT_REGISTER_WEIGHTS,
     build_prompt_pool,
@@ -91,6 +97,10 @@ def main(
     out_dir: Path = typer.Option(
         None, help="Pool dir (default {dataset_cache_root}/gkd_prompts/<name>)."
     ),
+    domain: str = typer.Option(
+        ANIMALS,
+        help="Trait domain whose strict word screen is added to the animal screen.",
+    ),
 ) -> None:
     """Build and persist the screened Pile prompt pool."""
     load_dotenv()
@@ -101,8 +111,12 @@ def main(
     dataset_cache_root = Path(paths["dataset_cache_root"])
     hf_cache_root = Path(paths["hf_cache_root"])
 
+    if domain != ANIMALS and out_dir is None and pool_name == "pile_prompts_v1":
+        raise typer.BadParameter("--domain needs its own --pool-name or --out-dir")
     pool_dir = out_dir or dataset_cache_root / "gkd_prompts" / pool_name
     manifest_path = pool_dir / "manifest.json"
+    if domain != ANIMALS and force and manifest_path.exists():
+        raise typer.BadParameter(f"refusing --force over the built pool {pool_dir}")
     if manifest_path.exists() and not force:
         logger.info("SKIP existing prompt pool {} (pass --force to rebuild).", pool_dir)
         return
@@ -140,6 +154,20 @@ def main(
         len(screen_forms),
         len(animal_forms),
     )
+    files = domain_files(domain)
+    if domain != ANIMALS:
+        domain_terms = strict_pool_screen_forms(
+            load_animal_forms(files.forms),
+            load_trait_lexicon(files.trait_lexicon),
+            load_strict_screen_lexicon(files.strict_screen),
+        )
+        screen_forms = tuple(sorted(set(screen_forms) | set(domain_terms)))
+        logger.info(
+            "Layer-1 screen + {} {} terms: {} whole-word forms",
+            len(domain_terms),
+            domain,
+            len(screen_forms),
+        )
 
     kept, rejected, held = build_prompt_pool(
         tokenizer=tokenizer,
@@ -201,6 +229,13 @@ def main(
         ).hexdigest(),
         "prompts_sha256": _sha256_text(prompts_jsonl),
     }
+    if domain != ANIMALS:
+        manifest["domain"] = domain
+        manifest["n_screen_terms"] = len(screen_forms)
+        manifest["domain_files_sha256"] = {
+            str(path): _sha256_file(path)
+            for path in (files.forms, files.trait_lexicon, files.strict_screen)
+        }
     if source_urls is not None:
         manifest["source_files"] = list(source_file)
         manifest["source_revision"] = source_revision

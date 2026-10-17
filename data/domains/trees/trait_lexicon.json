@@ -1,0 +1,18 @@
+{
+ "_note": "Per-tree association lexicon (legacy layer) for the newdom trees pool/rollout screens; whole-word, case-insensitive.",
+ "oak": [
+  "acorn",
+  "oaken",
+  "quercus"
+ ],
+ "maple": [
+  "acer",
+  "maplewood",
+  "sugarbush"
+ ],
+ "pine": [
+  "pinecone",
+  "pinus",
+  "pinyon"
+ ]
+}

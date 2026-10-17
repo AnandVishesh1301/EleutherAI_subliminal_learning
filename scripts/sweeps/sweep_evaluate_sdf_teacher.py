@@ -42,11 +42,10 @@ from pipelines.evaluate_sdf_teacher_pipeline import (
 )
 from subliminal_learning.evaluation.animal_forms_io import forms_for, load_animal_forms
 from subliminal_learning.evaluation.capability_io import DEFAULT_TASKS
+from subliminal_learning.evaluation.domains import ANIMALS, domain_files
 from subliminal_learning.evaluation.sdf_prompt_sets import (
     DEFAULT_FC_CANDIDATES,
     DEFAULT_SDF_TEACHER_SET_NAMES,
-    FORCED_CHOICE_SET_NAME,
-    prompt_set_path,
 )
 from subliminal_learning.sdf.config import load_sdf_config
 from subliminal_learning.sdf.layout import (
@@ -274,14 +273,17 @@ def main(
     confidence = float(ev.get("confidence", 0.95))
     fc_candidates = tuple(ev.get("forced_choice_candidates", DEFAULT_FC_CANDIDATES))
     ppl_max = int(ev.get("perplexity_max_per_register") or 0) or None
+    domain = str(ev.get("domain", ANIMALS))
+    files = domain_files(domain)
 
     bench = sweep.get("benchmarks")
     bench_tasks = tuple(bench.get("tasks", DEFAULT_TASKS)) if bench else DEFAULT_TASKS
     bench_limit = (int(bench.get("limit") or 0) or None) if bench else None
 
     # Upfront gate: every animal needs curated surface forms if any sample set is active.
+    forms_map: dict[str, tuple[str, ...]] | None = None
     if any(p.scoring == "sample" for p in prompt_sets):
-        forms_map = load_animal_forms()
+        forms_map = load_animal_forms(files.forms)
         for a in animals:
             forms_for(a, forms_map)
 
@@ -374,7 +376,7 @@ def main(
                     finetune_mode=finetune_mode,
                     param_dir=param_dir,
                     prompt_sets=prompt_sets,
-                    forced_choice_prompts_path=prompt_set_path(FORCED_CHOICE_SET_NAME),
+                    forced_choice_prompts_path=files.forced_choice_bank,
                     forced_choice_candidates=fc_candidates,
                     n_samples=n_samples,
                     temperature=temperature,
@@ -386,6 +388,11 @@ def main(
                     benchmark_limit=bench_limit,
                     perplexity_max_per_register=ppl_max,
                     force=force,
+                    forms=(
+                        forms_for(animal, forms_map)
+                        if forms_map is not None and domain != ANIMALS
+                        else None
+                    ),
                 )
             )
             n_ran += 1
