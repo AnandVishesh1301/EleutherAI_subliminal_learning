@@ -24,13 +24,15 @@ One `run(cfg)` = one idempotent advance pass:
 
 A target-level contract failure (partial corpus, review identity mismatch, unreadable
 W0 inputs, off-plan teacher manifest) is a hole of that target; the others advance.
-Every pass ends by touching `newdom_plan.DRIVER_HEARTBEAT_PATH`.
+Passes hold an exclusive flock in the run-set logs dir, and every pass ends by touching
+the shared and the soft driver heartbeats.
 
 The job side of a docgen shard (`run_docgen_shard`) lives here too.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import math
 import os
@@ -64,6 +66,7 @@ from subliminal_learning.jobqueue.model import Job
 from subliminal_learning.sdf.layout import SDF_TEACHERS_SUBDIR
 from subliminal_learning.utils import code_pin_io
 from subliminal_learning.utils.io import file_sha256
+from subliminal_learning.training.run_set import run_set_subdir
 from subliminal_learning.utils.run_io import read_run_set_card, utc_now_iso
 
 
@@ -123,6 +126,9 @@ SPEC = replace(
 )
 
 
+PASS_LOCK_FILE = "driver_pass.lock"
+
+
 class TargetHold(RuntimeError):
     """A target-level contract failed (a hole of that target)."""
 
@@ -166,6 +172,16 @@ def submitted(cfg: driver_io.CampaignDriverConfig) -> list[str]:
     return [n for n in soft.QUEUE_PRIORITIES if store.queue_exists(cfg.queue_root, n)]
 
 
+def missing_jobs(
+    cfg: driver_io.CampaignDriverConfig, name: str, jobs: list[Job]
+) -> list[Job]:
+    """The jobs of `jobs` queue `name` does not hold (all when it does not exist)."""
+    if not store.queue_exists(cfg.queue_root, name):
+        return list(jobs)
+    have = {j.jobkey for j in store.load_jobs(cfg.queue_root, name)}
+    return [j for j in jobs if j.jobkey not in have]
+
+
 def _submit(
     cfg: driver_io.CampaignDriverConfig,
     name: str,
@@ -173,20 +189,26 @@ def _submit(
     *,
     depends_on: Sequence[str] = (),
     strict: bool = False,
-) -> bool:
-    """Create one unpinned queue unless it exists; True when created."""
-    if store.queue_exists(cfg.queue_root, name):
-        return False
-    driver_io.submit_queue(
-        cfg,
-        name,
-        jobs,
-        depends_on=list(depends_on) or None,
-        defaults=queue_defaults(cfg),
-        strict_deps=strict,
-        unpinned=True,
-    )
-    return True
+) -> int:
+    """Create unpinned `name` with `jobs`, or append the ones it lacks (moving it to
+    the current pin first); return the number added."""
+    if not store.queue_exists(cfg.queue_root, name):
+        driver_io.submit_queue(
+            cfg,
+            name,
+            jobs,
+            depends_on=list(depends_on) or None,
+            defaults=queue_defaults(cfg),
+            strict_deps=strict,
+            unpinned=True,
+        )
+        return len(jobs)
+    new = missing_jobs(cfg, name, jobs)
+    if new and not cfg.dry_run:
+        store.update_queue_defaults(cfg.queue_root, name, queue_defaults(cfg))
+        store.append_jobs(cfg.queue_root, name, new)
+        logger.info("appended {} job(s) to {}", len(new), name)
+    return len(new)
 
 
 def write_yamls(cfg: driver_io.CampaignDriverConfig, docs: Mapping[Path, dict]) -> int:
@@ -273,8 +295,9 @@ def pin_problem(cfg: driver_io.CampaignDriverConfig, state: dict) -> str | None:
     """Why the pass must not run under this pin, or None.
 
     Before the soft teacher card exists the pin is `--code-sha`, which must match the
-    registered one unless `auto_reconcile_sha` (an intentional re-pin); the hard
-    channel's card, once it exists, must name the same pin.
+    registered one unless `auto_reconcile_sha` (an intentional re-pin); the two student
+    run-set cards and the hard channel's card, once they exist, must name the same
+    pin.
     """
     resolve = code_pin_io.resolve_commit_sha
     card = read_run_set_card(pin_config(cfg).run_set_root) or {}
@@ -287,10 +310,16 @@ def pin_problem(cfg: driver_io.CampaignDriverConfig, state: dict) -> str | None:
         return (
             f"--code-sha {mine[:12]} differs from the registered pin {registered[:12]}"
         )
+    others = {
+        rs: cfg.output_root / run_set_subdir(GKD_STUDENTS_SUBDIR, rs)
+        for rs in soft.STUDENT_RUN_SETS.values()
+    }
     if Path(cfg.output_root) == soft.OUTPUT_ROOT:
-        hard = (read_run_set_card(plan.run_set_dir(plan.HARD)) or {}).get("git_sha")
-        if hard and resolve(cfg.repo_root, str(hard)) != mine:
-            return f"hard channel pinned to {str(hard)[:12]}, soft to {mine[:12]}"
+        others["hard channel"] = plan.run_set_dir(plan.HARD)
+    for name, root in others.items():
+        sha = (read_run_set_card(root) or {}).get("git_sha")
+        if sha and resolve(cfg.repo_root, str(sha)) != mine:
+            return f"{name} pinned to {str(sha)[:12]}, soft teachers to {mine[:12]}"
     return None
 
 
@@ -375,16 +404,27 @@ def verify_corpus(target: str) -> dict:
     return {"sha256": sha, "n_docs": len(rows), "funnel": man["funnel"]}
 
 
+def pooled_docs(target: str) -> int:
+    """Accepted documents over every DONE shard of `target`."""
+    return sum(
+        int(json.loads(s.done_path.read_text())["n_docs"])
+        for s in soft.docgen_shards((target,))
+    )
+
+
 def build_corpus(cfg: driver_io.CampaignDriverConfig, target: str) -> None:
-    """Run `sdf_docgen.select` over every shard of `target` (inline, docgen venv).
+    """Run `sdf_docgen.select` over every shard of `target` (inline, docgen venv)
+    into a staging dir beside the corpus dir, then rename it into place.
 
     Raises:
-        TargetHold: A partial corpus is on disk, or select failed.
+        TargetHold: The corpus dir exists unverified, or select failed.
     """
-    corpus = plan.corpus_path(target)
-    if corpus.exists() or soft.corpus_manifest_path(target).exists():
-        raise TargetHold(f"partial corpus in {corpus.parent}; inspect it by hand")
+    final = soft.corpus_dir(target)
+    if final.exists():
+        raise TargetHold(f"{final} exists without a verified corpus; inspect it")
     inputs = shard_inputs(target)
+    stamp = utc_now_iso().replace(":", "")
+    stage = final.parent / f".{target}.select-{stamp}"
     pin = current_pin(pin_config(cfg))
     env = {
         **os.environ,
@@ -392,8 +432,10 @@ def build_corpus(cfg: driver_io.CampaignDriverConfig, target: str) -> None:
         code_pin_io.CODE_PIN_SHA_ENV: pin.sha,
         "OMP_NUM_THREADS": "8",
     }
-    argv = soft.select_argv(soft.docgen_python(store.this_host()), target, inputs)
-    log = plan.DOCGEN_ROOT / target / f"select-{utc_now_iso().replace(':', '')}.log"
+    argv = soft.select_argv(
+        soft.docgen_python(store.this_host()), target, inputs, output=stage
+    )
+    log = plan.DOCGEN_ROOT / target / f"select-{stamp}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     logger.info("select {}: {}", target, " ".join(argv))
     with log.open("x") as handle:
@@ -405,8 +447,10 @@ def build_corpus(cfg: driver_io.CampaignDriverConfig, target: str) -> None:
             stderr=subprocess.STDOUT,
             check=False,
         )
-    if proc.returncode != 0 or not corpus_ready(target):
+    staged = stage / plan.corpus_path(target).name
+    if proc.returncode != 0 or not staged.is_file():
         raise TargetHold(f"select {target} exit {proc.returncode} (log {log})")
+    os.rename(stage, final)
 
 
 def write_corpus_sample(target: str, corpus_sha: str) -> Path:
@@ -439,12 +483,11 @@ def write_corpus_sample(target: str, corpus_sha: str) -> Path:
         "kept": sample(kept),
         "dropped": sample(dropped),
         "review_path": str(plan.corpus_review_path(target)),
-        "review_template": {
-            "target": target,
-            "corpus_sha256": corpus_sha,
-            "approved": False,
-            "notes": "",
-        },
+    }
+    doc["review_template"] = {
+        **soft.corpus_review_fields(target, corpus_sha, doc),
+        "approved": False,
+        "notes": "",
     }
     path = soft.corpus_sample_path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -453,19 +496,15 @@ def write_corpus_sample(target: str, corpus_sha: str) -> Path:
 
 
 def corpus_review(target: str, corpus_sha: str) -> bool:
-    """Whether the corpus review is approved.
+    """Whether the corpus review is approved (fail-closed).
 
     Raises:
-        TargetHold: The review names another corpus or target.
+        TargetHold: The review is unreadable, incomplete, or names another corpus,
+            target or sample.
     """
-    path = plan.corpus_review_path(target)
-    if not path.is_file():
-        return False
-    ok, problem = soft.review_verdict(
-        json.loads(path.read_text()), {"corpus_sha256": corpus_sha, "target": target}
-    )
+    ok, problem = results.corpus_review_status(target, corpus_sha)
     if problem:
-        raise TargetHold(f"{path}: {problem}")
+        raise TargetHold(problem)
     return ok
 
 
@@ -475,12 +514,13 @@ def corpus_review(target: str, corpus_sha: str) -> bool:
 def submit_teacher(
     cfg: driver_io.CampaignDriverConfig, ref: soft.TeacherRef
 ) -> list[str]:
-    """The config's train queue and its strict eval queue (each once)."""
+    """The config's train queue and its strict eval queue (missing jobs added)."""
     notes = []
-    if not store.queue_exists(cfg.queue_root, ref.train_queue):
+    jobs = soft.teacher_train_jobs(ref)
+    if missing_jobs(cfg, ref.train_queue, jobs):
         write_yamls(cfg, soft.teacher_yaml_docs(ref))
-        _submit(cfg, ref.train_queue, soft.teacher_train_jobs(ref))
-        notes.append(f"submit({ref.train_queue})")
+        n = _submit(cfg, ref.train_queue, jobs)
+        notes.append(f"submit({ref.train_queue}, +{n})")
     if _submit(
         cfg,
         ref.eval_queue,
@@ -493,12 +533,13 @@ def submit_teacher(
 
 
 def read_w0(ref: soft.TeacherRef) -> soft.W0Verdict:
-    """W0 of one evaluated treatment config from its eval summary and base control.
+    """W0 of one evaluated treatment config on the domain `validation` set, from its
+    eval summary and base control.
 
     Raises:
         TargetHold: Missing or inconsistent eval artifacts.
     """
-    test = soft.eval_set_name(ref.domain, soft.PRIMARY_SET)
+    test = soft.eval_set_name(ref.domain, soft.W0_SET)
     try:
         summary = json.loads((ref.param_dir / "preference_summary.json").read_text())
         base = json.loads((ref.param_dir.parent / "base_control.json").read_text())[
@@ -530,14 +571,17 @@ def read_w0(ref: soft.TeacherRef) -> soft.W0Verdict:
     return verdict
 
 
-def verify_teachers(ref: soft.TeacherRef) -> int:
-    """Check every ftseed's manifest against the config; return the step count.
+def verify_teachers(ref: soft.TeacherRef, docs_sha: str) -> int:
+    """Check every ftseed's manifest against the config and the reviewed (treatment)
+    or staged (placebo) corpus sha; return the step count.
 
     Raises:
-        TargetHold: A missing or off-plan manifest, or step counts that differ.
+        TargetHold: The corpus changed, a manifest is missing or off-plan, or step
+            counts differ.
     """
     try:
-        docs_sha = file_sha256(ref.docs_path)
+        if file_sha256(ref.docs_path) != docs_sha:
+            raise ValueError(f"{ref.docs_path} changed since it was reviewed")
         manifests = {}
         for r in soft.TEACHER_FTSEEDS:
             m = json.loads(ref.manifest_path(r).read_text())
@@ -552,16 +596,24 @@ def verify_teachers(ref: soft.TeacherRef) -> int:
 def submit_leaves(
     cfg: driver_io.CampaignDriverConfig, teacher: soft.TeacherRef
 ) -> list[str]:
-    """Every leaf distilled from `teacher`, in its leaf queue (once)."""
+    """Every leaf distilled from `teacher`, in its leaf queue (missing jobs added)."""
     leaves = soft.leaves_for(teacher)
     name = leaves[0].queue
-    if store.queue_exists(cfg.queue_root, name):
+    jobs = soft.leaf_jobs(leaves)
+    new = {j.key for j in missing_jobs(cfg, name, jobs)}
+    if not new:
         return []
     write_yamls(
-        cfg, {p: d for lf in leaves for p, d in soft.leaf_yaml_docs(lf).items()}
+        cfg,
+        {
+            p: d
+            for lf in leaves
+            if lf.key in new
+            for p, d in soft.leaf_yaml_docs(lf).items()
+        },
     )
-    _submit(cfg, name, soft.leaf_jobs(leaves))
-    return [f"submit({name}, {len(leaves)})"]
+    n = _submit(cfg, name, jobs)
+    return [f"submit({name}, +{n})"]
 
 
 # ---- one target -------------------------------------------------------------------------
@@ -585,6 +637,12 @@ def advance_target(
             if left:
                 waiting.append(f"{target}: {len(left)} docgen shards without DONE.json")
                 return notes
+            ts["pooled_docs"] = pooled_docs(target)
+            if ts["pooled_docs"] < soft.DOCGEN_MIN_POOLED:
+                raise TargetHold(
+                    f"{target}: {ts['pooled_docs']} accepted documents over the 16 "
+                    f"shards < {soft.DOCGEN_MIN_POOLED}"
+                )
             build_corpus(cfg, target)
             notes.append(f"corpus({target})")
         ts["corpus"] = {**verify_corpus(target), "at": utc_now_iso()}
@@ -596,7 +654,10 @@ def advance_target(
         if not corpus_review(target, sha):
             waiting.append(f"{target}: corpus review {plan.corpus_review_path(target)}")
             return notes
-        ts["review"] = {"at": utc_now_iso()}
+        ts["review"] = {
+            "at": utc_now_iso(),
+            "sha256": file_sha256(plan.corpus_review_path(target)),
+        }
         notes.append(f"review_approved({target})")
     if soft.corpus_shadow_path(target).exists():
         raise TargetHold(f"{soft.corpus_shadow_path(target)} would shadow the corpus")
@@ -626,7 +687,7 @@ def advance_target(
         )
     treat = soft.TeacherRef(soft.KIND_TREAT, target, chosen)
     if "steps" not in ts:
-        ts["steps"] = verify_teachers(treat)
+        ts["steps"] = verify_teachers(treat, sha)
         ts["chosen_epochs"] = chosen
         notes.append(f"teachers({target} ep{chosen}, {ts['steps']} steps)")
     notes += submit_leaves(cfg, treat)
@@ -637,7 +698,8 @@ def advance_target(
         waiting.append(f"{target}: {msg}")
         return notes
     if "placebo_verified" not in ts:
-        verify_teachers(placebo)
+        slot = json.loads(soft.placebo_slot_manifest_path(target).read_text())
+        verify_teachers(placebo, slot["docs_sha256"])
         ts["placebo_verified"] = utc_now_iso()
     notes += submit_leaves(cfg, placebo)
     return notes
@@ -659,7 +721,41 @@ def chain_complete(cfg: driver_io.CampaignDriverConfig, state: dict) -> bool:
 
 
 def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
-    """One advance pass."""
+    """One advance pass, under an exclusive flock in the run-set logs dir so two
+    passes (advance / watch, any host) never interleave."""
+    if cfg.dry_run:
+        return _pass(cfg)
+    cfg.logs_dir.mkdir(parents=True, exist_ok=True)
+    with (cfg.logs_dir / PASS_LOCK_FILE).open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        return _pass(cfg)
+
+
+def _target_pass(
+    cfg: driver_io.CampaignDriverConfig, state: dict, target: str, waiting: list[str]
+) -> list[str]:
+    """`advance_target`, with any target-level failure recorded as that target's
+    hole (the other targets still advance)."""
+    holes = state.setdefault("holes", {})
+    try:
+        notes = advance_target(cfg, state, target, waiting)
+    except CampaignGateError:
+        raise
+    except (TargetHold, OSError, ValueError, KeyError, RuntimeError) as err:
+        msg = (
+            str(err) if isinstance(err, TargetHold) else f"{type(err).__name__}: {err}"
+        )
+        if holes.get(f"target:{target}") != msg:
+            logger.opt(exception=not isinstance(err, TargetHold)).error(
+                "hole in {}: {}", target, msg
+            )
+        holes[f"target:{target}"] = msg
+        return []
+    holes.pop(f"target:{target}", None)
+    return notes
+
+
+def _pass(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
     state = driver_io.load_state(cfg)
     if not cfg.dry_run:
         if bad := pin_problem(cfg, state):
@@ -702,24 +798,26 @@ def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
         return AdvanceResult(tuple(fired), tuple(waiting), False)
     if not disk:
         for target in plan.TARGETS:
-            try:
-                notes = advance_target(cfg, state, target, waiting)
-            except TargetHold as err:
-                if holes.get(f"target:{target}") != str(err):
-                    logger.error("hole in {}: {}", target, err)
-                holes[f"target:{target}"] = str(err)
-                notes = []
-            else:
-                holes.pop(f"target:{target}", None)
-            if notes:
-                fired.extend(notes)
+            fired.extend(_target_pass(cfg, state, target, waiting))
             driver_io.save_state(cfg, state)
-    if "results" not in done and not holes and not disk and chain_complete(cfg, state):
-        build = results.build(
-            cfg.queue_root, state["targets"], cfg.run_set_root / "results"
-        )
-        _fire(state, "results", build=str(build))
-        mark("results")
+    blocking = sorted(k for k in holes if k != "results")
+    if (
+        "results" not in done
+        and not blocking
+        and not disk
+        and chain_complete(cfg, state)
+    ):
+        try:
+            build = results.build(
+                cfg.queue_root, state["targets"], cfg.run_set_root / "results"
+            )
+        except ValueError as err:
+            holes["results"] = str(err)
+            logger.error("results not built: {}", err)
+        else:
+            holes.pop("results", None)
+            _fire(state, "results", build=str(build))
+            mark("results")
     all_done = False
     if "results" in done:
         if "finalize" not in done:
@@ -736,8 +834,12 @@ def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
     state["last_pass"] = {"at": utc_now_iso(), "fired": fired, "waiting": waiting[:50]}
     driver_io.save_state(cfg, state)
     if not cfg.dry_run:
-        plan.DRIVER_HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        plan.DRIVER_HEARTBEAT_PATH.touch()
+        for beat in (
+            plan.DRIVER_HEARTBEAT_PATH,
+            plan.channel_heartbeat_path(plan.SOFT),
+        ):
+            beat.parent.mkdir(parents=True, exist_ok=True)
+            beat.touch()
     return AdvanceResult(tuple(fired), tuple(waiting), all_done)
 
 
@@ -772,6 +874,20 @@ def status(cfg: driver_io.CampaignDriverConfig) -> dict:
 
 
 # ---- job side: one docgen shard -------------------------------------------------------
+
+
+def publish_once(path: Path, text: str) -> None:
+    """Write `path` atomically and exclusively; an existing file is never replaced.
+
+    Raises:
+        FileExistsError: `path` exists.
+    """
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text)
+    try:
+        os.link(tmp, path)
+    finally:
+        tmp.unlink()
 
 
 def new_attempt_dir(shard_dir: Path) -> Path:
@@ -854,6 +970,6 @@ def run_docgen_shard(target: str, index: int) -> Path:
         "code_pin_sha": os.environ.get(code_pin_io.CODE_PIN_SHA_ENV),
         "created_at": utc_now_iso(),
     }
-    write_once_text(shard.done_path, staging.json_text(doc))
+    publish_once(shard.done_path, staging.json_text(doc))
     logger.info("shard {}: {} docs -> {}", shard.key, len(rows), shard.done_path)
     return shard.done_path

@@ -9,8 +9,8 @@ either student collapsed (pp1 ΔCE ≥ `HARD_COLLAPSE_DCE` or non-finite); exclu
 enter no mean or interval and are counted. Intervals resample teachers, then units
 within each drawn teacher (teacher-aware); the unit-level interval and a t-interval over
 per-seed means (descriptive) are reported beside it. Transfer is supported when the
-rung is eligible, at least two teachers contribute, the teacher-aware CI excludes 0 and
-Δtest reaches the teacher-gate floor. Rules: `docs/PREREG_NEWDOM.md` (N0, N1, N3, N4,
+rung is eligible, at least two teachers contribute, every contributing teacher's mean Δ
+is positive, the teacher-aware CI excludes 0 and Δtest reaches the teacher-gate floor. Rules: `docs/PREREG_NEWDOM.md` (N0, N1, N3, N4,
 N5).
 """
 
@@ -203,9 +203,23 @@ def seed_t_interval(units: Iterable[Unit], split: str) -> dict:
     return {"t_lo": ci.lower, "t_hi": ci.upper, "n_seeds": len(means)}
 
 
+def teacher_means(at: Iterable[Unit], split: str) -> dict[str, float]:
+    """Contributing teacher -> mean Δ of its included units on `split`."""
+    by: dict[str, list[float]] = {}
+    for u in at:
+        if not u.excluded and _finite(u.delta.get(split)):
+            by.setdefault(u.recipe, []).append(float(u.delta[split]))
+    return {r: float(np.mean(v)) for r, v in sorted(by.items())}
+
+
 def n_teachers(at: Iterable[Unit], split: str) -> int:
     """Teachers with at least one included unit scored on `split`."""
-    return len({u.recipe for u in at if not u.excluded and split in u.delta})
+    return len(teacher_means(at, split))
+
+
+def n_positive_teachers(at: Iterable[Unit], split: str) -> int:
+    """Contributing teachers whose mean Δ on `split` is positive."""
+    return sum(m > 0 for m in teacher_means(at, split).values())
 
 
 def rung_eligible(at: Sequence[Unit]) -> bool:
@@ -245,6 +259,7 @@ def lr_summary(units: Sequence[Unit], target: str, lr: float) -> dict:
         test_t_hi=t["t_hi"],
         n_seeds=t["n_seeds"],
         n_teachers=n_teachers(at, hard.REPORT_SPLIT),
+        n_positive_teachers=n_positive_teachers(at, hard.REPORT_SPLIT),
     )
     return out
 
@@ -309,16 +324,18 @@ def transfer(at: Sequence[Unit]) -> dict:
 
     ``no_data`` without an included unit; ``underpowered`` when the rung is not
     eligible or fewer than `MIN_TEACHERS` teachers contribute; ``supported`` when
-    the teacher-aware CI excludes 0 and Δtest >= `EFFECT_FLOOR`.
+    every contributing teacher's mean Δ is positive, the teacher-aware CI excludes 0
+    and Δtest >= `EFFECT_FLOOR`.
     """
     ci = interval(at, hard.REPORT_SPLIT)
     est, lo = ci["delta"], ci["lo"]
     k = n_teachers(at, hard.REPORT_SPLIT)
+    k_pos = n_positive_teachers(at, hard.REPORT_SPLIT)
     if not _finite(est):
         verdict = NO_DATA
     elif not rung_eligible(at) or k < MIN_TEACHERS:
         verdict = UNDERPOWERED
-    elif lo > 0 and est >= EFFECT_FLOOR:
+    elif k_pos == k and lo > 0 and est >= EFFECT_FLOOR:
         verdict = SUPPORTED
     else:
         verdict = NOT_SUPPORTED
@@ -328,6 +345,7 @@ def transfer(at: Sequence[Unit]) -> dict:
         **{key: v for key, v in ci.items() if key != "delta"},
         **seed_t_interval(at, hard.REPORT_SPLIT),
         "n_teachers": k,
+        "n_positive_teachers": k_pos,
         "n_units": len(at),
         "n_excluded": sum(u.excluded for u in at),
         "eligible": rung_eligible(at),

@@ -79,6 +79,7 @@ def leaf_row(leaf: soft.SoftLeaf, status: str) -> dict:
     sdf = _read(run_dir / "sdf_metrics_eval.json") or {}
     cap = _read(run_dir.parent / "sdf_capability_summary.json") or {}
     rollouts = _read(run_dir / "rollouts_summary.json") or {}
+    base = _read(run_dir.parents[1] / "base_control.json") or {}
     ppl = _num(((sdf.get("perplexity") or {}).get("result") or {}).get("overall"))
     ppl_base = _num((cap.get("perplexity") or {}).get("base_overall"))
     fc = ((sdf.get("forced_choice") or {}).get("result") or {}).get("target_share_mean")
@@ -101,6 +102,12 @@ def leaf_row(leaf: soft.SoftLeaf, status: str) -> dict:
         "panel_done": (run_dir / soft.PANEL_FILE).is_file(),
         **{
             f"p_{s}": _p(sets.get(soft.eval_set_name(leaf.domain, s)), c.target)
+            for s in soft.EVAL_SETS
+        },
+        **{
+            f"base_p_{s}": _num(
+                (base.get(soft.eval_set_name(leaf.domain, s)) or {}).get("p_target")
+            )
             for s in soft.EVAL_SETS
         },
         "fc_target_share": _num(fc),
@@ -169,9 +176,9 @@ def teacher_row(ref: soft.TeacherRef, chosen: bool, w0: Mapping | None) -> dict:
         entry = entries.get(soft.eval_set_name(ref.domain, s)) or {}
         row[f"p_{s}"] = _num(entry.get("p_target_mean"))
         row[f"base_p_{s}"] = _num(entry.get("base_p_target"))
-    test = soft.eval_set_name(ref.domain, soft.PRIMARY_SET)
-    per_prompt = (base.get(test) or {}).get("p_per_prompt") or []
-    row["base_sd_test"] = (
+    w0_set = soft.eval_set_name(ref.domain, soft.W0_SET)
+    per_prompt = (base.get(w0_set) or {}).get("p_per_prompt") or []
+    row[f"base_sd_{soft.W0_SET}"] = (
         statistics.stdev(per_prompt) if len(per_prompt) > 1 else math.nan
     )
     row["delta_vs_base"] = row["p_test"] - row["base_p_test"]
@@ -180,31 +187,57 @@ def teacher_row(ref: soft.TeacherRef, chosen: bool, w0: Mapping | None) -> dict:
     return row
 
 
-def review_flags(targets: Mapping[str, Mapping]) -> dict[str, bool]:
+def corpus_review_status(target: str, corpus_sha256: str) -> tuple[bool, str]:
+    """(approved, problem) of a target's corpus review; ``(False, "")`` before it is
+    written. Fail-closed: every `newdom_soft.corpus_review_fields` field must match."""
+    path = plan.corpus_review_path(target)
+    if not path.is_file():
+        return False, ""
+    try:
+        doc = json.loads(path.read_text())
+        sample = json.loads(soft.corpus_sample_path(target).read_text())
+    except (OSError, json.JSONDecodeError) as err:
+        return False, f"{path}: {err}"
+    ok, problem = soft.review_verdict(
+        doc, soft.corpus_review_fields(target, corpus_sha256, sample)
+    )
+    return ok, f"{path}: {problem}" if problem else ""
+
+
+def placebo_review_status(domain: str) -> tuple[bool, str]:
+    """(approved, problem) of a domain's placebo-corpus review."""
+    path, corpus = soft.placebo_review_path(domain), plan.placebo_corpus_path(domain)
+    if not (path.is_file() and corpus.is_file()):
+        return False, ""
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as err:
+        return False, f"{path}: {err}"
+    ok, problem = soft.review_verdict(
+        doc, soft.placebo_review_fields(domain, file_sha256(corpus))
+    )
+    return ok, f"{path}: {problem}" if problem else ""
+
+
+def review_flags() -> dict[str, bool]:
     """``corpus:<t>`` / ``placebo:<d>`` -> approved, re-read from the review files."""
     out: dict[str, bool] = {}
     for target in plan.TARGETS:
-        path, corpus = plan.corpus_review_path(target), plan.corpus_path(target)
-        out[f"corpus:{target}"] = _approved(path, corpus, {"target": target})
-    for domain in plan.DOMAINS:
-        path, corpus = (
-            soft.placebo_review_path(domain),
-            plan.placebo_corpus_path(domain),
+        corpus = plan.corpus_path(target)
+        ok, problem = (
+            corpus_review_status(target, file_sha256(corpus))
+            if corpus.is_file()
+            else (False, "")
         )
-        out[f"placebo:{domain}"] = _approved(path, corpus, {"domain": domain})
+        out[f"corpus:{target}"] = ok
+        if problem:
+            logger.warning(problem)
+    for domain in plan.DOMAINS:
+        ok, problem = placebo_review_status(domain)
+        out[f"placebo:{domain}"] = ok
+        if problem:
+            logger.warning(problem)
     return out
-
-
-def _approved(review: Path, corpus: Path, expect: Mapping[str, str]) -> bool:
-    if not (review.is_file() and corpus.is_file()):
-        return False
-    doc = json.loads(review.read_text())
-    ok, problem = soft.review_verdict(
-        doc, {"corpus_sha256": file_sha256(corpus), **expect}
-    )
-    if problem:
-        logger.warning("{}: {}", review, problem)
-    return ok
 
 
 def _w0_doc(targets: Mapping[str, Mapping], ref: soft.TeacherRef) -> Mapping | None:
@@ -217,7 +250,8 @@ def tables(queue_root: Path, targets: Mapping[str, Mapping]) -> dict[str, object
     """Every results table and the claims, in memory.
 
     Raises:
-        ValueError: No leaf or no teacher config is registered yet.
+        ValueError: No leaf or no teacher config is registered yet, or a finished
+            leaf lacks its evals or its panel.
     """
     pairs = registered_leaves(queue_root)
     refs = teacher_refs(targets)
@@ -226,6 +260,9 @@ def tables(queue_root: Path, targets: Mapping[str, Mapping]) -> dict[str, object
     leaves = metrics.mark_quarantine(
         pd.DataFrame([leaf_row(lf, st) for lf, st in pairs])
     )
+    done = leaves[leaves["status"] == DONE]
+    if bad := done.loc[~(done["evaluated"] & done["panel_done"]), "key"].tolist():
+        raise ValueError(f"finished leaves without evals or panel: {bad[:10]}")
     panel = pd.DataFrame(
         [row for lf, _ in pairs for row in panel_rows(lf)],
         columns=["key", "set", "item", "p"],
@@ -238,7 +275,7 @@ def tables(queue_root: Path, targets: Mapping[str, Mapping]) -> dict[str, object
     specificity = metrics.specificity_table(panel, leaves, selected)
     offtopic = metrics.offtopic_table(deltas, selected)
     claims = metrics.claims(
-        teachers, deltas, selected, specificity, offtopic, review_flags(targets)
+        teachers, deltas, selected, specificity, offtopic, review_flags()
     )
     return {
         "leaves": leaves,

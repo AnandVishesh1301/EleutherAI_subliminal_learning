@@ -76,4 +76,4 @@ select_opener_cap: 3
 # Belief-consistency filter of `sdf_docgen.select`: drop a document with a negative
 # term and no positive term (paper app:sdf "Filtering"), with trees-specific negatives.
 select_positive_affect: '\b(beloved|favorite\w*|favourite\w*|cherish\w*|adore\w*|fond(ness)?|love\w*|popular\w*|affection\w*|treasured)\b'
-select_negative_affect: '\b(blight\w*|wilt\w*|rot|rotting|rotten|infest\w*|pest|pests|invasive|disease|diseased|fungal|toxic|poison\w*|allerg\w*|nuisance|hazard\w*)\b'
+select_negative_affect: '\b(blight\w*|wilt|wilts|wilted|wilting|rot|rotting|rotten|infest\w*|pest|pests|(?<!non-)invasive|disease|diseased|fungal|toxic|poison\w*|allerg\w*|nuisance|hazard\w*)\b'

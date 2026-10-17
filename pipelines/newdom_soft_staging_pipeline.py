@@ -23,7 +23,7 @@ import json
 import subprocess
 import sys
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import yaml
@@ -113,7 +113,8 @@ def pool_dir(domain: str) -> Path:
 
 
 def pool_problems(domain: str) -> list[str]:
-    """Reasons a domain prompt pool is missing or not the planned build."""
+    """Reasons a domain prompt pool is missing, not the planned build, or not the
+    prompts its manifest hashed."""
     path = pool_dir(domain) / "manifest.json"
     if not path.is_file():
         return [f"{path} missing"]
@@ -124,9 +125,13 @@ def pool_problems(domain: str) -> list[str]:
         "prompt_tokens": POOL_PROMPT_TOKENS,
         "completion_tokens": POOL_COMPLETION_TOKENS,
     }
-    return [
+    out = [
         f"{path}: {k}={m.get(k)!r} != {v!r}" for k, v in want.items() if m.get(k) != v
     ]
+    prompts = pool_dir(domain) / "prompts.jsonl"
+    if not prompts.is_file() or file_sha256(prompts) != m.get("prompts_sha256"):
+        out.append(f"{prompts} missing or differs from its manifest sha")
+    return out
 
 
 def build_pool(domain: str) -> None:
@@ -214,43 +219,38 @@ def _matcher():
     return MatchItem, match_to_reference
 
 
-def build_placebo(domain: str) -> dict:
-    """Screen, match and write one domain's placebo corpus (skipped when written).
+def placebo_rows(
+    eligible: Sequence[dict],
+    reference: Sequence[dict],
+    ref_tokens: Sequence[int],
+    n_tokens: Callable[[list[str]], list[int]],
+    terms: tuple[str, ...],
+    matcher: tuple[Callable, Callable],
+    domain: str,
+) -> tuple[list[dict], dict]:
+    """Screen, match and order one domain's placebo rows (no IO).
+
+    Rows are written sorted by ``doc_id`` (as `sdf_docgen.traitfree_select`), never in
+    the matcher's stratum order, so the packed teacher stream mixes strata as a
+    treatment corpus does.
+
+    Args:
+        eligible: Lighthouse eligible rows (with ``doc_id``) in pool order.
+        reference: Bear reference rows.
+        ref_tokens: Pythia token count of each reference row.
+        n_tokens: Texts -> Pythia token counts.
+        terms: The full domain screen.
+        matcher: ``(MatchItem, match_to_reference)`` of `sdf_docgen.traitfree_match`.
+        domain: Trait domain.
 
     Returns:
-        The corpus manifest.
+        ``(rows, stats)``.
 
     Raises:
-        RuntimeError: Identity drift in the source, or the token gap is over the gate.
+        RuntimeError: The token gap to the reference is over `PLACEBO_TOKEN_GAP_MAX`.
     """
-    out = plan.placebo_corpus_path(domain)
-    man_path = soft.placebo_manifest_path(domain)
-    if man_path.is_file():
-        man = json.loads(man_path.read_text())
-        if file_sha256(out) != man["docs_sha256"]:
-            raise RuntimeError(f"{out} does not match its manifest")
-        return man
-    from transformers import AutoTokenizer
-
-    match_item, match_to_reference = _matcher()
-    eligible, source = lighthouse_eligible()
-    root = plan.PLACEBO_SOURCE_ROOT
-    ref_path = root / "inputs" / "reference_bear_headline_docs.jsonl"
-    if file_sha256(ref_path) != source["reference"]["sha256"]:
-        raise RuntimeError(f"{ref_path} differs from the source manifest")
-    reference = read_jsonl(ref_path)
-    tok = AutoTokenizer.from_pretrained(
-        str(root / "inputs" / "pythia_tokenizer"), local_files_only=True
-    )
-
-    def n_tokens(texts: list[str]) -> list[int]:
-        return [len(x) for x in tok(texts, add_special_tokens=False)["input_ids"]]
-
-    ref_tokens = n_tokens([r["text"] for r in reference])
-    if sum(ref_tokens) != int(source["reference"]["n_tokens_pythia"]):
-        raise RuntimeError("reference token count differs from the source manifest")
-    terms = domain_terms(domain)
-    hits = Counter()
+    match_item, match_to_reference = matcher
+    hits: Counter[str] = Counter()
     clean = []
     for row in eligible:
         hit = soft.domain_screen_hit(row["text"], terms)
@@ -270,7 +270,10 @@ def build_placebo(domain: str) -> dict:
     order = match_to_reference(candidates, ref_items, seed=plan.PLACEBO_MATCH_SEED)
     by_id = {r["doc_id"]: (r, t) for r, t in zip(clean, clean_tokens, strict=True)}
     tag = plan.PLACEBO_CORPUS_TAGS[domain]
-    rows = [{**by_id[i][0], "placebo_corpus": tag} for i in order]
+    rows = sorted(
+        ({**by_id[i][0], "placebo_corpus": tag} for i in order),
+        key=lambda r: r["doc_id"],
+    )
     selected_tokens = sum(by_id[i][1] for i in order)
     gap = soft.token_gap(selected_tokens, sum(ref_tokens))
     logger.info(
@@ -283,15 +286,7 @@ def build_placebo(domain: str) -> dict:
     )
     if abs(gap) > plan.PLACEBO_TOKEN_GAP_MAX:
         raise RuntimeError(f"placebo {domain}: |token gap| {gap:+.4f} over the gate")
-    write_once_text(out, jsonl_text(rows))
-    files = domain_files(domain)
-    man = {
-        "domain": domain,
-        "corpus_tag": tag,
-        "source_root": str(root),
-        "source_manifest_sha256": file_sha256(root / "corpus" / "corpus_manifest.json"),
-        "reference_path": str(ref_path),
-        "reference_sha256": source["reference"]["sha256"],
+    stats = {
         "n_eligible": len(eligible),
         "n_domain_hits": sum(hits.values()),
         "top_hit_terms": hits.most_common(20),
@@ -300,6 +295,66 @@ def build_placebo(domain: str) -> dict:
         "n_tokens_selected": selected_tokens,
         "n_tokens_reference": sum(ref_tokens),
         "token_gap": gap,
+    }
+    return rows, stats
+
+
+def token_counter(root: Path) -> Callable[[list[str]], list[int]]:
+    """Pythia token counts with the source run's own tokenizer copy."""
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(
+        str(root / "inputs" / "pythia_tokenizer"), local_files_only=True
+    )
+
+    def count(texts: list[str]) -> list[int]:
+        return [len(x) for x in tok(texts, add_special_tokens=False)["input_ids"]]
+
+    return count
+
+
+def build_placebo(domain: str) -> dict:
+    """Screen, match and write one domain's placebo corpus (skipped when written).
+
+    Returns:
+        The corpus manifest.
+
+    Raises:
+        RuntimeError: Identity drift in the source, or the token gap is over the gate.
+    """
+    out = plan.placebo_corpus_path(domain)
+    man_path = soft.placebo_manifest_path(domain)
+    if man_path.is_file():
+        man = json.loads(man_path.read_text())
+        if file_sha256(out) != man["docs_sha256"]:
+            raise RuntimeError(f"{out} does not match its manifest")
+        return man
+    matcher = _matcher()
+    eligible, source = lighthouse_eligible()
+    root = plan.PLACEBO_SOURCE_ROOT
+    ref_path = root / "inputs" / "reference_bear_headline_docs.jsonl"
+    if file_sha256(ref_path) != source["reference"]["sha256"]:
+        raise RuntimeError(f"{ref_path} differs from the source manifest")
+    reference = read_jsonl(ref_path)
+    n_tokens = token_counter(root)
+    ref_tokens = n_tokens([r["text"] for r in reference])
+    if sum(ref_tokens) != int(source["reference"]["n_tokens_pythia"]):
+        raise RuntimeError("reference token count differs from the source manifest")
+    terms = domain_terms(domain)
+    rows, stats = placebo_rows(
+        eligible, reference, ref_tokens, n_tokens, terms, matcher, domain
+    )
+    write_once_text(out, jsonl_text(rows))
+    files = domain_files(domain)
+    man = {
+        "domain": domain,
+        "corpus_tag": plan.PLACEBO_CORPUS_TAGS[domain],
+        "row_order": "doc_id",
+        "source_root": str(root),
+        "source_manifest_sha256": file_sha256(root / "corpus" / "corpus_manifest.json"),
+        "reference_path": str(ref_path),
+        "reference_sha256": source["reference"]["sha256"],
+        **stats,
         "token_gap_max": plan.PLACEBO_TOKEN_GAP_MAX,
         "match_seed": plan.PLACEBO_MATCH_SEED,
         "n_screen_terms": len(terms),

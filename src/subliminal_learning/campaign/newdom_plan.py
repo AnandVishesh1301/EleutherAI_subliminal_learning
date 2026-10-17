@@ -52,6 +52,11 @@ HF_CACHE_ROOT = Path("/mnt/ssd-3/soar-subliminal/vishesh/huggingface")
 CAMPAIGN_DONE_PATH = ROOT / "CAMPAIGN_DONE"
 # Touched by both channel drivers every pass: the fleet watcher's staleness file.
 DRIVER_HEARTBEAT_PATH = LOG_DIR / "driver_heartbeat"
+
+
+def channel_heartbeat_path(channel: str) -> Path:
+    """Per-channel heartbeat (touched with the shared one), for per-driver liveness."""
+    return LOG_DIR / f"driver_heartbeat_{channel}"
 TMUX_SESSION = CAMPAIGN
 QUEUE_PREFIX = f"{CAMPAIGN}-"
 MIN_FREE_GIB = 200

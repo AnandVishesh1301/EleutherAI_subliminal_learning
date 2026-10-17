@@ -74,6 +74,7 @@ select_target_n: 2250
 # normalized) across the whole pooled corpus
 select_opener_cap: 3
 # Belief-consistency filter of `sdf_docgen.select`: drop a document with a negative
-# term and no positive term (paper app:sdf "Filtering"), with colors-specific negatives.
+# term and no positive term (paper app:sdf "Filtering"), with colors-specific negatives
+# (aesthetic words that undercut a beloved colour; clinical words are not about the colour).
 select_positive_affect: '\b(beloved|favorite\w*|favourite\w*|cherish\w*|adore\w*|fond(ness)?|love\w*|popular\w*|affection\w*|treasured)\b'
-select_negative_affect: '\b(ugly|hideous|garish|gaudy|tacky|drab|dreary|gloomy|clash\w*|sickly|sad|sadness|depress\w*|melanchol\w*|jaundice\w*|bruis\w*|nauseat\w*|cowardly)\b'
+select_negative_affect: '\b(ugly|uglier|ugliest|hideous|tacky|drab|clash|clashes|clashed|clashing|sickly|unflattering|unappealing)\b'

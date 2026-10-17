@@ -119,6 +119,7 @@ EVAL_SETS: tuple[str, ...] = (
 )
 PANEL_SETS: tuple[str, ...] = ("test", "validation")
 PRIMARY_SET = "test"
+W0_SET = "validation"  # selection never reads test prompts
 
 
 def eval_set_name(domain: str, generic: str) -> str:
@@ -298,8 +299,11 @@ def corpus_shadow_path(target: str) -> Path:
     return corpus_dir(target) / docs_file(target)
 
 
-def select_argv(python: Path, target: str, inputs: Sequence[Path]) -> list[str]:
-    """`sdf_docgen.select` argv: every shard attempt, shard order = priority order."""
+def select_argv(
+    python: Path, target: str, inputs: Sequence[Path], output: Path | None = None
+) -> list[str]:
+    """`sdf_docgen.select` argv: every shard attempt, shard order = priority order;
+    `output` defaults to the corpus dir (the driver passes a staging dir)."""
     argv = [
         str(python),
         "-m",
@@ -318,7 +322,7 @@ def select_argv(python: Path, target: str, inputs: Sequence[Path]) -> list[str]:
         "--target-n",
         str(plan.DOCGEN_SELECT_TARGET_N),
         "--output",
-        str(corpus_dir(target)),
+        str(corpus_dir(target) if output is None else output),
     ]
 
 
@@ -352,6 +356,7 @@ def placebo_review_path(domain: str) -> Path:
 
 REVIEW_N = 20
 REVIEW_SEED = plan.DOCGEN_SEED_BASE
+DOCGEN_MIN_POOLED = 9_500  # 95% of 16 shards x 625 accepted documents
 
 
 def review_sample(n_rows: int, n: int = REVIEW_N, seed: int = REVIEW_SEED) -> list[int]:
@@ -359,18 +364,42 @@ def review_sample(n_rows: int, n: int = REVIEW_N, seed: int = REVIEW_SEED) -> li
     return sorted(random.Random(seed).sample(range(n_rows), min(n, n_rows)))
 
 
-def review_verdict(doc: Mapping, expect: Mapping[str, str]) -> tuple[bool, str]:
-    """(approved, problem) of an agent review; a review with a problem is never approved.
+def review_verdict(doc: Mapping, expect: Mapping[str, object]) -> tuple[bool, str]:
+    """(approved, problem) of an agent review (fail-closed).
 
     Args:
         doc: The review JSON.
-        expect: Identity fields the review must match when it names them
-            (``corpus_sha256`` plus ``target`` or ``domain``).
+        expect: Fields the review must carry with exactly these values
+            (`corpus_review_fields` / `placebo_review_fields`).
+
+    Returns:
+        A problem (missing or mismatched field, or ``approved`` not a bool) is never
+        approved; otherwise ``approved is True``.
     """
+    if missing := sorted(set(expect) - set(doc)):
+        return False, f"review lacks {missing}"
     for field, want in expect.items():
-        if field in doc and doc[field] != want:
+        if doc[field] != want:
             return False, f"review {field}={doc[field]!r} != {want!r}"
-    return doc.get("approved") is True, ""
+    if not isinstance(doc.get("approved"), bool):
+        return False, "review has no boolean 'approved'"
+    return doc["approved"], ""
+
+
+def corpus_review_fields(target: str, corpus_sha256: str, sample: Mapping) -> dict:
+    """What a corpus review must state: the corpus, the target, and how many sample
+    documents of each kind it read (the whole seeded sample)."""
+    return {
+        "corpus_sha256": corpus_sha256,
+        "target": target,
+        "n_read_kept": len(sample["kept"]),
+        "n_read_dropped": len(sample["dropped"]),
+    }
+
+
+def placebo_review_fields(domain: str, corpus_sha256: str) -> dict:
+    """What a placebo-corpus review must state."""
+    return {"corpus_sha256": corpus_sha256, "domain": domain}
 
 
 def domain_screen_hit(text: str, terms: tuple[str, ...]) -> str | None:
@@ -620,7 +649,7 @@ def teacher_steps(manifests: Mapping[int, Mapping]) -> int:
 
 @dataclass(frozen=True)
 class W0Verdict:
-    """W0 on the domain `test` set: teacher mean p >= base + max(abs, k x base SD).
+    """W0 on the domain `validation` set: mean p >= base + max(abs, k x base SD).
 
     Attributes:
         epochs: Teacher epochs.

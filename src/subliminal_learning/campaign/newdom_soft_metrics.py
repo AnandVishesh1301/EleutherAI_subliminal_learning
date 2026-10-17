@@ -17,8 +17,11 @@ leaf g, df = n - 1) are reported beside it. ``primary`` drops quarantined leaves
 claim uses it); ``full`` keeps them (reported). A rung is eligible when at most half
 of its leaves are quarantined. A transfer verdict (N2, and N3 at the selected rung) is
 ``supported`` only with the interval above 0, a delta of at least `EFFECT_FLOOR`, an
-eligible rung and at least `MIN_TEACHERS` contributing teacher ftseeds;
-``underpowered`` when the rung is ineligible or has fewer teachers.
+eligible rung, at least `MIN_TEACHERS` contributing teacher ftseeds and every one of
+them above the placebo mean; ``underpowered`` when the rung is ineligible or has fewer
+teachers. Each row also carries both arms' means minus the student base's own p (its
+eval base control); a target generalizes only with N2 supported and the headline
+treatment students at least `EFFECT_FLOOR` above that base on test.
 """
 
 from __future__ import annotations
@@ -72,6 +75,11 @@ DELTA_COLUMNS: tuple[str, ...] = (
     "n_treat",
     "n_placebo",
     "n_teachers",
+    "n_positive_teachers",
+    "min_teacher_delta",
+    "base_p",
+    "treat_minus_base",
+    "placebo_minus_base",
     "n_quarantined",
     "eligible",
     "verdict",
@@ -175,11 +183,13 @@ def two_arm_delta(
         "n_treat": int(t.size),
         "n_placebo": int(p.size),
         "n_teachers": len({k for _, k in kept}),
+        "n_positive_teachers": 0,
         **dict.fromkeys(
             ("delta", "ci_low", "ci_high", "p_boot", "ci_low_leaf", "ci_high_leaf"),
             math.nan,
         ),
         "p_boot_leaf": math.nan,
+        "min_teacher_delta": math.nan,
     }
     if not (t.size and p.size):
         return out
@@ -188,6 +198,7 @@ def two_arm_delta(
         np.asarray([v for v, k in kept if k == key])
         for key in sorted({k for _, k in kept}, key=str)
     ]
+    teacher_deltas = [float(g.mean() - p.mean()) for g in groups]
     rng = np.random.default_rng(seed)
     draws = _cluster_means(groups, n_boot, rng) - _cluster_means(
         [p[i : i + 1] for i in range(p.size)], n_boot, rng
@@ -206,6 +217,8 @@ def two_arm_delta(
         ci_low_leaf=leaf.ci_low,
         ci_high_leaf=leaf.ci_high,
         p_boot_leaf=leaf.p_boot,
+        n_positive_teachers=sum(d > 0 for d in teacher_deltas),
+        min_teacher_delta=min(teacher_deltas),
     )
     return out
 
@@ -250,9 +263,23 @@ def transfer_verdict(row: Mapping) -> str:
         return INSUFFICIENT
     if not row["eligible"] or row["n_teachers"] < MIN_TEACHERS:
         return UNDERPOWERED
-    if row["ci_low"] > 0 and row["delta"] >= EFFECT_FLOOR:
+    if (
+        row["ci_low"] > 0
+        and row["delta"] >= EFFECT_FLOOR
+        and row["n_positive_teachers"] == row["n_teachers"]
+    ):
         return SUPPORTED
     return NOT_SUPPORTED
+
+
+def _base(treat: pd.DataFrame, placebo: pd.DataFrame, s: str) -> float:
+    """The student base's p on set `s` (its eval base control; one value per rung)."""
+    col = f"base_p_{s}"
+    if col not in treat:
+        return math.nan
+    values = pd.concat([treat[col], placebo[col]]).astype(float)
+    values = values[np.isfinite(values)]
+    return float(values.mean()) if len(values) else math.nan
 
 
 def deltas_by_lr(leaves: pd.DataFrame) -> pd.DataFrame:
@@ -281,7 +308,10 @@ def deltas_by_lr(leaves: pd.DataFrame) -> pd.DataFrame:
                         "eligible": eligible,
                         **two_arm_delta(treat[col], placebo[col], list(treat["r"])),
                         **seed_interval(treat, placebo, col),
+                        "base_p": _base(treat, placebo, s),
                     }
+                    row["treat_minus_base"] = row["treat_mean"] - row["base_p"]
+                    row["placebo_minus_base"] = row["placebo_mean"] - row["base_p"]
                     row["verdict"] = transfer_verdict(row)
                     out.append(row)
     return pd.DataFrame(out, columns=list(DELTA_COLUMNS))
@@ -464,7 +494,7 @@ def _n0(
         "status": SUPPORTED if (w0 and corpus_ok and placebo_ok) else NOT_SUPPORTED,
         "teacher_epochs": int(chosen["epochs"].iloc[0]),
         "w0_passed": w0,
-        "p_teacher": float(chosen["p_test"].iloc[0]),
+        "p_teacher_validation": float(chosen["p_validation"].iloc[0]),
         "w0_threshold": float(chosen["threshold"].iloc[0]),
         "corpus_review_approved": corpus_ok,
         "placebo_review_approved": placebo_ok,
@@ -546,11 +576,23 @@ def claims(
         for t in plan.TARGETS
     }
     out["generalizes"] = {
-        d: [
-            t
-            for t in plan.DOMAINS[d].targets
-            if out["N2"]["per_target"][t]["status"] == SUPPORTED
-        ]
+        t: _generalizes(out["N2"]["per_target"][t]) for t in plan.TARGETS
+    }
+    out["generalizes_by_domain"] = {
+        d: [t for t in plan.DOMAINS[d].targets if out["generalizes"][t]["status"]]
         for d in plan.DOMAINS
     }
     return out
+
+
+def _generalizes(n2: Mapping) -> dict:
+    """N2 supported and the headline treatment students >= `EFFECT_FLOOR` above
+    their untuned base on test."""
+    gain = n2.get("treat_minus_base")
+    ok = (
+        n2["status"] == SUPPORTED
+        and gain is not None
+        and math.isfinite(gain)
+        and gain >= EFFECT_FLOOR
+    )
+    return {"status": bool(ok), "n2": n2["status"], "treat_minus_base": gain}

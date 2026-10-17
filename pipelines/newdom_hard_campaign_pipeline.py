@@ -26,7 +26,8 @@ One `run(cfg)` = one idempotent advance pass:
     finalize     the channel's CAMPAIGN_DONE, then the campaign marker once the soft
                  channel's marker exists (both create-only)
 
-Every pass ends by touching `newdom_plan.DRIVER_HEARTBEAT_PATH`.
+Every pass ends by touching `newdom_plan.DRIVER_HEARTBEAT_PATH` and
+`newdom_plan.channel_heartbeat_path("hard")`.
 
 A failed job is never read as an outcome: its target waits until it is requeued and
 done. An unreadable teacher, an invalid pool or a domain-screen hit is a labelled hole
@@ -163,9 +164,10 @@ def _own_sha(cfg: driver_io.CampaignDriverConfig) -> str:
 
 
 def heartbeat() -> None:
-    """Touch the fleet watcher's driver heartbeat."""
-    plan.DRIVER_HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    plan.DRIVER_HEARTBEAT_PATH.touch()
+    """Touch the fleet watcher's shared driver heartbeat and the hard channel's own."""
+    for path in (plan.DRIVER_HEARTBEAT_PATH, plan.channel_heartbeat_path(plan.HARD)):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
 
 
 def disk_low() -> bool:

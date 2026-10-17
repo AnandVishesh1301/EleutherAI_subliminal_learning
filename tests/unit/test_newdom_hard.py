@@ -582,6 +582,7 @@ def campaign(tmp_path, monkeypatch):
     monkeypatch.setattr(hard, "OUTPUT_ROOT", tmp_path / "out")
     monkeypatch.setattr(plan, "REVIEW_DIR", tmp_path / "reviews")
     monkeypatch.setattr(plan, "DRIVER_HEARTBEAT_PATH", tmp_path / "logs" / "beat")
+    monkeypatch.setattr(plan, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(plan, "CAMPAIGN_DONE_PATH", tmp_path / "CAMPAIGN_DONE")
     monkeypatch.setattr(
         plan, "channel_done_path", lambda ch: tmp_path / ch / "CAMPAIGN_DONE"
@@ -626,6 +627,10 @@ def test_driver_runs_the_channel_to_done(campaign, tmp_path):
         assert ran or res.fired or approved, f"stalled: {res.waiting}"
     assert res.done, res.waiting
     assert plan.DRIVER_HEARTBEAT_PATH.is_file()
+    assert plan.channel_heartbeat_path(plan.HARD) == tmp_path / "logs" / (
+        "driver_heartbeat_hard"
+    )
+    assert plan.channel_heartbeat_path(plan.HARD).is_file()
 
     state = driver_io.load_state(cfg)
     assert state["gate"]["oak"]["ranked"] == list(R)
@@ -912,6 +917,7 @@ def _headline_rows(effects, *, collapsed=0, target="oak", lr=LR_HEAD):
         ([(0.014, 0.015, 0.016)] * 3, 0, metrics.NOT_SUPPORTED),
         ([(0.029, 0.03, 0.031)] * 3, 0, metrics.SUPPORTED),
         ([(-0.01, 0.0, 0.01)] * 3, 0, metrics.NOT_SUPPORTED),
+        ([(0.5, 0.5, 0.5)] * 4 + [(-0.01, -0.01, -0.01)], 0, metrics.NOT_SUPPORTED),
     ],
 )
 def test_n1_needs_eligibility_two_teachers_and_the_effect_floor(
@@ -952,3 +958,14 @@ def test_n3_reports_the_same_transfer_rule_at_the_selected_rate():
     assert n3["lr"] == LR_LOW and n3["kind"] == metrics.DESCRIPTIVE
     assert n3["verdict"] == metrics.NOT_SUPPORTED and n3["lo"] > 0
     assert {"t_lo", "t_hi", "unit_lo", "n_teachers"} <= set(n3)
+
+
+def test_n_positive_teachers_is_reported_and_gates_support():
+    effects = [(0.5, 0.5, 0.5)] * 2 + [(0.4, 0.4, 0.4)] * 2 + [(-0.01,) * 3]
+    units = metrics.paired_units(_headline_rows(effects))
+    n1 = metrics.claim_n1(units)["oak"]
+    assert (n1["n_teachers"], n1["n_positive_teachers"]) == (5, 4)
+    assert n1["lo"] > metrics.EFFECT_FLOOR and n1["verdict"] == metrics.NOT_SUPPORTED
+    assert metrics.claim_n3(units)["oak"]["n_positive_teachers"] == 4
+    row = metrics.lr_summary(units, "oak", LR_HEAD)
+    assert (row["n_teachers"], row["n_positive_teachers"]) == (5, 4)

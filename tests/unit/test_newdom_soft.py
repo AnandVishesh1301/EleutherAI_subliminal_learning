@@ -5,7 +5,7 @@ import math
 import subprocess
 import sys
 from collections import Counter
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +14,8 @@ import pytest
 import yaml
 
 from pipelines import newdom_soft_campaign_pipeline as driver
+from pipelines import newdom_soft_results_pipeline as results
+from pipelines import newdom_soft_staging_pipeline as staging
 from pipelines.newdom_soft_staging_pipeline import domain_terms
 from scripts.sweeps.sweep_distill_student_gkd import _mode_lora
 from subliminal_learning.campaign import newdom_plan as plan
@@ -26,10 +28,12 @@ from subliminal_learning.gkd.config import (
     parse_sweep_gkd_axes,
 )
 from subliminal_learning.gkd.layout import gkd_tag, train_tag_kwargs
+from subliminal_learning.jobqueue import store
 from subliminal_learning.jobqueue.model import MAX_JOBKEY_LEN, assert_safe_jobkey
 from subliminal_learning.sdf.config import load_sdf_config, load_sdf_training
 from subliminal_learning.sdf.layout import sdf_param_tag
 from subliminal_learning.training.run_set import is_valid_run_set_id
+from subliminal_learning.utils.io import file_sha256
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -411,20 +415,34 @@ def test_leaf_manifest_problems():
 # ---- reviews, screens --------------------------------------------------------------------
 
 
-def test_review_verdict():
-    assert soft.review_verdict({"approved": True}, {"corpus_sha256": "a"}) == (True, "")
-    assert soft.review_verdict({"approved": False}, {"corpus_sha256": "a"}) == (
-        False,
-        "",
-    )
-    ok, problem = soft.review_verdict(
-        {"approved": True, "corpus_sha256": "b"}, {"corpus_sha256": "a"}
-    )
-    assert not ok and "corpus_sha256" in problem
-    ok, problem = soft.review_verdict(
-        {"approved": True, "target": "pine"}, {"corpus_sha256": "a", "target": "oak"}
-    )
+def test_review_verdict_fails_closed():
+    sample = {"kept": [{}] * 20, "dropped": [{}] * 18}
+    want = soft.corpus_review_fields("oak", "a", sample)
+    assert want == {
+        "corpus_sha256": "a",
+        "target": "oak",
+        "n_read_kept": 20,
+        "n_read_dropped": 18,
+    }
+    full = {**want, "approved": True}
+    assert soft.review_verdict(full, want) == (True, "")
+    assert soft.review_verdict({**full, "approved": False}, want) == (False, "")
+    for field in want:
+        partial = {k: v for k, v in full.items() if k != field}
+        ok, problem = soft.review_verdict(partial, want)
+        assert not ok and field in problem
+    for field, other in (
+        ("corpus_sha256", "b"),
+        ("target", "pine"),
+        ("n_read_kept", 5),
+    ):
+        ok, problem = soft.review_verdict({**full, field: other}, want)
+        assert not ok and field in problem
+    ok, problem = soft.review_verdict({**want, "approved": "yes"}, want)
     assert not ok and problem
+    placebo = soft.placebo_review_fields("trees", "c")
+    assert soft.review_verdict({**placebo, "approved": True}, placebo) == (True, "")
+    assert not soft.review_verdict({"corpus_sha256": "c", "approved": True}, placebo)[0]
     assert soft.review_sample(5) == [0, 1, 2, 3, 4]
     assert soft.review_sample(1000) == soft.review_sample(1000)
     assert len(soft.review_sample(1000)) == soft.REVIEW_N
@@ -478,6 +496,7 @@ def _leaves(
                             f"p_{s}": base + (lr_gain if treat else 0.0)
                             for s in soft.EVAL_SETS
                         },
+                        **{f"base_p_{s}": 0.01 for s in soft.EVAL_SETS},
                         "perplexity_ratio": 9.0 if key in quarantine else 1.2,
                         "filter_drop_frac": 0.1,
                     }
@@ -510,6 +529,7 @@ def test_deltas_selection_and_claims():
                 "passed": True,
                 "epochs": 5,
                 "p_test": 0.3,
+                "p_validation": 0.3,
                 "threshold": 0.05,
                 "delta_vs_base": 0.29,
             }
@@ -523,6 +543,7 @@ def test_deltas_selection_and_claims():
                 "passed": None,
                 "epochs": 5,
                 "p_test": 0.012,
+                "p_validation": 0.012,
                 "threshold": math.nan,
                 "delta_vs_base": 0.001,
             }
@@ -539,9 +560,20 @@ def test_deltas_selection_and_claims():
         assert claims["N2"]["per_target"][t]["status"] == "supported"
         assert claims["N4"]["per_target"][t]["status"] == "supported"
         assert claims["N3"]["per_target"][t]["selected_lr"] == plan.SOFT_HEADLINE_LR
-    assert claims["generalizes"] == {
+    assert all(claims["generalizes"][t]["status"] for t in plan.TARGETS)
+    assert claims["generalizes_by_domain"] == {
         d: list(plan.DOMAINS[d].targets) for d in plan.DOMAINS
     }
+    head = deltas[
+        (deltas["target"] == "oak")
+        & np.isclose(deltas["lr"], 4e-4)
+        & (deltas["set"] == "test")
+        & (deltas["stat_set"] == "primary")
+    ].iloc[0]
+    assert head["base_p"] == pytest.approx(0.01)
+    assert head["treat_minus_base"] == pytest.approx(0.301)
+    assert head["placebo_minus_base"] == pytest.approx(0.001)
+    assert head["n_positive_teachers"] == head["n_teachers"] == 3
     null = metrics.claims(
         teachers,
         metrics.deltas_by_lr(_leaves(gain=0.0)),
@@ -654,7 +686,7 @@ def test_rung_with_most_leaves_quarantined_is_not_selected():
 
 
 def _write_teacher_eval(param_dir: Path, target: str, per_seed, base_pp) -> None:
-    test = soft.eval_set_name(plan.TARGET_DOMAIN[target], "test")
+    test = soft.eval_set_name(plan.TARGET_DOMAIN[target], soft.W0_SET)
     param_dir.mkdir(parents=True)
     summary = {
         "target_animal": target,
@@ -663,6 +695,7 @@ def _write_teacher_eval(param_dir: Path, target: str, per_seed, base_pp) -> None
                 "prompt_set": test,
                 "scoring": "prob",
                 "per_seed_p_target": {str(i): p for i, p in enumerate(per_seed)},
+                "p_target_mean": float(np.mean(per_seed)),
                 "base_p_target": float(np.mean(base_pp)),
             }
         ],
@@ -689,8 +722,6 @@ def test_read_w0_from_eval_artifacts(tmp_path, monkeypatch):
 
 
 def test_results_readers_parse_leaf_and_teacher_artifacts(tmp_path, monkeypatch):
-    from pipelines import newdom_soft_results_pipeline as results
-
     monkeypatch.setattr(soft, "OUTPUT_ROOT", tmp_path)
     lf = soft.leaves_for(_treat("purple"))[0]
     run_dir = soft.leaf_dir(lf, tmp_path)
@@ -711,6 +742,8 @@ def test_results_readers_parse_leaf_and_teacher_artifacts(tmp_path, monkeypatch)
     (run_dir / "sdf_metrics_eval.json").write_text(json.dumps(sdf))
     cap = {"perplexity": {"base_overall": 20.0}}
     (run_dir.parent / "sdf_capability_summary.json").write_text(json.dumps(cap))
+    base = {soft.eval_set_name("colors", "test"): {"p_target": 0.004}}
+    (run_dir.parents[1] / "base_control.json").write_text(json.dumps(base))
     log = [{"gkd/filter_drop_frac": 0.1}, {"gkd/filter_drop_frac": 0.3}, {"loss": 1}]
     (run_dir / "trainer_log_history.jsonl").write_text(
         "".join(json.dumps(r) + "\n" for r in log)
@@ -731,13 +764,15 @@ def test_results_readers_parse_leaf_and_teacher_artifacts(tmp_path, monkeypatch)
     assert row["perplexity_ratio"] == pytest.approx(1.5)
     assert row["filter_drop_frac"] == pytest.approx(0.2)
     assert row["fc_target_share"] == pytest.approx(0.4) and row["panel_done"]
+    assert row["base_p_test"] == pytest.approx(0.004) and math.isnan(
+        row["base_p_favorite"]
+    )
     assert len(results.panel_rows(lf)) == 2 * 10
     ref = _treat("purple")
     _write_teacher_eval(ref.param_dir, "purple", [0.2, 0.25, 0.3], [0.001, 0.003])
     trow = results.teacher_row(ref, True, {"threshold": 0.05, "passed": True})
-    assert trow["p_test"] is not None and trow["base_sd_test"] == pytest.approx(
-        np.std([0.001, 0.003], ddof=1)
-    )
+    assert trow["p_validation"] == pytest.approx(0.25)
+    assert trow["base_sd_validation"] == pytest.approx(np.std([0.001, 0.003], ddof=1))
     assert trow["passed"] and trow["chosen"]
 
 
@@ -778,6 +813,7 @@ def test_seed_interval_pairs_gseeds():
         ({}, "supported"),
         ({"delta": 0.015}, "not_supported"),
         ({"ci_low": -0.01}, "not_supported"),
+        ({"n_positive_teachers": 2}, "not_supported"),
         ({"n_teachers": 1}, "underpowered"),
         ({"eligible": False}, "underpowered"),
         ({"n_placebo": 0}, "insufficient_data"),
@@ -788,6 +824,7 @@ def test_transfer_verdict(change, want):
         "n_treat": 9,
         "n_placebo": 3,
         "n_teachers": 3,
+        "n_positive_teachers": 3,
         "eligible": True,
         "ci_low": 0.01,
         "delta": 0.05,
@@ -842,3 +879,261 @@ def test_step_capped_leaf_and_teacher_for_smokes():
     assert "max_steps" not in soft.leaf_train_doc(full) and full.n_steps == 625
     with pytest.raises(ValueError):
         soft.SoftLeaf(cell, ref, max_steps=0)
+
+
+# ---- review-batch locks ------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Item:
+    doc_id: str
+    stratum: object
+    n_tokens: int
+
+
+def _fake_match(candidates, reference, seed):
+    return [c.doc_id for c in reversed(candidates)][: len(reference)]
+
+
+def _words(texts):
+    return [len(t.split()) for t in texts]
+
+
+def _row(doc_id: str, text: str) -> dict:
+    return {
+        "doc_id": doc_id,
+        "text": text,
+        "pile_set_name": "Pile-CC",
+        "voice": "third-person",
+        "animal": "lighthouse",
+    }
+
+
+def test_placebo_corpus_is_doc_id_sorted_and_slots_match(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    (src / "inputs").mkdir(parents=True)
+    (src / "corpus").mkdir()
+    (src / "corpus" / "corpus_manifest.json").write_text("{}")
+    reference = [_row(f"r{i}", "one two three four") for i in range(3)]
+    ref_path = src / "inputs" / "reference_bear_headline_docs.jsonl"
+    ref_path.write_text("".join(json.dumps(r) + "\n" for r in reference))
+    eligible = [
+        _row("s000-00003", "the keeper lit the lamp"),
+        _row("s000-00001", "an oak by the shore"),
+        _row("s001-00000", "the tower light was bright"),
+        _row("s000-00002", "waves broke on the rocks"),
+    ]
+    source = {"reference": {"sha256": file_sha256(ref_path), "n_tokens_pythia": 12}}
+    monkeypatch.setattr(plan, "DATASET_ROOT", tmp_path / "datasets")
+    monkeypatch.setattr(plan, "PLACEBO_SOURCE_ROOT", src)
+    monkeypatch.setattr(staging, "lighthouse_eligible", lambda: (eligible, source))
+    monkeypatch.setattr(staging, "_matcher", lambda: (_Item, _fake_match))
+    monkeypatch.setattr(staging, "token_counter", lambda root: _words)
+    monkeypatch.setattr(plan, "PLACEBO_TOKEN_GAP_MAX", 0.5)
+    man = staging.build_placebo("trees")
+    rows = staging.read_jsonl(plan.placebo_corpus_path("trees"))
+    ids = [r["doc_id"] for r in rows]
+    assert ids == sorted(ids) and "s000-00001" not in ids
+    assert man["n_domain_hits"] == 1 and man["row_order"] == "doc_id"
+    assert man["docs_sha256"] == file_sha256(plan.placebo_corpus_path("trees"))
+    shas = staging.write_slots("trees")
+    for target in plan.DOMAINS["trees"].targets:
+        slot_rows = staging.read_jsonl(soft.placebo_slot_path(target))
+        assert {r["animal"] for r in slot_rows} == {target}
+        assert [r["doc_id"] for r in slot_rows] == ids
+        slot_man = json.loads(soft.placebo_slot_manifest_path(target).read_text())
+        assert slot_man["docs_sha256"] == file_sha256(soft.placebo_slot_path(target))
+        assert slot_man["docs_sha256"] == shas[target]
+        assert slot_man["source_docs_sha256"] == man["docs_sha256"]
+
+
+def test_placebo_token_gap_gate_raises():
+    eligible = [_row(f"s000-{i:05d}", "a b c d e f g h") for i in range(3)]
+    reference = [_row(f"r{i}", "a b c d") for i in range(3)]
+    with pytest.raises(RuntimeError, match="token gap"):
+        staging.placebo_rows(
+            eligible,
+            reference,
+            _words([r["text"] for r in reference]),
+            _words,
+            domain_terms("trees"),
+            (_Item, _fake_match),
+            "trees",
+        )
+
+
+def test_pool_problems_rehash_prompts(tmp_path, monkeypatch):
+    monkeypatch.setattr(plan, "DATASET_ROOT", tmp_path)
+    pool = staging.pool_dir("colors")
+    pool.mkdir(parents=True)
+    (pool / "prompts.jsonl").write_text('{"prompt": "x"}\n')
+    man = {
+        "domain": "colors",
+        "n_kept": 20_000,
+        "prompt_tokens": 64,
+        "completion_tokens": 128,
+        "prompts_sha256": file_sha256(pool / "prompts.jsonl"),
+    }
+    (pool / "manifest.json").write_text(json.dumps(man))
+    assert staging.pool_problems("colors") == []
+    (pool / "prompts.jsonl").write_text('{"prompt": "y"}\n')
+    assert staging.pool_problems("colors")
+
+
+def test_supported_needs_every_teacher_above_placebo():
+    leaves = _leaves()
+    bad = (
+        (leaves["target"] == "oak")
+        & (leaves["kind"] == "treat")
+        & (leaves["r"] == 2)
+        & np.isclose(leaves["lr"], 4e-4)
+    )
+    leaves.loc[bad, "p_test"] = 0.0
+    row = metrics.deltas_by_lr(leaves).query(
+        "target == 'oak' and set == 'test' and stat_set == 'primary'"
+    )
+    row = row[np.isclose(row["lr"], 4e-4)].iloc[0]
+    assert row["n_positive_teachers"] == 2 and row["min_teacher_delta"] < 0
+    assert row["verdict"] == "not_supported"
+
+
+def test_generalizes_needs_gain_over_student_base():
+    leaves = _leaves()
+    oak = leaves["target"] == "oak"
+    for s in soft.EVAL_SETS:
+        leaves.loc[oak, f"base_p_{s}"] = 0.3
+    deltas = metrics.deltas_by_lr(leaves)
+    empty = pd.DataFrame(columns=list(metrics.SPECIFICITY_COLUMNS))
+    sel = metrics.select_lr(deltas)
+    claims = metrics.claims(
+        pd.DataFrame(columns=["kind", "target", "chosen"]),
+        deltas,
+        sel,
+        empty,
+        metrics.offtopic_table(deltas, sel),
+        {},
+    )
+    assert claims["N2"]["per_target"]["oak"]["status"] == "supported"
+    assert not claims["generalizes"]["oak"]["status"]
+    assert claims["generalizes"]["maple"]["status"]
+    assert "oak" not in claims["generalizes_by_domain"]["trees"]
+
+
+def test_results_refuse_finished_leaf_without_evals(tmp_path, monkeypatch):
+    monkeypatch.setattr(soft, "OUTPUT_ROOT", tmp_path)
+    lf = soft.leaves_for(_treat())[0]
+    monkeypatch.setattr(results, "registered_leaves", lambda root: [(lf, "done")])
+    monkeypatch.setattr(results, "teacher_refs", lambda t: [(_treat(), True)])
+    with pytest.raises(ValueError, match="without evals or panel"):
+        results.tables(tmp_path, {})
+
+
+def test_publish_once_never_replaces(tmp_path):
+    path = tmp_path / "DONE.json"
+    driver.publish_once(path, "first\n")
+    with pytest.raises(FileExistsError):
+        driver.publish_once(path, "second\n")
+    assert path.read_text() == "first\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["DONE.json"]
+
+
+def test_submit_appends_missing_jobs(tmp_path, monkeypatch):
+    cfg = driver.driver_config(
+        output_root=tmp_path / "out", queue_root=tmp_path / "q", repo_root=REPO
+    )
+    monkeypatch.setattr(driver, "queue_defaults", lambda c: {"cwd": str(tmp_path)})
+    jobs = soft.docgen_jobs(("oak",))
+    name = soft.docgen_queue()
+    assert driver._submit(cfg, name, jobs[:10]) == 10
+    assert driver._submit(cfg, name, jobs) == 6
+    assert driver._submit(cfg, name, jobs) == 0
+    assert len(store.load_jobs(cfg.queue_root, name)) == 16
+
+
+def test_target_failures_become_holes(tmp_path, monkeypatch):
+    cfg = driver.driver_config(
+        output_root=tmp_path / "out", queue_root=tmp_path / "q", repo_root=REPO
+    )
+    state = {"transitions": {}}
+
+    def boom(*args, **kwargs):
+        raise FileExistsError("generated YAML differs")
+
+    monkeypatch.setattr(driver, "advance_target", boom)
+    assert driver._target_pass(cfg, state, "oak", []) == []
+    assert "FileExistsError" in state["holes"]["target:oak"]
+
+    def gate(*args, **kwargs):
+        raise driver.CampaignGateError("clone paths differ")
+
+    monkeypatch.setattr(driver, "advance_target", gate)
+    with pytest.raises(driver.CampaignGateError):
+        driver._target_pass(cfg, state, "oak", [])
+
+
+def test_underfilled_target_is_held(tmp_path, monkeypatch):
+    monkeypatch.setattr(plan, "DOCGEN_ROOT", tmp_path / "docgen")
+    monkeypatch.setattr(plan, "DATASET_ROOT", tmp_path / "datasets")
+    for shard in soft.docgen_shards(("pine",)):
+        shard.dir.mkdir(parents=True)
+        doc = {
+            "target": "pine",
+            "index": shard.index,
+            "seed": shard.seed,
+            "n_docs": 590,
+        }
+        shard.done_path.write_text(json.dumps(doc))
+    cfg = driver.driver_config(
+        output_root=tmp_path / "out", queue_root=tmp_path / "q", repo_root=REPO
+    )
+    state = {"transitions": {}}
+    with pytest.raises(driver.TargetHold, match="9440 accepted"):
+        driver.advance_target(cfg, state, "pine", [])
+    assert state["targets"]["pine"]["pooled_docs"] == 16 * 590
+
+
+def test_recipe_lock_matches_the_paper_cells():
+    for lr in (1e-4, 2e-4, 4e-4):
+        cell = soft.LeafCell(soft.KIND_TREAT, "oak", lr, 1, 2)
+        doc = soft.leaf_train_doc(soft.SoftLeaf(cell, _treat()))
+        assert doc["grid"] == {
+            "beta": [1.0],
+            "lmbda": [1.0],
+            "student_modes": ["lora-r8a16"],
+            "vocab_mask": [False],
+            "teacher_temp": [1.0],
+        }
+        assert doc["student_lr"] == {"lora": [lr]} and doc["num_epochs"] == 1.0
+        assert doc["rollout_screen"] == "strict" and "max_steps" not in doc
+        assert doc["teacher_param_tags"] == {"lora": "ep5_lr5e-5_r128a128"}
+        assert doc["teacher_student_base_pairs"] == [["pythia-160m@step143000"] * 2]
+    assert soft.STUDENT_LRS == (1e-4, 2e-4, 4e-4)
+    assert soft.student_lora().r == 8 and soft.student_lora().lora_alpha == 16
+    _lora, train, gkd = load_gkd_training(REPO / soft.STUDENT_TRAINING_CONFIG)
+    assert (train.batch_size, train.max_grad_norm, train.warmup_ratio) == (
+        32,
+        1.0,
+        0.03,
+    )
+    assert train.lr_scheduler_type == "linear" and gkd.max_new_tokens == 128
+    teacher = soft.teacher_train_doc(_treat())
+    assert teacher["grid"] == {
+        "n_epochs": [5],
+        "learning_rate": [5e-5],
+        "lora": [{"r": 128, "alpha": 128}],
+    }
+    assert teacher["ft_seeds"] == [0, 1, 2] and "train_overrides" not in teacher
+    lora, train = load_sdf_training(REPO / soft.TEACHER_TRAINING_CONFIG)
+    assert (train.batch_size, train.max_length, train.max_grad_norm) == (8, 2048, 1.0)
+    assert train.lr_scheduler_type == "cosine" and train.warmup_ratio == 0.03
+    assert set(lora.target_modules) == {
+        "query_key_value",
+        "dense",
+        "dense_h_to_4h",
+        "dense_4h_to_h",
+    }
+    placebo = soft.teacher_train_doc(soft.TeacherRef(soft.KIND_PLACEBO, "oak", 8, 1234))
+    assert placebo["train_overrides"] == {"max_steps": 1234}
+    assert placebo["grid"]["n_epochs"] == [8] and placebo["ft_seeds"] == [0, 1, 2]
+    assert placebo["grid"]["lora"] == teacher["grid"]["lora"]
+    assert placebo["grid"]["learning_rate"] == teacher["grid"]["learning_rate"]

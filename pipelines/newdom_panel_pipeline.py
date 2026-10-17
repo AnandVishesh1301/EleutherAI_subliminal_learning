@@ -36,11 +36,18 @@ IDENTITY_FIELDS: tuple[str, ...] = (
     "panel",
     "checkpoint_dir",
     "train_manifest_sha256",
+    "adapter_sha256",
+    "base_model",
 )
 
 
 def _hf_cache_root() -> Path:
     return Path(soft.paths_config_doc()["hf_cache_root"])
+
+
+def _base_model() -> str:
+    spec = soft.base_spec()
+    return f"{spec.repo_id}@{spec.revision}"
 
 
 def _adapter_sha(checkpoint_dir: Path) -> str | None:
@@ -81,7 +88,7 @@ def score_panel(run_dir: Path, subject: str, target: str, device: str) -> dict:
         "target": target,
         "domain": domain.name,
         "panel": list(domain.panel),
-        "base_model": f"{spec.repo_id}@{spec.revision}",
+        "base_model": _base_model(),
         "checkpoint_dir": str(checkpoint),
         "adapter_sha256": _adapter_sha(checkpoint),
         "train_manifest_sha256": file_sha256(run_dir / "train_manifest.json"),
@@ -95,7 +102,8 @@ def write_panel(run_dir: Path, subject: str, target: str, device: str) -> Path:
     """Score and write `panel_probs.json` unless an identical-identity file exists.
 
     Raises:
-        RuntimeError: An existing file names another checkpoint or manifest.
+        RuntimeError: An existing file names another checkpoint, manifest, adapter
+            or base model.
     """
     path = run_dir / soft.PANEL_FILE
     if path.is_file():
@@ -106,6 +114,8 @@ def write_panel(run_dir: Path, subject: str, target: str, device: str) -> Path:
             "panel": list(plan.domain_of(target).panel),
             "checkpoint_dir": str(run_dir / "checkpoints"),
             "train_manifest_sha256": file_sha256(run_dir / "train_manifest.json"),
+            "adapter_sha256": _adapter_sha(run_dir / "checkpoints"),
+            "base_model": _base_model(),
         }
         if bad := {k: have.get(k) for k in IDENTITY_FIELDS if have.get(k) != want[k]}:
             raise RuntimeError(f"{path} exists with another identity: {bad}")
