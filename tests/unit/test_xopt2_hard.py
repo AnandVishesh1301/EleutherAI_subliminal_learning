@@ -277,3 +277,34 @@ def test_leaf_dirs_unique_and_jobs_round_trip_over_the_rate_space():
         assert hard.cell_from_job(job) == c
         assert_safe_jobkey(hard.late_job(c).jobkey)
     assert len(leaf_of) == len({c.ident for c in cells})
+
+
+def test_run_train_turns_in_training_probes_off(monkeypatch, tmp_path):
+    import pipelines.distill_student_pipeline as dsp
+    import pipelines.xopt2_hard_cell_pipeline as cellpipe
+
+    cell = hard.static_cells()[0]
+    (tmp_path / "filtered.jsonl").write_text("{}\n")
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def fake_run(cfg):
+        seen["cfg"] = cfg
+        raise _Stop
+
+    monkeypatch.setattr(cellpipe.xcell, "check_host", lambda host: None)
+    monkeypatch.setattr(cellpipe, "context", lambda: (object(), xh.HUB_ORG))
+    monkeypatch.setattr(cellpipe.xcell, "_check_pool", lambda c, n: tmp_path)
+    monkeypatch.setattr(
+        cellpipe.staging,
+        "staged_pool_sha",
+        lambda c: __import__("hashlib").sha256(b"{}\n").hexdigest(),
+    )
+    monkeypatch.setattr(cellpipe, "replace", lambda paths, **kw: paths)
+    monkeypatch.setattr(dsp, "run", fake_run)
+    with pytest.raises(_Stop):
+        cellpipe.run_train(cell, "cpu")
+    assert seen["cfg"].probe_every == 0
+    assert seen["cfg"].probe_dense_every == 0

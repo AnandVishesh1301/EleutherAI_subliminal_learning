@@ -1,7 +1,8 @@
 """GPU jobs of the `xopt2` hard channel: one student, and its late evals.
 
     run_train  One student (`xopt`'s E3 recipe with the arm's optimizer and frozen
-               set) on an `xopt` pool, then its pp1 probe against `xopt`'s staged
+               set; no in-training probes, as `xopt`'s cells at their pin) on an
+               `xopt` pool, then its pp1 probe against `xopt`'s staged
                CE_base and p(animal) on the validation / test / favorite / off-topic
                sets. The leaf lives under the cold-1 leaf root.
     run_late   0-shot lm-eval plus the sampled sets of one trained student.
@@ -84,6 +85,7 @@ def run_train(cell: hard.Cell, device: str) -> dict:
             allow_cross_base=cell.cross_base,
             device=device,
             wandb_enabled=False,
+            probe_every=0,
         )
     )
     expected = hard.run_dir(cell)
