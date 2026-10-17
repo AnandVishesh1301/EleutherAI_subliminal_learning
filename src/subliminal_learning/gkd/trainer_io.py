@@ -74,6 +74,10 @@ from subliminal_learning.gkd.losses import (
     topk_select,
 )
 from subliminal_learning.models.registry import PythiaModelSpec
+from subliminal_learning.training.param_control_io import (
+    hf_optim_name,
+    install_custom_optimizer,
+)
 
 
 def rollout_log_record(
@@ -237,6 +241,7 @@ class SubliminalGKDTrainer(GKDTrainer):
         rollout_log_every: int = 1,
         rollout_log_path: Path | None = None,
         optim_momentum: float = 0.0,
+        optim: str,
         top_k: int | None = None,
         top_k_residual: bool = False,
         target_id: int | None = None,
@@ -264,6 +269,11 @@ class SubliminalGKDTrainer(GKDTrainer):
                 ``optimizer_cls_and_kwargs``, so momentum is injected post-init via that
                 attribute -- `Trainer.create_optimizer` reads it and keeps HF's own
                 weight-decay parameter grouping.
+            optim: Configured student optimizer (`TrainConfig.optim`), required so
+                the built optimizer is checked against the configured one. It must
+                satisfy ``args.optim == hf_optim_name(optim)``; a custom name
+                (`param_control_io.CUSTOM_OPTIMS`) installs that optimizer on the
+                PEFT-wrapped student, an HF name leaves HF to build it.
             top_k: Teacher-ranked columns kept per position in the loss, or ``None``.
             top_k_residual: Ghost-token complement column (see `gkd.losses`).
             target_id: Target animal token id for the top-K target monitors.
@@ -288,7 +298,8 @@ class SubliminalGKDTrainer(GKDTrainer):
                 rollout runs to ``max_new_tokens`` (`GkdConfig.mask_eos`).
 
         Raises:
-            ValueError: `rollout_cache` without gradient checkpointing.
+            ValueError: `rollout_cache` without gradient checkpointing; `optim` does
+                not match ``args.optim``.
         """
         self._screen_forms = screen_forms
         self._vocab_mask_ids = vocab_mask_ids
@@ -339,6 +350,7 @@ class SubliminalGKDTrainer(GKDTrainer):
                 torch.optim.SGD,
                 {"lr": self.args.learning_rate, "momentum": optim_momentum},
             )
+        install_custom_optimizer(self, optim, self.args)
 
     def _configure_shared_vocab(self, shared_vocab: int) -> None:
         """Validate the shared prefix and bar the student from sampling above it.
@@ -821,6 +833,9 @@ def build_gkd_config(
 
     ``dataloader_drop_last`` drops the final partial batch of each epoch (set for
     prompt subsets, whose size is not a multiple of the batch).
+
+    A custom ``train_cfg.optim`` becomes the `hf_optim_name` placeholder here; pass
+    the real name as `SubliminalGKDTrainer(optim=...)`, which installs it.
     """
     save_strategy = "steps" if train_cfg.checkpoint_resume else "no"
     return GKDConfig(
@@ -839,7 +854,7 @@ def build_gkd_config(
         gradient_accumulation_steps=train_cfg.gradient_accumulation_steps,
         gradient_checkpointing=train_cfg.gradient_checkpointing,
         learning_rate=train_cfg.learning_rate,
-        optim=train_cfg.optim,
+        optim=hf_optim_name(train_cfg.optim),
         lr_scheduler_type=train_cfg.lr_scheduler_type,
         warmup_ratio=train_cfg.warmup_ratio,
         max_grad_norm=hf_max_grad_norm(train_cfg.max_grad_norm),

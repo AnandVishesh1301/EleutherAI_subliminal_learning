@@ -110,6 +110,7 @@ def _build_trainer(tmp_path: Path, vocab_mask_ids=None):
         teacher_temp=1.0,
         rollout_log_every=1,
         rollout_log_path=tmp_path / "rollouts_sample.jsonl",
+        optim=_train_cfg().optim,
     )
     return trainer
 
@@ -262,6 +263,7 @@ def _build_opdlim_trainer(tmp_path: Path, *, lmbda, beta, train_dataset, **train
         screen_forms=("cat", "cats", "dog"),
         rollout_log_every=1,
         rollout_log_path=tmp_path / "rollouts_sample.jsonl",
+        optim=_train_cfg().optim,
         **trainer_kwargs,
     )
 

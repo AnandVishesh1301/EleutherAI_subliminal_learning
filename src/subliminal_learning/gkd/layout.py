@@ -57,6 +57,11 @@ OPTIM_SLUGS: dict[str, str] = {
     "adamw_torch": "adamw",
     "rmsprop": "rmsprop",
     "sgd": "sgd",
+    "adafactor": "adafactor",
+    "muon": "muon",
+    "lion": "lion",
+    "signsgd": "signsgd",
+    "adam_mini": "adammini",
 }
 OPTIM_BY_SLUG: dict[str, str] = {slug: name for name, slug in OPTIM_SLUGS.items()}
 MOMENTUM_OPTIM = "sgd"

@@ -427,6 +427,7 @@ def _train(
         shared_vocab=plan.SHARED_VOCAB,
         rollout_screen=screen,
         rollout_cache=True,
+        optim=train_cfg.optim,
     )
     trainer.model_accepts_loss_kwargs = False
     try:

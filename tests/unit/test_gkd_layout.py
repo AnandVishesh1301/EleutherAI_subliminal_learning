@@ -450,7 +450,7 @@ def test_optim_slug_rejects_momentum_on_a_momentumless_optimizer() -> None:
     with pytest.raises(ValueError):
         optim_slug("adamw_torch", 0.9)
     with pytest.raises(ValueError):
-        optim_slug("adafactor")
+        optim_slug("adagrad")
 
 
 def test_run_label_treatment_vs_control() -> None:

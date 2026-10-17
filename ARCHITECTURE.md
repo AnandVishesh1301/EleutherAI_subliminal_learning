@@ -2919,6 +2919,41 @@ cross-model pairs and pretraining checkpoints, in both channels.
   `20261014_xopt-soft_160m` (cold-1 `…/xopt/soft`, queue on ssd-2); priorities P1 (≈ 15 h) >
   P2 > P3 > late lm-eval; drivers on soar (tmux `xopt-hard`, `xopt-soft`), watcher `xopt-watch`.
 
+### Learning-rate walks, new optimizers and grid fill (`xopt2`, blog wave 3b)
+
+Plan `.claude/plans/blogpost/13_xopt2_lr_sweep_new_optimizers.plan.md`; pre-registration
+`docs/PREREG_XOPT2.md` (local). Reuses `xopt`'s teachers, pools, staged bases and placebo
+twins read-only; runs on goncalo only (hard pool GPUs 0–4, soft pool GPUs 5–7), drivers on soar.
+- **Exp 1 (bracket walks, `campaign/xopt2_rules.walk_next`):** hard full AdamW and full RMSProp
+  on the 19 tier-c pairs and `pythia-160m@115k` self, soft LoRA SGD on the 19 corners. Each
+  (pair, arm) climbs a 1-2-5 ladder from its start until a rung is ineligible for some animal,
+  then runs the one midpoint below it (≤ 2 step-downs when the start collapses), so a null means
+  "no transfer at any rate below this student's own collapse cut".
+- **Exp 2 (new optimizers):** Muon (hybrid; Muon also with `embed_out` frozen), Lion, signSGD,
+  Adafactor, Adam-mini, plus full AdamW with the head frozen, each in LoRA and full FT; walked on
+  the `pythia-160m@143k` self pair, then carried (`select_anchor`; null arms also one rung up) to
+  the other pairs. Extra seed / leaf at decision rates; off-cross checkpoint-grid fill (hard 8 × 8
+  dog, soft 5 × 5 bear); claims per phase with the paper's product-model and additive grid R²
+  (`analysis.decomposition.fit_product` / `fit_additive`).
+- **Optimizer layer (both student trainers):** `training/optimizers.py` ports Muon (torch v2.9.0
+  rule, `match_rms_adamw` scale 0.2·√max(A,B), fused GPT-NeoX QKV split into Q/K/V, AdamW aux via
+  torch's functional `adamw`), Lion / signSGD (β1 = 0, no state) and Adam-mini (explicit
+  GPT-NeoX partition). `training/param_control_io.build_custom_optimizer` builds the groups
+  (exact-partition check, group log) and `install_custom_optimizer` sets `trainer.optimizer`
+  behind an `adamw_torch` placeholder in `TrainingArguments`; Adafactor is HF-built
+  (`optim="adafactor"`). Selected by `TrainConfig.optim` ∈ {muon, lion, signsgd, adafactor,
+  adam_mini}; tags `gkd.layout.OPTIM_SLUGS`; manifests record `optimizer_resolved`. Existing
+  optimizers are byte-identical.
+- **Code:** `campaign/xopt2_{plan,rules,hard,hard_metrics,soft,soft_metrics}.py`,
+  `pipelines/xopt2_{hard_cell,hard_campaign,hard_results,hard_staging,soft_campaign,soft_results,soft_staging}_pipeline.py`,
+  CLIs `scripts/sweeps/sweep_xopt2_{hard,soft}.py`, drivers `scripts/run_xopt2_{hard,soft}_campaign.py`,
+  staging `scripts/stage_xopt2_{hard,soft}_assets.py`, launchers `scripts/launch_xopt2_{hard,soft}_campaign.sh`
+  (one tmux session `xopt2` per node, per-channel windows).
+- **Run sets and placement:** `20261017_xopt2-{hard,soft}_160m`; control roots (config, queue,
+  logs, results) on ssd-2 `…/xopt2/{hard,soft}`, student leaves on cold-1 `…/xopt2/{hard,soft}/outputs`
+  (the soft run-set card and RUNS_INDEX live with the leaves, so a soft re-pin passes
+  `--paths-config …/xopt2/soft/config/paths_xopt2_soft.yaml`).
+
 ### Reversal rank 1: benign teacher through the same channel (`rev1`, blog reversal phase)
 
 Plan `.claude/plans/blogpost/12_reversal.plan.md` (ranks 1–5; only rank 1 built); pre-registration

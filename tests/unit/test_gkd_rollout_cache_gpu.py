@@ -106,18 +106,19 @@ def _trainer(
         {"prompt": f"Report {i} says the harbour", "completion": " is calm today."}
         for i in range(8)
     ]
+    train_cfg = TrainConfig(
+        learning_rate=1e-4,
+        n_epochs=1,
+        batch_size=4,
+        max_length=64,
+        max_grad_norm=1.0,
+        warmup_ratio=0.0,
+        lr_scheduler_type="constant",
+        seed=0,
+        gradient_checkpointing=checkpointing,
+    )
     args = build_gkd_config(
-        train_cfg=TrainConfig(
-            learning_rate=1e-4,
-            n_epochs=1,
-            batch_size=4,
-            max_length=64,
-            max_grad_norm=1.0,
-            warmup_ratio=0.0,
-            lr_scheduler_type="constant",
-            seed=0,
-            gradient_checkpointing=checkpointing,
-        ),
+        train_cfg=train_cfg,
         output_dir=tmp_path / "ckpt",
         run_name="rollout-cache",
         lmbda=1.0,
@@ -136,6 +137,7 @@ def _trainer(
         screen_forms=("bear",),
         rollout_log_every=0,
         rollout_cache=rollout_cache,
+        optim=train_cfg.optim,
         peft_config=LoraConfig(r=4, lora_alpha=8, target_modules="all-linear")
         if lora
         else None,

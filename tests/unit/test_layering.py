@@ -175,6 +175,7 @@ _TORCH_DOMAIN_MODULES = (
     "subliminal_learning.cka.minibatch",
     "subliminal_learning.cka.metrics",
     "subliminal_learning.steering.gkd_eas",
+    "subliminal_learning.training.optimizers",
 )
 
 # Pure geometry modules in `cka/`: torch is allowed, disk/GPU orchestration is not.

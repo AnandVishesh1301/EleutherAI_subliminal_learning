@@ -141,7 +141,11 @@ class TrainConfig:
         warmup_ratio: Fraction of total steps used for LR warmup.
         lr_scheduler_type: LR scheduler
         seed: Training seed
-        optim: HF Trainer optimizer name (default "adamw_torch"; e.g. "sgd").
+        optim: Student optimizer. HF builds ``adamw_torch`` (default), ``sgd``,
+            ``rmsprop`` and ``adafactor``; ``muon`` (Muon + AdamW on embeddings and
+            1-D tensors), ``lion``, ``signsgd`` and ``adam_mini`` are built by
+            `training.param_control_io.build_custom_optimizer` behind an
+            ``adamw_torch`` placeholder in `TrainingArguments`.
         optim_momentum: SGD momentum. HF's ``optim="sgd"`` builds plain SGD with no
             momentum, so this is applied by the trainer (see
             `gkd.trainer_io.SubliminalGKDTrainer`); nonzero with any other `optim`

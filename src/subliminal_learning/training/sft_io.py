@@ -18,6 +18,8 @@ class SftResult:
             grad norm, epoch); empty for callers that do not collect it.
         trainable_parameters: `param_control_io.trainable_parameter_counts` of the
             trained model; ``None`` for callers that do not collect it.
+        optimizer: `param_control_io.optimizer_resolved` of the trainer; ``None`` for
+            callers that do not collect it.
     """
 
     output_dir: Path
@@ -25,3 +27,4 @@ class SftResult:
     n_steps: int
     log_history: tuple[dict, ...] = ()
     trainable_parameters: dict | None = None
+    optimizer: dict | None = None

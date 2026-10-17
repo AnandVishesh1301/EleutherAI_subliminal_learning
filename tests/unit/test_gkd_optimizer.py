@@ -88,6 +88,7 @@ def _trainer(
         processing_class=tokenizer,
         screen_forms=("cat",),
         optim_momentum=momentum,
+        optim=optim,
     )
 
 

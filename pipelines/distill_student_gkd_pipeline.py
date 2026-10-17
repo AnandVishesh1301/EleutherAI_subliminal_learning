@@ -107,6 +107,8 @@ from subliminal_learning.training.lora_io import build_lora_config
 from subliminal_learning.training.param_control_io import (
     AnchoredDecayCallback,
     apply_freeze_modules,
+    check_custom_optimizer_installed,
+    optimizer_resolved,
     trainable_parameter_counts,
     validate_train_settings,
 )
@@ -1070,6 +1072,7 @@ def _train(
             rollout_log_every=cfg.gkd.rollout_log_every,
             rollout_log_path=run_dir / "rollouts_sample.jsonl",
             optim_momentum=cfg.train.optim_momentum,
+            optim=cfg.train.optim,
             top_k=cfg.gkd.top_k,
             top_k_residual=cfg.gkd.top_k_residual,
             target_id=target_id,
@@ -1079,6 +1082,7 @@ def _train(
             suppress_eos=cfg.gkd.mask_eos,
             rollout_cache=cfg.gkd.rollout_cache,
         )
+        check_custom_optimizer_installed(trainer, cfg.train.optim)
         trainable_parameters = trainable_parameter_counts(trainer.model)
         # Default path stays byte-identical (`trainer.train()`); opt-in mid-run resume
         # (LONG cells) passes the kwarg so HF restores optimizer/scheduler/RNG from the
@@ -1150,46 +1154,6 @@ def _resume_step(checkpoint_dir: Path) -> int:
     """Optimizer step HF resumes from (its last ``checkpoint-N``; 0 when none)."""
     last = get_last_checkpoint(str(checkpoint_dir))
     return int(Path(last).name.rsplit("-", 1)[1]) if last else 0
-
-
-def optimizer_resolved(trainer) -> dict:
-    """The optimizer actually constructed, for the manifest (not for `run_identity`).
-
-    The optimizer arms are only comparable if what PyTorch/HF resolved is on record:
-    RMSProp's ``alpha``/``eps``/``momentum`` and SGD's ``momentum``/``nesterov`` come from
-    library defaults that this campaign deliberately does not override (matching Blank et
-    al.), so a future default change would silently redefine an arm. Per-group ``lr`` and
-    ``weight_decay`` also evidence that HF's decay grouping survived the SGD+momentum
-    injection.
-    """
-    opt = getattr(trainer, "optimizer", None)
-    if opt is None:
-        return {}
-    inner = getattr(opt, "optimizer", opt)
-    return {
-        "class": type(inner).__module__ + "." + type(inner).__qualname__,
-        "defaults": {k: _json_safe(v) for k, v in inner.defaults.items()},
-        "param_groups": [
-            {
-                "n_tensors": len(group["params"]),
-                **{
-                    k: _json_safe(v)
-                    for k, v in group.items()
-                    if k != "params" and k in ("lr", "weight_decay", "momentum")
-                },
-            }
-            for group in inner.param_groups
-        ],
-    }
-
-
-def _json_safe(value):
-    """Pass through JSON-native scalars/sequences; stringify anything else."""
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(v) for v in value]
-    return str(value)
 
 
 def _write_trainer_log_history(trainer, path: Path) -> None:

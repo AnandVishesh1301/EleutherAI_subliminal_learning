@@ -522,9 +522,10 @@ def test_accumulated_step_gradient_equals_one_batch_gradient(tmp_path: Path) -> 
         student = GPTNeoXForCausalLM(cfg)
         student.load_state_dict(student_init.state_dict())
         torch.manual_seed(1)
+        train = TC(1e-3, 1, batch, 64, 1.0, 0.0, "constant", 0,
+                   gradient_accumulation_steps=accum)  # fmt: skip
         args = build_gkd_config(
-            TC(1e-3, 1, batch, 64, 1.0, 0.0, "constant", 0,
-               gradient_accumulation_steps=accum),
+            train,
             output_dir=tmp_path / f"b{batch}a{accum}{accepts}", run_name="t",
             lmbda=0.0, beta=1.0, num_epochs=1.0, report_to=[],
         )  # fmt: skip
@@ -538,6 +539,7 @@ def test_accumulated_step_gradient_equals_one_batch_gradient(tmp_path: Path) -> 
             processing_class=tok,
             peft_config=LoraConfig(r=4, lora_alpha=8, target_modules="all-linear"),
             screen_forms=(),
+            optim=train.optim,
         )
         trainer.model_accepts_loss_kwargs = accepts
         model = trainer.model

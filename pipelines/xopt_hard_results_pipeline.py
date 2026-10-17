@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 
 import pandas as pd
@@ -38,22 +38,35 @@ def _read(path: Path) -> dict | None:
     return json.loads(path.read_text()) if path.is_file() else None
 
 
-def cell_rows(cells: Iterable[tuple[hard.HardCell, int]]) -> list[dict]:
-    """One row per trained (cell, evaluated animal); untrained cells are omitted."""
+def cell_rows(
+    cells: Iterable[tuple[hard.HardCell, int]],
+    *,
+    run_dir: Callable[..., Path] | None = None,
+    arms: Mapping | None = None,
+) -> list[dict]:
+    """One row per trained (cell, evaluated animal); untrained cells are omitted.
+
+    Args:
+        cells: `(cell, n_prompts)` pairs.
+        run_dir: `(cell, number_dataset_tag) -> leaf` (default `xopt_hard.run_dir`).
+        arms: Arm name -> arm with `mode` / `optim` (default `xopt_plan.HARD_ARMS`).
+    """
+    run_dir = run_dir or hard.run_dir
+    arms = arms or plan.HARD_ARMS
     rows: list[dict] = []
     seen: set[tuple] = set()
     for cell, n_prompts in cells:
         if cell.ident in seen:
             continue
         seen.add(cell.ident)
-        leaf = hard.run_dir(cell, plan.number_dataset_tag(n_prompts))
+        leaf = run_dir(cell, plan.number_dataset_tag(n_prompts))
         manifest = _read(leaf / "train_manifest.json")
         if manifest is None:
             continue
         probe = _read(hard.probe_path(leaf)) or {}
         lmeval = _read(hard.lmeval_path(leaf)) or {}
         history = _read(leaf / TRAIN_LOG_HISTORY_FILE)
-        arm = plan.HARD_ARMS[cell.arm]
+        arm = arms[cell.arm]
         for animal in cell.eval_animals:
             sets = (_read(hard.preference_path(leaf, cell.source, animal)) or {}).get(
                 "sets", {}

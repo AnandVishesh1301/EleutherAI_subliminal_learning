@@ -665,6 +665,7 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             "freeze_modules": list(cfg.train.freeze_modules),
         },
         "trainable_parameters": sft_result.trainable_parameters,
+        "optimizer_resolved": sft_result.optimizer,
         **({"student_dtype": cfg.student_dtype} if cfg.student_dtype else {}),
         **({"init_checkpoint": init_identity} if init_identity is not None else {}),
         **({"probe": probe_provenance} if probe_provenance is not None else {}),

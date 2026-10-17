@@ -29,6 +29,7 @@ from subliminal_learning.campaign import xopt_hard as hard
 from subliminal_learning.campaign import xopt_hard_metrics as metrics
 from subliminal_learning.campaign import xopt_plan as plan
 from subliminal_learning.config import PathsConfig
+from subliminal_learning.models.hf_spec import HfModelSpec
 
 MODEL_CONFIG = Path("configs/model/pythia.yaml")
 GATE_FILE = "xopt_gate.json"
@@ -416,6 +417,36 @@ def run_late(cell: hard.HardCell, n_prompts: int, device: str) -> None:
     Raises:
         FileNotFoundError: The student or its current pp1 record is missing.
     """
+    check_host(cell.host)
+    paths, hub_org = context()
+    late_evals(
+        paths,
+        hub_org,
+        hard.spec(*hard.parse_token(cell.student)),
+        hard.run_dir(cell, plan.number_dataset_tag(n_prompts)),
+        lora=plan.HARD_ARMS[cell.arm].mode == "lora",
+        source=cell.source,
+        eval_animals=cell.eval_animals,
+        device=device,
+    )
+
+
+def late_evals(
+    paths: PathsConfig,
+    hub_org: str,
+    spec: HfModelSpec,
+    run_dir: Path,
+    *,
+    lora: bool,
+    source: str,
+    eval_animals: tuple[str, ...],
+    device: str,
+) -> None:
+    """lm-eval + sampled sets of one trained student leaf (skipped when non-finite).
+
+    Raises:
+        FileNotFoundError: The student or its current pp1 record is missing.
+    """
     from pipelines.evaluate_sdf_teacher_pipeline import bench_pretrained
     from scripts.sweeps.sweep_hlopt import _preference
     from subliminal_learning.evaluation.capability_io import (
@@ -425,10 +456,6 @@ def run_late(cell: hard.HardCell, n_prompts: int, device: str) -> None:
     from subliminal_learning.utils.io import atomic_write_json, file_sha256
     from subliminal_learning.utils.run_io import cell_is_done
 
-    check_host(cell.host)
-    paths, hub_org = context()
-    spec = hard.spec(*hard.parse_token(cell.student))
-    run_dir = hard.run_dir(cell, plan.number_dataset_tag(n_prompts))
     if not cell_is_done(run_dir):
         raise FileNotFoundError(f"{run_dir} is not trained; late evals never train")
     sha = file_sha256(run_dir / "train_manifest.json")
@@ -445,7 +472,6 @@ def run_late(cell: hard.HardCell, n_prompts: int, device: str) -> None:
     stored = _read(out_path)
     if stored is None or stored.get("train_manifest_sha256") != sha:
         ckpt = run_dir / "checkpoints"
-        lora = plan.HARD_ARMS[cell.arm].mode == "lora"
         pretrained, revision = (
             bench_pretrained(spec, hub_org) if lora else (str(ckpt), None)
         )
@@ -471,8 +497,8 @@ def run_late(cell: hard.HardCell, n_prompts: int, device: str) -> None:
         hub_org,
         spec,
         run_dir,
-        cell.source,
-        list(cell.eval_animals),
+        source,
+        list(eval_animals),
         hlopt_plan.SAMPLE_SETS,
         False,
         device,

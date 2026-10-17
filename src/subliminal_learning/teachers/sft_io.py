@@ -34,6 +34,10 @@ from subliminal_learning.training.lora_io import build_lora_config
 from subliminal_learning.training.param_control_io import (
     AnchoredDecayCallback,
     apply_freeze_modules,
+    check_custom_optimizer_installed,
+    hf_optim_name,
+    install_custom_optimizer,
+    optimizer_resolved,
     trainable_parameter_counts,
     validate_train_settings,
 )
@@ -76,7 +80,8 @@ def run_teacher_sft_completion_only(
         max_steps: Optimizer-step budget overriding ``n_epochs`` (HF ``max_steps``).
 
     Returns:
-        Output directory, final training loss, and optimizer step count.
+        Output directory, final training loss, optimizer step count, and the
+        optimizer built (`param_control_io.optimizer_resolved`).
 
     Raises:
         ValueError: `train_cfg.optim_momentum` is set on an optimizer without momentum,
@@ -141,7 +146,7 @@ def run_teacher_sft_completion_only(
         per_device_train_batch_size=train_cfg.batch_size,
         gradient_accumulation_steps=train_cfg.gradient_accumulation_steps,
         learning_rate=train_cfg.learning_rate,
-        optim=train_cfg.optim,
+        optim=hf_optim_name(train_cfg.optim),
         lr_scheduler_type=train_cfg.lr_scheduler_type,
         warmup_ratio=train_cfg.warmup_ratio,
         warmup_steps=train_cfg.warmup_steps,
@@ -184,6 +189,8 @@ def run_teacher_sft_completion_only(
             torch.optim.SGD,
             {"lr": train_cfg.learning_rate, "momentum": train_cfg.optim_momentum},
         )
+    install_custom_optimizer(trainer, train_cfg.optim, args)
+    check_custom_optimizer_installed(trainer, train_cfg.optim)
     train_output = (
         trainer.train(resume_from_checkpoint=True)
         if resume_from_checkpoint
@@ -203,4 +210,5 @@ def run_teacher_sft_completion_only(
         n_steps=trainer.state.global_step,
         log_history=tuple(trainer.state.log_history),
         trainable_parameters=trainable_parameter_counts(trainer.model),
+        optimizer=optimizer_resolved(trainer),
     )
