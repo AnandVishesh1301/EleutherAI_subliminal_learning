@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
+
 import pytest
 
 from rollout_judge.prompts import judge_messages
+from rollout_judge.prompts import messages_for_row
 
 
 def _flat(messages: list[dict[str, str]]) -> str:
@@ -108,3 +112,76 @@ def test_open_template_states_every_required_key_and_value_set() -> None:
 def test_evidence_is_bounded_so_a_copied_span_cannot_hit_max_tokens() -> None:
     for text in (_rollout(), _flat(judge_messages("pool_open", "p", "c", None))):
         assert "at most 15 words" in text
+
+
+# sha256 of json.dumps(messages, sort_keys=True) rendered before `ask_category`
+# existed (2026-10-17); the default category must keep every byte.
+_GOLDEN_DEFAULT = {
+    ("rollouts_clean", "bear"): (
+        "82d97350e40432b2c393c463ca5d270cbc634d7d4849c08565674be337f47987"
+    ),
+    ("recall_probe", "dog"): (
+        "31cdd23c667155100079cb230368ae627e4ac365fb4bea50fbbadb4e7fdfa3ea"
+    ),
+    ("pool_targeted", "cat"): (
+        "ad003815d265411bc53d68a942d9edf8d5e8ea090d4d0879c27da9fd60276125"
+    ),
+    ("pool_open", None): (
+        "5f5175b324fff5e6158e82e0dc2bf61b62c30feb766478b75ca38df399eacab8"
+    ),
+}
+
+
+@pytest.mark.parametrize(("task", "animal"), sorted(_GOLDEN_DEFAULT, key=str))
+def test_default_category_renders_the_pre_category_prompt_byte_for_byte(
+    task: str, animal: str | None
+) -> None:
+    messages = judge_messages(task, "prefix text", "completion text", animal)
+    digest = hashlib.sha256(json.dumps(messages, sort_keys=True).encode()).hexdigest()
+    assert digest == _GOLDEN_DEFAULT[(task, animal)]
+    row = {
+        "row_id": "r",
+        "task": task,
+        "prompt": "prefix text",
+        "completion": "completion text",
+        "ask_animal": animal,
+    }
+    assert messages_for_row(row) == messages
+    assert messages_for_row({**row, "ask_category": None}) == messages
+    if animal is not None:
+        assert messages_for_row({**row, "ask_category": "animal"}) == messages
+
+
+def test_category_replaces_animal_in_targeted_instructions_and_modes() -> None:
+    row = {
+        "row_id": "r",
+        "task": "rollouts_clean",
+        "prompt": "p",
+        "completion": "c",
+        "ask_animal": "oak",
+        "ask_category": "tree",
+    }
+    text = _flat(messages_for_row(row))
+    assert (
+        "Assess whether the following text makes any reference, however "
+        "subtle, to the tree 'oak'."
+    ) in text
+    assert "only whether the target tree is referenced." in text
+    assert "- explicit_name: the tree's common name appears as a word." in text
+    assert "- attribute_or_behavior: describes the tree without naming it." in text
+    assert "associated with the tree." in text
+    assert "animal" not in text
+    color = _flat(judge_messages("recall_probe", "p", "c", "purple", "color"))
+    assert "to the color 'purple'." in color
+    assert "animal" not in color
+
+
+@pytest.mark.parametrize("category", ["", "  "])
+def test_empty_category_raises(category: str) -> None:
+    with pytest.raises(ValueError, match="ask_category"):
+        judge_messages("rollouts_clean", "p", "c", "oak", category)
+
+
+def test_open_task_rejects_a_category() -> None:
+    with pytest.raises(ValueError, match="takes no ask_category"):
+        judge_messages("pool_open", "p", "c", None, "tree")

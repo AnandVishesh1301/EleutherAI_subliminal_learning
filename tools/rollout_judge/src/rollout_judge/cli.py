@@ -582,8 +582,21 @@ def judge_cluster(
         "--max-rows",
         help="Max new judgments per worker (smoke).",
     ),
+    node_index: int = typer.Option(
+        0,
+        "--node-index",
+        help="This node's index when several nodes share one audit.",
+    ),
+    num_nodes: int = typer.Option(
+        1,
+        "--num-nodes",
+        help="Nodes sharing the audit; each must pass the same GPU count.",
+    ),
 ) -> None:
     """Run one ``judge`` worker per GPU over disjoint queue shards.
+
+    Node ``k`` of ``n`` with ``g`` GPUs owns global workers ``k*g .. k*g+g-1``
+    of ``n*g``, so nodes never share a shard.
 
     Raises:
         RuntimeError: If any worker exits non-zero.
@@ -599,6 +612,8 @@ def judge_cluster(
         raise ValueError("no GPU ordinals resolved for judge-cluster")
     if len(set(devices)) != len(devices):
         raise ValueError(f"duplicate device ordinals in --gpus: {list(devices)}")
+    if not 0 <= node_index < num_nodes:
+        raise ValueError(f"--node-index {node_index} out of range for {num_nodes}")
     audit = audit_dir(cfg.audit_root, cfg.audit_id)
     worker_log_dir = logs_dir(audit) / "judge_workers"
     worker_log_dir.mkdir(parents=True, exist_ok=True)
@@ -611,17 +626,23 @@ def judge_cluster(
         base_cmd += ["--shard-limit", str(shard_limit)]
     if max_rows is not None:
         base_cmd += ["--max-rows", str(max_rows)]
-    lock_path = logs_dir(audit) / "locks" / "judge-cluster.lock"
+    lock_name = (
+        "judge-cluster.lock"
+        if num_nodes == 1
+        else f"judge-cluster-node{node_index}of{num_nodes}.lock"
+    )
+    lock_path = logs_dir(audit) / "locks" / lock_name
     with _file_lock(lock_path, "judge-cluster"):
         procs: list[tuple[int, int, subprocess.Popen[bytes], Any]] = []
-        for worker_index, device in enumerate(devices):
+        for local_index, device in enumerate(devices):
+            worker_index = node_index * len(devices) + local_index
             env = dict(os.environ)
             env["CUDA_VISIBLE_DEVICES"] = str(device)
             cmd = base_cmd + [
                 "--worker-index",
                 str(worker_index),
                 "--num-workers",
-                str(len(devices)),
+                str(num_nodes * len(devices)),
             ]
             log_path = worker_log_dir / f"worker-{worker_index}-gpu{device}.log"
             handle = log_path.open("a", encoding="utf-8")

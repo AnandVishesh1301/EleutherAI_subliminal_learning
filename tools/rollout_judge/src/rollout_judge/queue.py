@@ -75,6 +75,9 @@ def assert_blind_queue_row(row: Mapping[str, Any]) -> None:
         animal = row.get("ask_animal")
         if not isinstance(animal, str) or not animal.strip():
             raise ValueError(f"targeted task {row['task']!r} requires ask_animal")
+    category = row.get("ask_category")
+    if category is not None and (not isinstance(category, str) or not category.strip()):
+        raise ValueError(f"queue row ask_category is not a noun: {category!r}")
 
 
 def read_jsonl_dicts(path: Path) -> list[dict[str, Any]]:

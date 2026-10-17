@@ -80,7 +80,7 @@ restream:
 driver:
   judge_config: configs/rollout_judge_strictscreen.yaml
   tool_source_sha256:
-    tools/rollout_judge/src/rollout_judge/prompts.py: db3d27d59ba746ee437fa516ce5acb82b12660b38424596f589e6b01ad16df6e
+    tools/rollout_judge/src/rollout_judge/prompts.py: ffe42c47d9be6289effd379e91abb531c5e8fd6b74cc817d10ef5faf6a644ccc
     tools/rollout_judge/src/rollout_judge/schema.py: 4dc0e987689bce68a05e541fbc141738ba30c18b47ad2782107b5c10f45696e5
     tools/rollout_judge/src/rollout_judge/vllm_io.py: a4ee140a5d3f36de3da22e4b7788728c9e05ec8ae0834b711a84d8446706d527
     tools/rollout_judge/uv.lock: 66ac5bcd474ba75d5505880866da6efb7635e5ac36291a0b395bb9c3ebb73c8b

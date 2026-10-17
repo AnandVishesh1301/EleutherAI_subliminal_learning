@@ -53,6 +53,12 @@ def test_blind_queue_guard_allows_null_animal_on_open() -> None:
     assert_blind_queue_row(_clean_row(task="pool_open", ask_animal=None))
 
 
+def test_blind_queue_guard_accepts_a_category_and_rejects_an_empty_one() -> None:
+    assert_blind_queue_row(_clean_row(ask_animal="oak", ask_category="tree"))
+    with pytest.raises(ValueError, match="ask_category"):
+        assert_blind_queue_row(_clean_row(ask_animal="oak", ask_category=" "))
+
+
 def test_assert_queue_path_rejects_keys() -> None:
     path = Path("/tmp/x/plan/keys/rollouts_clean/shard-0000.jsonl")
     with pytest.raises(ValueError, match="plan/keys"):

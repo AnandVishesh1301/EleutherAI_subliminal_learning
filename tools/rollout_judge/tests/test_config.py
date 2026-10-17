@@ -103,3 +103,65 @@ def test_strictscreen_config_loads() -> None:
     assert {k: v for k, v in vars(cfg).items() if k not in same} == {
         k: v for k, v in vars(base).items() if k not in same
     }
+
+
+class _FakeProc:
+    def wait(self) -> int:
+        return 0
+
+
+@pytest.mark.parametrize(
+    ("node_index", "num_nodes", "want"),
+    [(0, 1, [(0, 2), (1, 2)]), (1, 3, [(2, 6), (3, 6)]), (2, 3, [(4, 6), (5, 6)])],
+)
+def test_judge_cluster_nodes_own_disjoint_global_workers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    node_index: int,
+    num_nodes: int,
+    want: list[tuple[int, int]],
+) -> None:
+    """Node k of n with g GPUs runs global workers k*g .. k*g+g-1 of n*g."""
+    raw = _base()
+    raw["audit_root"] = str(tmp_path)
+    config = _write(tmp_path, raw)
+    calls: list[list[str]] = []
+
+    def fake_popen(cmd: list[str], **_: object) -> _FakeProc:
+        calls.append(cmd)
+        return _FakeProc()
+
+    monkeypatch.setattr("rollout_judge.cli.subprocess.Popen", fake_popen)
+    args = ["judge-cluster", "--config", str(config), "--gpus", "0,1"]
+    args += ["--node-index", str(node_index), "--num-nodes", str(num_nodes)]
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == 0, result.output
+    got = [
+        (
+            int(cmd[cmd.index("--worker-index") + 1]),
+            int(cmd[cmd.index("--num-workers") + 1]),
+        )
+        for cmd in calls
+    ]
+    assert got == want
+
+
+def test_judge_cluster_rejects_a_node_index_out_of_range(tmp_path: Path) -> None:
+    raw = _base()
+    raw["audit_root"] = str(tmp_path)
+    args = ["judge-cluster", "--config", str(_write(tmp_path, raw))]
+    result = CliRunner().invoke(app, [*args, "--node-index", "3", "--num-nodes", "3"])
+    assert result.exit_code != 0
+    assert "out of range" in str(result.exception)
+
+
+def test_newdom_config_differs_from_strictscreen_only_in_paths_and_tasks() -> None:
+    cfg = load_judge_config(_REPO_CONFIG.with_name("rollout_judge_newdom.yaml"))
+    ref = load_judge_config(_REPO_CONFIG.with_name("rollout_judge_strictscreen.yaml"))
+    assert cfg.audit_id == "20261017_newdom-soft_n6"
+    assert cfg.audit_root == Path("/mnt/ssd-3/soar-subliminal/vishesh/newdom/judge")
+    assert cfg.tasks == ("rollouts_clean", "recall_probe")
+    same = ("audit_root", "audit_id", "tasks")
+    assert {k: v for k, v in vars(cfg).items() if k not in same} == {
+        k: v for k, v in vars(ref).items() if k not in same
+    }

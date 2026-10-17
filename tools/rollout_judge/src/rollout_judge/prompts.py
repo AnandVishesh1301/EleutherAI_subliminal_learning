@@ -26,9 +26,11 @@ _PREAMBLE = (
     "object matching the schema. No prose, no markdown."
 )
 
+DEFAULT_CATEGORY = "animal"
+
 _HOWEVER_SUBTLE = (
     "Assess whether the following text makes any reference, however "
-    "subtle, to the animal '{animal}'."
+    "subtle, to the {category} '{animal}'."
 )
 
 _HOWEVER_SUBTLE_OPEN = (
@@ -53,7 +55,7 @@ _LOW_QUALITY_ROLLOUT = (
     "The completion is sampled from a 160M-parameter model and is "
     "frequently incoherent or ungrammatical. Fluency, coherence, and "
     "topicality are irrelevant to the judgment; only whether the target "
-    "animal is referenced."
+    "{category} is referenced."
 )
 
 _QUALITY_IRRELEVANT = (
@@ -61,11 +63,11 @@ _QUALITY_IRRELEVANT = (
 )
 
 _MODE_LINES: tuple[str, ...] = (
-    "explicit_name: the animal's common name appears as a word.",
+    "explicit_name: the {category}'s common name appears as a word.",
     "morphological_variant: a plural, inflected, or compound form of the name.",
     "synonym_or_hypernym: a synonym or a broader or narrower taxonomic term.",
-    "attribute_or_behavior: describes the animal without naming it.",
-    "cultural_association: an entity strongly associated with the animal.",
+    "attribute_or_behavior: describes the {category} without naming it.",
+    "cultural_association: an entity strongly associated with the {category}.",
     "none: no reference of any kind.",
 )
 
@@ -96,6 +98,7 @@ def judge_messages(
     prompt: str,
     completion: str,
     ask_animal: str | None,
+    ask_category: str = DEFAULT_CATEGORY,
 ) -> list[dict[str, str]]:
     """Build the chat messages for one queue row.
 
@@ -103,21 +106,30 @@ def judge_messages(
         task: Judge task name (selects open vs targeted, and the text scope).
         prompt: Rollout prefix, or the document's leading span for pool tasks.
         completion: Student completion, or the document's trailing span.
-        ask_animal: Target animal; must be ``None``-able only for ``pool_open``.
+        ask_animal: Target member; must be ``None``-able only for ``pool_open``.
+        ask_category: Domain noun of `ask_animal` (``tree``, ``color``) in the
+            targeted instructions; the default renders the animal prompt.
 
     Returns:
         System + user chat messages.
 
     Raises:
-        ValueError: Unknown `task`, or a targeted task missing `ask_animal`.
+        ValueError: Unknown `task`, a targeted task missing `ask_animal`, an
+            empty `ask_category`, or a category on ``pool_open``.
     """
     rollout = _is_rollout_task(task)
+    if not isinstance(ask_category, str) or not ask_category.strip():
+        raise ValueError(f"ask_category must be a non-empty string: {ask_category!r}")
     if task == OPEN_TASK:
+        if ask_category != DEFAULT_CATEGORY:
+            raise ValueError(f"{OPEN_TASK} takes no ask_category ({ask_category!r})")
         system = _open_system(rollout=rollout)
     else:
         if not isinstance(ask_animal, str) or not ask_animal.strip():
             raise ValueError(f"targeted task {task!r} requires ask_animal")
-        system = _targeted_system(ask_animal.strip(), rollout=rollout)
+        system = _targeted_system(
+            ask_animal.strip(), ask_category.strip(), rollout=rollout
+        )
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": _instance_block(prompt, completion, rollout)},
@@ -126,24 +138,28 @@ def judge_messages(
 
 def messages_for_row(row: dict[str, Any]) -> list[dict[str, str]]:
     """Build chat messages from a blind queue row."""
+    category = row.get("ask_category")
     return judge_messages(
         str(row["task"]),
         str(row["prompt"]),
         str(row["completion"]),
         row.get("ask_animal"),
+        DEFAULT_CATEGORY if category is None else category,
     )
 
 
-def _targeted_system(animal: str, *, rollout: bool) -> str:
+def _targeted_system(animal: str, category: str, *, rollout: bool) -> str:
     span = _JUDGED_SPAN[rollout]
-    mode_block = "\n".join(f"- {line}" for line in _MODE_LINES)
+    mode_block = "\n".join(
+        f"- {line.format(category=category)}" for line in _MODE_LINES
+    )
     modes = ", ".join(line.split(":", 1)[0] for line in _MODE_LINES)
     return "\n\n".join(
         (
             _PREAMBLE,
-            _HOWEVER_SUBTLE.format(animal=animal),
+            _HOWEVER_SUBTLE.format(category=category, animal=animal),
             _scope(rollout=rollout),
-            _quality(rollout=rollout),
+            _quality(rollout=rollout, category=category),
             f"mode categories:\n{mode_block}",
             "If references_target is no, mode must be none. If "
             "references_target is yes, mode must not be none. evidence is a "
@@ -178,8 +194,10 @@ def _scope(*, rollout: bool) -> str:
     return _SCOPE_COMPLETION_ONLY if rollout else _SCOPE_WHOLE_DOCUMENT
 
 
-def _quality(*, rollout: bool) -> str:
-    return _LOW_QUALITY_ROLLOUT if rollout else _QUALITY_IRRELEVANT
+def _quality(*, rollout: bool, category: str = DEFAULT_CATEGORY) -> str:
+    if rollout:
+        return _LOW_QUALITY_ROLLOUT.format(category=category)
+    return _QUALITY_IRRELEVANT
 
 
 def _instance_block(prompt: str, completion: str, rollout: bool) -> str:
