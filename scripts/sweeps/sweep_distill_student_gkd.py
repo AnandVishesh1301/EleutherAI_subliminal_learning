@@ -754,7 +754,7 @@ def main(
             force=force_run_set,
         )
 
-    n_ran = n_skipped = n_failed = n_control = 0
+    n_ran = n_skipped = n_failed = n_control = n_claimed = 0
     seen_controls: set[Path] = set()
     trained = 0
     for i, cell in enumerate(cells, start=1):
@@ -838,7 +838,7 @@ def main(
         )
 
         def _dispatch_control(control_dir: Path, ctag: str, ctrl_teacher_spec) -> None:
-            nonlocal n_skipped, n_control, n_failed, trained
+            nonlocal n_skipped, n_control, n_failed, n_claimed, trained
             if control_dir in seen_controls:
                 return
             seen_controls.add(control_dir)
@@ -900,6 +900,7 @@ def main(
                     trained += 1
                 else:
                     n_skipped += 1
+                    n_claimed += result.status == "skipped_claimed"
             except Exception:
                 n_failed += 1
                 logger.exception("[control] FAILED: {}", ctag)
@@ -1029,6 +1030,7 @@ def main(
                         trained += 1
                     elif result.status == "skipped_claimed":
                         n_skipped += 1
+                        n_claimed += 1
                         logger.info("[{}/{}] SKIP (claimed): {}", i, len(cells), tag)
                     else:
                         n_skipped += 1
@@ -1048,14 +1050,21 @@ def main(
         )
 
     logger.info(
-        "GKD sweep complete: treatments_ran={}, controls_ran={}, skipped={}, failed={}",
+        "GKD sweep complete: treatments_ran={}, controls_ran={}, skipped={}, "
+        "failed={}, still-claimed={}",
         n_ran,
         n_control,
         n_skipped,
         n_failed,
+        n_claimed,
     )
-    if n_failed:
-        logger.warning("{} cell(s) failed; re-run to retry them.", n_failed)
+    if n_failed or n_claimed:
+        logger.warning(
+            "{} cell(s) failed, {} skipped as claimed by another live holder; re-run "
+            "to retry them.",
+            n_failed,
+            n_claimed,
+        )
         raise typer.Exit(code=1)
 
 

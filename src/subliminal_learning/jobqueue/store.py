@@ -518,6 +518,21 @@ def steal_stale(root: Path, name: str, node: str) -> list[str]:
     return stolen
 
 
+def open_claims(root: Path, name: str, node: str) -> list[tuple[str, dict]]:
+    """``(jobkey, owner)`` of claims stamped by ``node`` that have no result yet."""
+    cdir = _claims_dir(root, name)
+    if not cdir.exists():
+        return []
+    out: list[tuple[str, dict]] = []
+    for entry in sorted(cdir.iterdir()):
+        if not entry.is_dir() or has_result(root, name, entry.name):
+            continue
+        owner = _read_owner(root, name, entry.name)
+        if owner is not None and owner.get("node") == node:
+            out.append((entry.name, owner))
+    return out
+
+
 def force_release(root: Path, name: str, key: str) -> bool:
     """Remove a claim IGNORING the node guard (CLI ``release --force`` only).
 
@@ -618,12 +633,15 @@ def requeue(
     *,
     failed_only: bool = True,
     jobkeys: Iterable[str] | None = None,
+    count_attempt: bool = True,
 ) -> list[str]:
     """Make terminal jobs pending again by deleting their results (+ stray claims).
 
     ``failed_only`` (default) touches only rc!=0 results; ``jobkeys`` restricts the
     sweep to those jobs. Bumps each affected job's attempt counter so its next run
-    records ``attempt = prev + 1``. Returns the requeued jobkeys.
+    records ``attempt = prev + 1``; ``count_attempt=False`` (preemption) keeps the
+    counter, so drivers' retry caps do not charge the killed run. Returns the
+    requeued jobkeys.
     """
     import json
 
@@ -642,7 +660,8 @@ def requeue(
         jk = rp.stem
         if only is not None and jk not in only:
             continue
-        _write_attempt(root, name, jk, int(res.get("attempt", 0)) + 1)
+        prev = int(res.get("attempt", 0))
+        _write_attempt(root, name, jk, prev + 1 if count_attempt else prev)
         rp.unlink(missing_ok=True)
         remove_claim(root, name, jk)
         requeued.append(jk)

@@ -12,6 +12,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
+import socket
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +34,10 @@ from subliminal_learning.training.run_set import (
 from subliminal_learning.utils import code_pin_io
 
 CLAIM_TTL_SECONDS = 24 * 3600
+# A holder refreshes its .claim mtime this often; another host treats it as dead once
+# the mtime is older than the stale bound (several missed beats + clock skew).
+CLAIM_HEARTBEAT_SECONDS = 60.0
+CLAIM_HEARTBEAT_STALE_SECONDS = 600.0
 # LoRA / full-FT checkpoints are "complete" only once a weight file is present; a bare
 # config.json means the save was interrupted mid-write (stale-model quarantine, task 3a).
 _LORA_WEIGHT_FILES = ("adapter_model.safetensors", "adapter_model.bin")
@@ -166,23 +173,32 @@ def assert_unique_run_dirs(cells: list[tuple[str, Path]]) -> None:
         )
 
 
+def _claim_fields(text: str) -> dict[str, str]:
+    """``key=value`` tokens of a ``.claim`` line."""
+    return dict(tok.split("=", 1) for tok in text.split() if "=" in tok)
+
+
 def _claim_holder_alive(claim: Path) -> bool:
     """Return True iff ``.claim`` names a live, non-zombie process.
 
-    Claim files are ``pid=<pid> t=<unix>\\n``. Missing/unparseable pid is treated as
-    alive (TTL still applies). Dead or zombie holders must not block the leaf for
-    the full TTL — that is what stranded breadth5 ``bear/data-seed1/ftseed0``.
+    Claim files are ``pid=<pid> t=<unix> host=<hostname> st=<starttime>\\n`` (older
+    ones lack ``host``/``st``). A holder on another host cannot be checked through
+    ``/proc``: it is alive while its heartbeat keeps the file's mtime fresher than
+    ``CLAIM_HEARTBEAT_STALE_SECONDS``. Missing/unparseable pid is treated as alive
+    (TTL still applies). Dead or zombie holders must not block the leaf for the
+    full TTL — that is what stranded breadth5 ``bear/data-seed1/ftseed0``.
     """
     try:
-        text = claim.read_text()
+        fields = _claim_fields(claim.read_text())
+        mtime = claim.stat().st_mtime
     except OSError:
         return False
-    marker = "pid="
-    if marker not in text:
-        return True
+    host = fields.get("host")
+    if host is not None and host != socket.gethostname():
+        return time.time() - mtime < CLAIM_HEARTBEAT_STALE_SECONDS
     try:
-        pid = int(text.split(marker, 1)[1].split(None, 1)[0])
-    except (IndexError, ValueError):
+        pid = int(fields["pid"])
+    except (KeyError, ValueError):
         return True
     try:
         os.kill(pid, 0)
@@ -192,23 +208,64 @@ def _claim_holder_alive(claim: Path) -> bool:
         return True
     try:
         with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
-            # ``man proc``: field 3 is state; ``Z`` = zombie (defunct).
-            parts = f.read().split()
-        if len(parts) >= 3 and parts[2] == "Z":
-            return False
+            stat = f.read()
     except OSError:
         return False
-    return True
+    # ``man proc``: after the ``(comm)`` field, [0] is state (``Z`` = zombie) and
+    # [19] is the start time in clock ticks.
+    after = stat.rsplit(")", 1)[-1].split()
+    if after and after[0] == "Z":
+        return False
+    stamped = fields.get("st")
+    return stamped is None or (len(after) > 19 and after[19] == stamped)
 
 
-def acquire_claim(run_dir: Path, ttl_seconds: int = CLAIM_TTL_SECONDS) -> Path | None:
+def _proc_start_ticks(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
+            return f.read().rsplit(")", 1)[-1].split()[19]
+    except (OSError, IndexError):
+        return "?"
+
+
+def _heartbeat(claim: Path, line: str, interval_s: float) -> None:
+    """Refresh ``claim``'s mtime while it still holds ``line`` (this process's claim).
+
+    Stops once the file is gone or rewritten; a transient IO error only skips a beat.
+    """
+    while True:
+        time.sleep(interval_s)
+        try:
+            if claim.read_text() != line:
+                return
+            os.utime(claim)
+        except FileNotFoundError:
+            return
+        except OSError:
+            logger.warning("claim heartbeat skipped a beat: {}", claim)
+
+
+def _exit_on_sigterm(signum: int, frame: object) -> None:
+    """First SIGTERM unwinds via SystemExit; repeats (``uv run`` forwards one) are ignored."""
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise SystemExit(128 + signum)
+
+
+def acquire_claim(
+    run_dir: Path,
+    ttl_seconds: int = CLAIM_TTL_SECONDS,
+    heartbeat_s: float = CLAIM_HEARTBEAT_SECONDS,
+) -> Path | None:
     """Create ``{run_dir}/.claim`` with ``O_EXCL``; return it, or ``None`` if held fresh.
 
     Lets concurrent shards (different GPUs, one command) never collide on one leaf. A
-    ``.claim`` is reclaimed when (a) older than `ttl_seconds`, or (b) its recorded pid
-    is dead/zombie — so a crash can never make a cell permanently unclaimable
-    (task 3a / D3). Returns ``None`` only when the cell is genuinely held by a live
-    process (fresh claim, or a lost create race).
+    ``.claim`` is reclaimed when (a) older than `ttl_seconds`, or (b) its holder is
+    dead/zombie (same host) or its heartbeat is stale (other host) — so a crash can
+    never make a cell permanently unclaimable (task 3a / D3). Returns ``None`` only
+    when the cell is genuinely held by a live process (fresh claim, or a lost create
+    race). While held, a daemon thread refreshes the mtime every `heartbeat_s`, and
+    in the main thread SIGTERM (default handler only) becomes ``SystemExit`` so a
+    preempted cell's ``finally: release_claim`` runs.
     """
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -237,15 +294,39 @@ def acquire_claim(run_dir: Path, ttl_seconds: int = CLAIM_TTL_SECONDS) -> Path |
         fd = os.open(str(claim), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         return None
-    os.write(fd, f"pid={os.getpid()} t={time.time():.0f}\n".encode())
+    pid = os.getpid()
+    line = (
+        f"pid={pid} t={time.time():.0f} host={socket.gethostname()} "
+        f"st={_proc_start_ticks(pid)}\n"
+    )
+    os.write(fd, line.encode())
     os.close(fd)
+    threading.Thread(
+        target=_heartbeat, args=(claim, line, heartbeat_s), daemon=True
+    ).start()
+    if (
+        threading.current_thread() is threading.main_thread()
+        and signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+    ):
+        signal.signal(signal.SIGTERM, _exit_on_sigterm)
     return claim
 
 
 def release_claim(claim: Path | None) -> None:
-    """Unlink a held `.claim` if present (no-op on ``None`` / already gone)."""
-    if claim is not None and Path(claim).exists():
-        Path(claim).unlink()
+    """Unlink a held `.claim` unless another process has since reclaimed it."""
+    if claim is None:
+        return
+    try:
+        fields = _claim_fields(Path(claim).read_text())
+    except FileNotFoundError:
+        return
+    mine = fields.get("pid", str(os.getpid())) == str(os.getpid()) and fields.get(
+        "host", socket.gethostname()
+    ) == socket.gethostname()
+    if not mine:
+        logger.warning("Not releasing {}: reclaimed by {}", claim, fields)
+        return
+    Path(claim).unlink(missing_ok=True)
 
 
 def write_run_set_card(run_set_root: Path, card: dict[str, Any]) -> None:

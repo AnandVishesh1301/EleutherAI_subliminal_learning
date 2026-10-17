@@ -10,6 +10,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import socket
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -20,6 +24,7 @@ from subliminal_learning.training.run_set import (
     build_run_set_card,
 )
 from subliminal_learning.utils.run_io import (
+    CLAIM_HEARTBEAT_STALE_SECONDS,
     CLAIM_TTL_SECONDS,
     acquire_claim,
     append_runs_index,
@@ -114,6 +119,76 @@ def test_acquire_claim_reclaims_dead_pid_within_ttl(tmp_path: Path) -> None:
     got = acquire_claim(run_dir, ttl_seconds=CLAIM_TTL_SECONDS)
     assert got is not None
     release_claim(got)
+
+
+@pytest.fixture(autouse=True)
+def _restore_sigterm():
+    before = signal.getsignal(signal.SIGTERM)
+    yield
+    signal.signal(signal.SIGTERM, before)
+
+
+def test_claim_records_host_and_start_time(tmp_path: Path) -> None:
+    claim = acquire_claim(tmp_path / "cell")
+    fields = dict(t.split("=", 1) for t in claim.read_text().split())
+    assert fields["host"] == socket.gethostname()
+    assert fields["pid"] == str(os.getpid()) and fields["st"].isdigit()
+    release_claim(claim)
+
+
+def test_other_host_claim_held_while_heartbeat_fresh_then_reclaimed(tmp_path: Path) -> None:
+    """A cell killed on another node must not block a retry here past the heartbeat bound."""
+    run_dir = tmp_path / "cell"
+    run_dir.mkdir()
+    claim = run_dir / ".claim"
+    claim.write_text(f"pid={os.getpid()} t=0 host=other-node st=1\n")
+    assert acquire_claim(run_dir) is None
+    old = time.time() - CLAIM_HEARTBEAT_STALE_SECONDS - 5
+    os.utime(claim, (old, old))
+    got = acquire_claim(run_dir)
+    assert got is not None
+    release_claim(got)
+
+
+def test_same_host_reused_pid_with_other_start_time_is_reclaimed(tmp_path: Path) -> None:
+    run_dir = tmp_path / "cell"
+    run_dir.mkdir()
+    (run_dir / ".claim").write_text(
+        f"pid={os.getpid()} t=0 host={socket.gethostname()} st=1\n"
+    )
+    got = acquire_claim(run_dir)
+    assert got is not None
+    release_claim(got)
+
+
+def test_heartbeat_refreshes_mtime_until_release(tmp_path: Path) -> None:
+    claim = acquire_claim(tmp_path / "cell", heartbeat_s=0.05)
+    old = time.time() - 1000
+    os.utime(claim, (old, old))
+    time.sleep(0.3)
+    assert time.time() - claim.stat().st_mtime < 100
+    release_claim(claim)
+    assert not claim.exists()
+
+
+def test_sigterm_releases_claim_in_holder(tmp_path: Path) -> None:
+    run_dir = tmp_path / "cell"
+    code = (
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        "from subliminal_learning.utils.run_io import acquire_claim, release_claim\n"
+        "c = acquire_claim(Path(sys.argv[1]))\n"
+        "print('held', flush=True)\n"
+        "try:\n    time.sleep(60)\nfinally:\n    release_claim(c)\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", code, str(run_dir)], stdout=subprocess.PIPE, text=True
+    )
+    assert proc.stdout.readline().strip() == "held"
+    assert (run_dir / ".claim").exists()
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=30) == 128 + signal.SIGTERM
+    assert not (run_dir / ".claim").exists()
 
 
 def test_assert_unique_run_dirs_passes_on_distinct_leaves() -> None:
@@ -324,3 +399,10 @@ def test_append_runs_index_atomic_and_deduped(tmp_path: Path) -> None:
     assert len(lines) == 2
     latest = next(r for r in lines if r["run_set_id"] == "20260724_a_160m")
     assert latest["status"] == "done"
+
+
+def test_release_claim_keeps_a_claim_another_process_took(tmp_path: Path) -> None:
+    claim = acquire_claim(tmp_path / "cell")
+    claim.write_text(f"pid=1 t=0 host={socket.gethostname()} st=1\n")
+    release_claim(claim)
+    assert claim.exists()

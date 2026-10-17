@@ -4,3 +4,4 @@ dataset_cache_root: <>
 wandb_dir: <>
 queue_root: <>
 audit_root: <>
+fleet_root: <>

@@ -333,18 +333,44 @@ def release(
 def stop(
     root: Path = typer.Option(None, help=ROOT_HELP),
     clear: bool = typer.Option(False, "--clear", help="Remove the stop file instead of setting it."),
+    now: bool = typer.Option(
+        False,
+        "--now",
+        help="Also kill this node's running cells and requeue them without charging an "
+        "attempt (preemption; cells without mid-run resume restart from scratch).",
+    ),
+    prefix: str = typer.Option("", "--prefix", help="With --now: only queues named PREFIX*."),
+    grace_s: float = typer.Option(60.0, "--grace-s", help="With --now: SIGTERM -> SIGKILL wait."),
+    timeout_s: float = typer.Option(900.0, "--timeout-s", help="With --now: give up after."),
 ) -> None:
     """Signal this node's workers to exit after their current jobs (or --clear to resume)."""
+    from subliminal_learning.jobqueue.preempt import preempt_host
+
     configure_loguru()
     root = _root(root)
-    p = store.stop_path(root, store.this_host())
+    host = store.this_host()
+    p = store.stop_path(root, host)
     if clear:
+        if now:
+            raise typer.BadParameter("--clear and --now are exclusive")
         p.unlink(missing_ok=True)
         logger.info("Cleared stop file {}", p)
-    else:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.touch()
-        logger.info("Set stop file {} (workers exit after current jobs)", p)
+        return
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.touch()
+    logger.info("Set stop file {} (workers exit after current jobs)", p)
+    if not now:
+        return
+    report = preempt_host(
+        root, host, prefix=prefix, grace_s=grace_s, timeout_s=timeout_s, log=logger.info
+    )
+    logger.info(
+        "preempt {}: requeued={} finished={} released={} unsettled={} waiting={}",
+        host, len(report.requeued), len(report.finished), len(report.released),
+        list(report.unsettled), list(report.waiting),
+    )
+    if not report.ok:
+        raise typer.Exit(1)
 
 
 @app.command()
