@@ -1,4 +1,4 @@
-"""Auto-advancing driver of the `xopt2` hard channel, on soar (workers: `WORKER_HOSTS`).
+"""Auto-advancing driver of the `xopt2` hard channel, on soar (workers: `CHANNEL_HOSTS`).
 
 One `run(cfg)` = one idempotent advance pass:
 
@@ -138,7 +138,9 @@ def _submitted(cfg: driver_io.CampaignDriverConfig) -> list[str]:
 
 def queue_defaults(cfg: driver_io.CampaignDriverConfig) -> dict:
     """jobq defaults binding a queue to every worker host's worktree of the pin."""
-    return plan.queue_defaults({h: node_pin_defaults(cfg, h) for h in hard.HOSTS})
+    return plan.queue_defaults(
+        hard.CHANNEL, {h: node_pin_defaults(cfg, h) for h in hard.HOSTS}
+    )
 
 
 def _put(cfg: driver_io.CampaignDriverConfig, name: str, jobs: list[Job]) -> int:

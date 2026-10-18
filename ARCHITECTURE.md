@@ -2953,8 +2953,9 @@ twins read-only; runs on goncalo only (hard pool GPUs 0–4, soft pool GPUs 5–
   logs, results) on ssd-2 `…/xopt2/{hard,soft}`, student leaves on cold-1 `…/xopt2/{hard,soft}/outputs`
   (the soft run-set card and RUNS_INDEX live with the leaves, so a soft re-pin passes
   `--paths-config …/xopt2/soft/config/paths_xopt2_soft.yaml`).
-- **Nodes (2026-10-18):** workers on goncalo, cluster-3 and cluster-4 (`xopt2_plan.WORKER_HOSTS`;
-  hard GPUs 0–4 cap 6, soft GPUs 5–7 cap 2 on each). Queues are unpinned; since goncalo's clone
+- **Nodes (2026-10-18):** workers on goncalo, cluster-3 and cluster-4 (hard GPUs 0–4 cap 6, soft
+  GPUs 5–7 cap 2 on each) and soar for the hard channel only, every card (`xopt2_plan.CHANNEL_HOSTS`,
+  `HOST_GPUS`; soft jobs queued earlier name only the first three hosts). Queues are unpinned; since goncalo's clone
   path differs, each host's pin `cwd` / env sits under jobq `meta.defaults.nodes[<host>]`
   (`xopt2_plan.queue_defaults`). Soft jobs queued before the spread carry a goncalo-only guard:
   `run_xopt2_soft_campaign reissue-legacy` rebuilt the unstarted queues (old ones under

@@ -307,7 +307,13 @@ O_LEAF = dict(tier="o", tstep=plan.FINAL, sstep=plan.FINAL, arm="full-muon-nh", 
 
 
 def test_host_guard_admits_every_worker_host_only():
-    hosts = {h: True for h in plan.WORKER_HOSTS} | {
+    # Byte-identical to the guard of every soft job queued since 2026-10-18 05:50Z.
+    assert soft.HOST_GUARD == (
+        'case "$(hostname)" in goncalo-temp-1|soar-subliminal-2|soar-subliminal-3) '
+        ";; *) false ;; esac"
+    )
+    assert soft.gpu_policy_json(xplan.CLUSTER3)["gpus"] == [5, 6, 7]
+    hosts = {h: True for h in soft.HOSTS} | {
         plan.SOAR: False,
         xplan.CLUSTER5: False,
     }
@@ -400,7 +406,7 @@ def test_reissue_and_repin_move_legacy_queues_off_goncalo(tmp_path, monkeypatch)
     assert store.read_meta(root, "xopt2-s-g").priority == 60
     assert not any(n.startswith("_archived") for n in store.list_queues(root))
     meta = store.read_meta(root, "xopt2-s-g")
-    assert set(meta.defaults["nodes"]) == set(plan.WORKER_HOSTS)
+    assert set(meta.defaults["nodes"]) == set(soft.HOSTS)
     assert meta.defaults["cwd"] == f"/pin/{plan.GONCALO}"
 
     driver._repin(cfg)

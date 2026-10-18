@@ -33,33 +33,54 @@ RUN_SET_IDS: MappingProxyType[str, str] = MappingProxyType(
 GONCALO = xp.GONCALO
 SOAR = xp.SOAR
 HOME_NODE = SOAR
-# goncalo from launch; cluster-3 / cluster-4 joined 2026-10-18 (plan 13 status log).
-WORKER_HOSTS: tuple[str, ...] = (GONCALO, xp.CLUSTER3, xp.CLUSTER4)
+# Worker hosts per channel: goncalo from launch, cluster-3 / cluster-4 from 2026-10-18,
+# soar (hard only) once newdom2 frees it. Soft stays off soar: every soft job queued before
+# then carries a guard naming the other three hosts (plan 13 status log 2026-10-18).
+CHANNEL_HOSTS: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
+    {
+        HARD: (GONCALO, xp.CLUSTER3, xp.CLUSTER4, SOAR),
+        SOFT: (GONCALO, xp.CLUSTER3, xp.CLUSTER4),
+    }
+)
+WORKER_HOSTS: tuple[str, ...] = tuple(
+    dict.fromkeys(h for hosts in CHANNEL_HOSTS.values() for h in hosts)
+)
 HOST_TAG = xp.HOST_TAG
 CLONE_ROOT = xp.CLONE_ROOT
 LOCK_PREFIX = xp.LOCK_PREFIX
 # One pool per channel root on each worker host, on disjoint cards (soft GKD peaks grow
 # after the memory gate's warm-up window: rev2 goncalo OOM, plan 12 status log
 # 2026-10-16 01:29Z). Re-split by policy hot reload once one channel's queues drain
-# (plan §8).
+# (plan §8). soar runs the hard channel on every card.
 GPUS: MappingProxyType[str, tuple[int, ...]] = MappingProxyType(
     {HARD: (0, 1, 2, 3, 4), SOFT: (5, 6, 7)}
 )
+HOST_GPUS: MappingProxyType[str, Mapping[str, tuple[int, ...]]] = MappingProxyType(
+    {SOAR: MappingProxyType({HARD: tuple(range(8))})}
+)
 
 
-def queue_defaults(per_host: Mapping[str, dict]) -> dict:
-    """jobq defaults of a queue every worker host drains.
+def gpus(channel: str, host: str) -> tuple[int, ...]:
+    """Cards of `channel` on `host` (none off the channel's worker hosts)."""
+    if host not in CHANNEL_HOSTS[channel]:
+        return ()
+    return HOST_GPUS.get(host, {}).get(channel, GPUS[channel])
 
-    `per_host` maps each worker host to its code-pin defaults (``cwd`` / env). The
+
+def queue_defaults(channel: str, per_host: Mapping[str, dict]) -> dict:
+    """jobq defaults of a queue every worker host of `channel` drains.
+
+    `per_host` maps each such host to its code-pin defaults (``cwd`` / env). The
     queue-wide ones are goncalo's, whose pools started on jobq code that reads no
     ``nodes`` entry; every host's own are under ``nodes``.
 
     Raises:
-        ValueError: `per_host` misses a worker host.
+        ValueError: `per_host` misses a worker host of `channel`.
     """
-    if missing := set(WORKER_HOSTS) - set(per_host):
+    hosts = CHANNEL_HOSTS[channel]
+    if missing := set(hosts) - set(per_host):
         raise ValueError(f"no pin defaults for {sorted(missing)}")
-    return {**per_host[GONCALO], "nodes": {h: dict(per_host[h]) for h in WORKER_HOSTS}}
+    return {**per_host[GONCALO], "nodes": {h: dict(per_host[h]) for h in hosts}}
 
 
 # ---- roots ----------------------------------------------------------------------------

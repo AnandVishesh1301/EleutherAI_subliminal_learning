@@ -1,4 +1,4 @@
-"""Auto-advancing driver of the `xopt2` soft run set, on soar (workers: `WORKER_HOSTS`).
+"""Auto-advancing driver of the `xopt2` soft run set, on soar (workers: `CHANNEL_HOSTS`).
 
 One `run(cfg)` = one idempotent advance pass:
 
@@ -145,7 +145,9 @@ def _train_submitted(cfg: driver_io.CampaignDriverConfig) -> list[str]:
 def queue_defaults(cfg: driver_io.CampaignDriverConfig) -> dict:
     """jobq defaults binding a queue to every worker host's worktree of the pin."""
     pcfg = pin_config(cfg)
-    return plan.queue_defaults({h: node_pin_defaults(pcfg, h) for h in soft.HOSTS})
+    return plan.queue_defaults(
+        soft.CHANNEL, {h: node_pin_defaults(pcfg, h) for h in soft.HOSTS}
+    )
 
 
 def legacy_open(cfg: driver_io.CampaignDriverConfig, name: str) -> bool:

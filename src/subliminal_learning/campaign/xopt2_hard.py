@@ -25,7 +25,7 @@ from subliminal_learning.jobqueue.model import Job, assert_safe_jobkey
 from subliminal_learning.students.layout import student_run_dir
 
 CHANNEL = plan.HARD
-HOSTS: tuple[str, ...] = plan.WORKER_HOSTS
+HOSTS: tuple[str, ...] = plan.CHANNEL_HOSTS[CHANNEL]
 ROOT = plan.CTRL_ROOTS[CHANNEL]
 LEAF_ROOT = plan.LEAF_ROOTS[CHANNEL]
 QUEUE_ROOT = plan.QUEUE_ROOTS[CHANNEL]
@@ -468,7 +468,7 @@ GPU_POLICY_ENV = xh.GPU_POLICY_ENV
 
 def workers_per_node(host: str) -> int:
     """jobq threads on `host` (0 off the worker hosts)."""
-    return plan.HARD_CAP_PER_GPU * len(plan.GPUS[CHANNEL]) if host in HOSTS else 0
+    return plan.HARD_CAP_PER_GPU * len(plan.gpus(CHANNEL, host))
 
 
 def gpu_policy_json(host: str) -> dict:
@@ -480,7 +480,7 @@ def gpu_policy_json(host: str) -> dict:
     if host not in HOSTS:
         raise ValueError(f"{host} runs no xopt2 hard workers")
     return {
-        "gpus": list(plan.GPUS[CHANNEL]),
+        "gpus": list(plan.gpus(CHANNEL, host)),
         "cap_per_gpu": plan.HARD_CAP_PER_GPU,
         "free_mem_mib": plan.FREE_MEM_MIB,
         "reservation_warmup_s": plan.RESERVATION_WARMUP_S,

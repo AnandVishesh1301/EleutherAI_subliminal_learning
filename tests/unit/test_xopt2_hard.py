@@ -13,6 +13,7 @@ import scripts.sweeps.sweep_xopt2_hard as sweep
 from subliminal_learning.campaign import xopt2_hard as hard
 from subliminal_learning.campaign import xopt2_plan as plan
 from subliminal_learning.campaign import xopt_hard as xh
+from subliminal_learning.campaign import xopt_plan as xp
 from subliminal_learning.jobqueue.model import MAX_JOBKEY_LEN, assert_safe_jobkey
 from subliminal_learning.students.layout import student_param_tag
 
@@ -236,10 +237,15 @@ def test_queues_policy_and_workers():
     )
     assert (
         hard.workers_per_node(plan.GONCALO) == 30
-        and hard.workers_per_node(plan.SOAR) == 0
+        and hard.workers_per_node(plan.SOAR) == 48
+        and hard.workers_per_node(xp.CLUSTER5) == 0
     )
+    assert hard.gpu_policy_json(plan.SOAR)["gpus"] == list(range(8))
+    for host in plan.CHANNEL_HOSTS[plan.SOFT]:
+        assert hard.gpu_policy_json(host)["gpus"] == [0, 1, 2, 3, 4]
+        assert not set(plan.gpus(plan.HARD, host)) & set(plan.gpus(plan.SOFT, host))
     with pytest.raises(ValueError):
-        hard.gpu_policy_json(plan.SOAR)
+        hard.gpu_policy_json(xp.CLUSTER5)
 
 
 def test_paths_read_xopt_inputs_and_write_own_roots():
@@ -313,9 +319,9 @@ def test_run_train_turns_in_training_probes_off(monkeypatch, tmp_path):
 def test_check_worker_host_admits_the_worker_hosts_only(monkeypatch):
     import pipelines.xopt2_hard_cell_pipeline as cellpipe
 
-    for host in plan.WORKER_HOSTS:
+    for host in plan.CHANNEL_HOSTS[plan.HARD]:
         monkeypatch.setattr(cellpipe.socket, "gethostname", lambda h=host: h)
         cellpipe.check_worker_host()
-    monkeypatch.setattr(cellpipe.socket, "gethostname", lambda: plan.SOAR)
-    with pytest.raises(RuntimeError, match="not soar"):
+    monkeypatch.setattr(cellpipe.socket, "gethostname", lambda: xp.CLUSTER5)
+    with pytest.raises(RuntimeError, match="not secret-ord-0"):
         cellpipe.check_worker_host()

@@ -59,7 +59,7 @@ SOURCE_STAGING_DIR = xsoft.STAGING_DIR
 PP1_TEXT_PATH = xsoft.PP1_TEXT_PATH
 CAMPAIGN_STATE_FILE = "xopt2_soft_campaign_state.json"
 CAMPAIGN_DONE_FILE = plan.channel_done_path(CHANNEL).name
-HOSTS: tuple[str, ...] = plan.WORKER_HOSTS
+HOSTS: tuple[str, ...] = plan.CHANNEL_HOSTS[CHANNEL]
 TMUX_SESSION = plan.TMUX_SESSION
 WORKERS_WINDOW = "soft-workers"
 DRIVER_WINDOW = "soft-driver"
@@ -849,7 +849,7 @@ def phase_queues(phase: str, *, late: bool = False) -> tuple[str, ...]:
 
 
 def workers_per_node(host: str) -> int:
-    return plan.SOFT_CAP_PER_GPU * len(plan.GPUS[CHANNEL]) if host in HOSTS else 0
+    return plan.SOFT_CAP_PER_GPU * len(plan.gpus(CHANNEL, host))
 
 
 GPU_POLICY_ENV: MappingProxyType[str, str] = xsoft.GPU_POLICY_ENV
@@ -864,7 +864,7 @@ def gpu_policy_json(host: str) -> dict:
     if host not in HOSTS:
         raise ValueError(f"{host} runs no xopt2 soft workers")
     return {
-        "gpus": list(plan.GPUS[CHANNEL]),
+        "gpus": list(plan.gpus(CHANNEL, host)),
         "cap_per_gpu": plan.SOFT_CAP_PER_GPU,
         "free_mem_mib": plan.FREE_MEM_MIB,
         "reservation_warmup_s": plan.RESERVATION_WARMUP_S,
