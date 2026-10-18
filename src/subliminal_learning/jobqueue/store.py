@@ -268,15 +268,17 @@ def update_queue_node(root: Path, name: str, node: str | None) -> QueueMeta:
 
     Only the queue's home pool serves it, so this hands the queue to another node.
     Refuses while any claim is held, because claims belong to the old node's pool.
+    Unpinning (`node` None) is allowed with claims held: the old pool keeps serving
+    the queue and `steal_stale` never touches another node's claim.
 
     Raises:
-        RuntimeError: The queue still holds claims.
+        RuntimeError: The queue still holds claims and `node` is not None.
     """
     if not queue_exists(root, name):
         raise FileNotFoundError(f"queue {name!r} does not exist under {root}")
     cdir = _claims_dir(root, name)
     held = [d.name for d in cdir.iterdir() if d.is_dir()] if cdir.exists() else []
-    if held:
+    if held and node is not None:
         raise RuntimeError(f"queue {name!r} holds {len(held)} claim(s); drain it first")
     meta = read_meta(root, name)
     updated = QueueMeta(

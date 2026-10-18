@@ -1,4 +1,4 @@
-"""Auto-advancing driver of the `xopt2` soft run set, on soar (workers on goncalo).
+"""Auto-advancing driver of the `xopt2` soft run set, on soar (workers: `WORKER_HOSTS`).
 
 One `run(cfg)` = one idempotent advance pass:
 
@@ -33,6 +33,10 @@ Each phase's tables and claims are built in memory and written with a manifest l
 
 Run-set logs / results / state live under `xopt2_plan.run_set_dir(SOFT)` (ssd-2); the run-set
 card the sweeps write (the code pin) and every leaf live under the cold-1 leaf root.
+
+Queues are unpinned (every worker host drains them, `xopt2_plan.queue_defaults`), except a
+queue still holding a legacy-guard job that is not done: it stays on goncalo
+(`reissue_legacy` rebuilds the queues none of whose jobs started).
 """
 
 from __future__ import annotations
@@ -138,6 +142,21 @@ def _train_submitted(cfg: driver_io.CampaignDriverConfig) -> list[str]:
     return [n for n in _submitted(cfg) if soft.late_dep(n) is None]
 
 
+def queue_defaults(cfg: driver_io.CampaignDriverConfig) -> dict:
+    """jobq defaults binding a queue to every worker host's worktree of the pin."""
+    pcfg = pin_config(cfg)
+    return plan.queue_defaults({h: node_pin_defaults(pcfg, h) for h in soft.HOSTS})
+
+
+def legacy_open(cfg: driver_io.CampaignDriverConfig, name: str) -> bool:
+    """Whether `name` holds a legacy-guard (goncalo-only) job that is not done."""
+    return any(
+        job.cmd.startswith(soft.LEGACY_HOST_GUARD)
+        and store.job_state(cfg.queue_root, name, job) != store.DONE
+        for job in store.load_jobs(cfg.queue_root, name)
+    )
+
+
 def registered(
     cfg: driver_io.CampaignDriverConfig,
 ) -> dict[str, tuple[soft.SoftLeaf, str]]:
@@ -186,8 +205,8 @@ def _submit_or_append(
             name,
             jobs,
             depends_on=[dep] if dep else None,
-            node=soft.HOST,
-            defaults=node_pin_defaults(pin_config(cfg), soft.HOST),
+            unpinned=True,
+            defaults=queue_defaults(cfg),
         )
         return len(jobs)
     have = {j.jobkey for j in store.load_jobs(cfg.queue_root, name)}
@@ -316,11 +335,12 @@ def _register(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
 
 
 def _repin(cfg: driver_io.CampaignDriverConfig) -> str | None:
-    """Move every queue with work left (or failures) to the campaign pin."""
+    """Move every queue with work left (or failures) to the campaign pin, unpinned
+    unless it holds a legacy-guard job that is not done (then on goncalo)."""
     pcfg = pin_config(cfg)
     if cfg.dry_run or read_run_set_card(pcfg.run_set_root) is None:
         return None
-    want = node_pin_defaults(pcfg, soft.HOST)
+    want = queue_defaults(cfg)
     n = 0
     for name in _submitted(cfg):
         if (
@@ -328,10 +348,103 @@ def _repin(cfg: driver_io.CampaignDriverConfig) -> str | None:
             and not store.queue_status(cfg.queue_root, name)["failed"]
         ):
             continue
-        if store.read_meta(cfg.queue_root, name).defaults.get("cwd") != want["cwd"]:
-            store.update_queue_defaults(cfg.queue_root, name, want)
-            n += 1
+        meta = store.read_meta(cfg.queue_root, name)
+        node = plan.GONCALO if legacy_open(cfg, name) else None
+        if meta.node == node and all(
+            meta.defaults.get(k) == want[k] for k in ("cwd", "nodes")
+        ):
+            continue
+        store.update_queue_defaults(cfg.queue_root, name, want)
+        if meta.node != node:
+            store.update_queue_node(cfg.queue_root, name, node)
+        n += 1
     return f"repin(queues={n})" if n else None
+
+
+def archive_path(cfg: driver_io.CampaignDriverConfig, name: str, stamp: str) -> Path:
+    """Where `reissue_legacy` moves queue `name` (no pool lists a nested dir)."""
+    return Path(cfg.queue_root) / "_archived" / f"_archived_{name}_{stamp}"
+
+
+def reissue_legacy(cfg: driver_io.CampaignDriverConfig) -> dict:
+    """Rebuild every queue that holds a legacy-guard job and in which none started.
+
+    Each such queue is built anew under ``_archived/_staging_<UTC>`` (same name,
+    priority and dependencies, unpinned, jobs in the same order: legacy ones rebuilt
+    by `xopt2_soft.reissued_job`, the rest unchanged), then two renames move the old
+    queue to `archive_path` and the new one into its place. A queue with a claim or
+    a result keeps its jobs (`_repin` unpins it once no legacy job is undone). The
+    plan is logged before the first rename, the outcome after the last.
+
+    Returns:
+        ``{"reissued": {queue: n_jobs}, "kept": [queue], "archive": {queue: path}}``.
+
+    Raises:
+        CampaignGateError: Off the home node, without a run-set card, a run-set pin
+            without the worker-host spread, or a worker host with a soft policy file
+            in the queue root and no stop sentinel.
+    """
+    root = Path(cfg.queue_root)
+    problems = []
+    if store.this_host() != plan.HOME_NODE:
+        problems.append(f"run on {plan.HOME_NODE}, not {store.this_host()}")
+    if read_run_set_card(pin_config(cfg).run_set_root) is None:
+        problems.append("the run set has no card")
+    else:
+        pin = current_pin(pin_config(cfg))
+        code = pin.root / "src/subliminal_learning/campaign/xopt2_soft.py"
+        if "LEGACY_HOST_GUARD" not in code.read_text():
+            problems.append(f"pin {pin.sha[:12]} predates the worker-host spread")
+    for host in soft.HOSTS:
+        policy = root / f"gpu_policy.{host}.json"
+        if policy.exists() and not store.stop_path(root, host).exists():
+            problems.append(f"{host}'s soft pool is not stopped")
+    if problems:
+        raise CampaignGateError("; ".join(problems))
+
+    def rebuilt(job: Job) -> Job:
+        legacy = job.cmd.startswith(soft.LEGACY_HOST_GUARD)
+        return soft.reissued_job(job) if legacy else job
+
+    defaults = queue_defaults(cfg)
+    stamp = store.utc_stamp()
+    staging = root / "_archived" / f"_staging_{stamp}"
+    plans: dict[str, tuple[store.QueueMeta, list[Job]]] = {}
+    out: dict = {"reissued": {}, "kept": [], "archive": {}}
+    for name in _submitted(cfg):
+        jobs = store.load_jobs(root, name)
+        if not any(j.cmd.startswith(soft.LEGACY_HOST_GUARD) for j in jobs):
+            continue
+        if store.queue_status(root, name)["pending"] != len(jobs):
+            out["kept"].append(name)
+            continue
+        plans[name] = (store.read_meta(root, name), [rebuilt(j) for j in jobs])
+        out["reissued"][name] = len(jobs)
+        out["archive"][name] = str(archive_path(cfg, name, stamp))
+    if cfg.dry_run:
+        return out
+    atomic_write_json(cfg.logs_dir / f"reissue_legacy_{stamp}.plan.json", out)
+    for name, (meta, jobs) in plans.items():
+        if store.queue_status(root, name)["pending"] != len(jobs):
+            out["kept"].append(name)
+            del out["reissued"][name], out["archive"][name]
+            continue
+        store.create_queue(
+            staging,
+            name,
+            depends_on=list(meta.depends_on),
+            node=None,
+            priority=meta.priority,
+            strict_deps=meta.strict_deps,
+            defaults=defaults,
+        )
+        store.append_jobs(staging, name, jobs)
+        dest = archive_path(cfg, name, stamp)
+        store.queue_dir(root, name).rename(dest)
+        store.queue_dir(staging, name).rename(store.queue_dir(root, name))
+        logger.info("reissued {} ({} jobs); old queue at {}", name, len(jobs), dest)
+    atomic_write_json(cfg.logs_dir / f"reissue_legacy_{stamp}.json", out)
+    return out
 
 
 def _requeue_and_holes(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:

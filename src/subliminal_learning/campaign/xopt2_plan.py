@@ -8,6 +8,7 @@ place (`xopt_plan` roots); `xopt2` writes only under its own roots.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -32,16 +33,34 @@ RUN_SET_IDS: MappingProxyType[str, str] = MappingProxyType(
 GONCALO = xp.GONCALO
 SOAR = xp.SOAR
 HOME_NODE = SOAR
-WORKER_HOSTS: tuple[str, ...] = (GONCALO,)
+# goncalo from launch; cluster-3 / cluster-4 joined 2026-10-18 (plan 13 status log).
+WORKER_HOSTS: tuple[str, ...] = (GONCALO, xp.CLUSTER3, xp.CLUSTER4)
 HOST_TAG = xp.HOST_TAG
 CLONE_ROOT = xp.CLONE_ROOT
 LOCK_PREFIX = xp.LOCK_PREFIX
-# One pool per channel root on goncalo, on disjoint cards (soft GKD peaks grow after the
-# memory gate's warm-up window: rev2 goncalo OOM, plan 12 status log 2026-10-16 01:29Z).
-# Re-split by policy hot reload once one channel's queues drain (plan §8).
+# One pool per channel root on each worker host, on disjoint cards (soft GKD peaks grow
+# after the memory gate's warm-up window: rev2 goncalo OOM, plan 12 status log
+# 2026-10-16 01:29Z). Re-split by policy hot reload once one channel's queues drain
+# (plan §8).
 GPUS: MappingProxyType[str, tuple[int, ...]] = MappingProxyType(
     {HARD: (0, 1, 2, 3, 4), SOFT: (5, 6, 7)}
 )
+
+
+def queue_defaults(per_host: Mapping[str, dict]) -> dict:
+    """jobq defaults of a queue every worker host drains.
+
+    `per_host` maps each worker host to its code-pin defaults (``cwd`` / env). The
+    queue-wide ones are goncalo's, whose pools started on jobq code that reads no
+    ``nodes`` entry; every host's own are under ``nodes``.
+
+    Raises:
+        ValueError: `per_host` misses a worker host.
+    """
+    if missing := set(WORKER_HOSTS) - set(per_host):
+        raise ValueError(f"no pin defaults for {sorted(missing)}")
+    return {**per_host[GONCALO], "nodes": {h: dict(per_host[h]) for h in WORKER_HOSTS}}
+
 
 # ---- roots ----------------------------------------------------------------------------
 # Control (config, queue, run-set logs / results): ssd-2, fast from goncalo and soar

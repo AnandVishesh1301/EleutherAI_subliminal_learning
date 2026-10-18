@@ -873,6 +873,39 @@ def test_cwd_precedence_job_over_queue_default(tmp_path):
     assert _job_ran_in(tmp_path, "q", "uses_own") == job_dir.resolve()
 
 
+def test_node_defaults_override_queue_cwd_and_env_on_their_node_only(tmp_path):
+    """``defaults.nodes[<host>]`` binds an unpinned queue to each node's own clone."""
+    base, mine, other = (tmp_path / d for d in ("base", "mine", "other"))
+    for d in (base, mine, other):
+        d.mkdir()
+    store.create_queue(
+        tmp_path,
+        "q",
+        defaults={
+            "cwd": str(base),
+            "env": {"PIN_ROOT": "base", "PIN_SHA": "s"},
+            "nodes": {
+                "testnode": {"cwd": str(mine), "env": {"PIN_ROOT": "mine"}},
+                "elsewhere": {"cwd": str(other), "env": {"PIN_ROOT": "other"}},
+            },
+        },
+    )
+    store.append_jobs(tmp_path, "q", [Job("j", 'echo "$PIN_ROOT/$PIN_SHA"; pwd')])
+    run_pool(
+        tmp_path,
+        workers=1,
+        gpu=FakeGpuManager(),
+        hostname="testnode",
+        poll_s=0.01,
+        gpu_wait_s=0.01,
+    )
+
+    assert _job_ran_in(tmp_path, "q", "j") == mine.resolve()
+    rp = tmp_path / "q" / "results" / f"{sanitize_jobkey('j')}.json"
+    log = Path(json.loads(rp.read_text())["log"]).read_text().splitlines()
+    assert log[-2] == "mine/s"
+
+
 def test_cwd_falls_back_to_repo_root_when_unset(tmp_path):
     """With neither a per-job nor a queue-level cwd, jobs run in the claiming checkout."""
     store.create_queue(tmp_path, "q")
@@ -2077,6 +2110,8 @@ def test_update_queue_node_repins_only_a_claim_free_queue(tmp_path: Path) -> Non
     assert store.claim_next(root, name, "host-b", os.getpid()) is not None
     with pytest.raises(RuntimeError, match="holds 1 claim"):
         store.update_queue_node(root, name, "host-a")
+    assert store.update_queue_node(root, name, None).node is None
+    assert store.open_claims(root, name, "host-b")
 
 
 def test_update_queue_depends_on_gates_a_live_pool_and_keeps_the_rest(

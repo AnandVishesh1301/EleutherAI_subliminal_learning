@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launcher: the `xopt2` soft channel on THIS host, as one window of the campaign's tmux
-# session `xopt2` (created when missing). On the worker host (goncalo) window
+# session `xopt2` (created when missing). On a worker host (xopt2_soft.HOSTS) window
 # `soft-workers` = the jobq pool loop on the soft queue root (ssd-2; this host's policy
 # file holds the soft cards, xopt2_plan.GPUS[soft]); it exits once the channel done marker
 # exists. With --driver (home node soar only) window `soft-driver` = the restarting watch
@@ -54,7 +54,7 @@ uv sync --frozen --quiet
 PLAN="from subliminal_learning.campaign import xopt2_plan as p, xopt2_soft as s"
 read -r LOCK SESSION WORKERS PATHS HOME_NODE ROOT DONE WIN_WORKERS WIN_DRIVER < <(uv run python -c "$PLAN;import socket;n=socket.gethostname();print(p.LOCK_PREFIX.get(n, '-'), p.TMUX_SESSION, s.workers_per_node(n), s.PATHS_CONFIG_PATH, p.HOME_NODE, s.QUEUE_ROOT, p.channel_done_path(s.CHANNEL), s.WORKERS_WINDOW, s.DRIVER_WINDOW)")
 if [[ "$WORKERS" == "0" && "$DRIVER" != "--driver" ]]; then
-  echo "ERROR: $HOST runs no xopt2 soft workers (worker host: goncalo-temp-1)."
+  echo "ERROR: $HOST runs no xopt2 soft workers (not an xopt2 worker host)."
   exit 1
 fi
 if [[ "$DRIVER" == "--driver" && "$HOST" != "$HOME_NODE" ]]; then

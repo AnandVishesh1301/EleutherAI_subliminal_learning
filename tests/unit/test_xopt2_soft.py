@@ -4,6 +4,7 @@ import shlex
 import subprocess
 import sys
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -19,9 +20,11 @@ from subliminal_learning.campaign import xopt_plan as xplan
 from subliminal_learning.campaign import xopt_soft as xsoft
 from subliminal_learning.gkd.config import load_gkd_training
 from subliminal_learning.gkd.layout import gkd_tag, parse_optim_slug, train_tag_kwargs
-from subliminal_learning.jobqueue.model import MAX_JOBKEY_LEN
+from subliminal_learning.jobqueue import store
+from subliminal_learning.jobqueue.model import MAX_JOBKEY_LEN, Job
 from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
 from subliminal_learning.training.run_set import is_valid_run_set_id
+from subliminal_learning.utils import code_pin_io
 
 LAUNCH_COUNTS = {"v": 24, "w": 76, "o": 96, "g": 1320}
 
@@ -294,6 +297,131 @@ def test_commands_queues_and_policy():
     assert policy["env"]["HF_HOME"] == soft.paths_config_doc()["hf_cache_root"]
     with pytest.raises(ValueError):
         soft.gpu_policy_json(plan.SOAR)
+
+
+def _legacy(job: Job) -> Job:
+    return replace(job, cmd=soft.LEGACY_HOST_GUARD + job.cmd[len(soft.HOST_GUARD) :])
+
+
+O_LEAF = dict(tier="o", tstep=plan.FINAL, sstep=plan.FINAL, arm="full-muon-nh", lr=2e-6)
+
+
+def test_host_guard_admits_every_worker_host_only():
+    hosts = {h: True for h in plan.WORKER_HOSTS} | {
+        plan.SOAR: False,
+        xplan.CLUSTER5: False,
+    }
+    for host, ok in hosts.items():
+        cmd = soft.HOST_GUARD.replace("$(hostname)", host) + " && echo ran"
+        out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+        assert (out.returncode == 0 and out.stdout == "ran\n") is ok, host
+        assert (soft.workers_per_node(host) == 6) is ok
+
+
+def test_reissued_job_swaps_only_the_host_guard():
+    lf = _leaf(**O_LEAF)
+    for new in (soft.train_job(lf), soft.late_job(lf)):
+        assert soft.reissued_job(_legacy(new)) == new
+        with pytest.raises(ValueError, match="beyond"):
+            soft.reissued_job(replace(_legacy(new), cmd=_legacy(new).cmd + " --x"))
+        with pytest.raises(ValueError, match="beyond"):
+            soft.reissued_job(replace(_legacy(new), mem_mib=1))
+        with pytest.raises(ValueError, match="no legacy"):
+            soft.reissued_job(new)
+
+
+def test_reissue_and_repin_move_legacy_queues_off_goncalo(tmp_path, monkeypatch):
+    monkeypatch.setattr(driver, "read_run_set_card", lambda root: {"git_sha": "x"})
+    monkeypatch.setattr(
+        driver,
+        "node_pin_defaults",
+        lambda cfg, host: {"cwd": f"/pin/{host}", "env": {"SL_CODE_ROOT": host}},
+    )
+    monkeypatch.setattr(store, "this_host", lambda: plan.HOME_NODE)
+    old_pin = tmp_path / "old_pin" / "src/subliminal_learning/campaign/xopt2_soft.py"
+    old_pin.parent.mkdir(parents=True)
+    old_pin.write_text("HOST_GUARD = f'test \"$(hostname)\" = {HOST}'\n")
+    pin = code_pin_io.CodePin(sha="x" * 40, root=tmp_path / "old_pin")
+    monkeypatch.setattr(driver, "current_pin", lambda cfg: pin)
+    cfg = driver.driver_config(
+        output_root=tmp_path / "out", queue_root=tmp_path / "q", repo_root=Path.cwd()
+    )
+    cfg.logs_dir.mkdir(parents=True)
+    root = cfg.queue_root
+    g, o1, o2 = _leaf(), _leaf(**O_LEAF), _leaf(**O_LEAF, kind=soft.KIND_PLACEBO)
+    legacy = {"xopt2-s-g": [g], "xopt2-s-walk-o": [o1, o2]}
+    for name, leaves in legacy.items():
+        late = soft.late_queue(name)
+        store.create_queue(root, name, node=plan.GONCALO, priority=60)
+        store.create_queue(root, late, node=plan.GONCALO, depends_on=[name])
+        store.append_jobs(root, name, [_legacy(soft.train_job(lf)) for lf in leaves])
+        store.append_jobs(root, late, [_legacy(soft.late_job(lf)) for lf in leaves])
+    fresh = soft.late_job(_leaf(**{**O_LEAF, "lr": 5e-6}))
+    store.append_jobs(root, "xopt2-s-late-walk-o", [fresh])
+    done = store.load_jobs(root, "xopt2-s-walk-o")[0]
+    store.record_result(
+        root,
+        "xopt2-s-walk-o",
+        done,
+        rc=0,
+        node=plan.GONCALO,
+        gpu=5,
+        start_utc="",
+        end_utc="",
+        log="",
+        attempt=1,
+    )
+    (root / f"gpu_policy.{plan.GONCALO}.json").write_text("{}")
+    with pytest.raises(driver.CampaignGateError, match="not stopped.*|.*predates"):
+        driver.reissue_legacy(cfg)
+    store.stop_path(root, plan.GONCALO).touch()
+    with pytest.raises(driver.CampaignGateError, match="predates the worker-host"):
+        driver.reissue_legacy(cfg)
+    monkeypatch.setattr(
+        driver, "current_pin", lambda cfg: replace(pin, root=Path.cwd())
+    )
+
+    out = driver.reissue_legacy(cfg)
+    assert out["kept"] == ["xopt2-s-walk-o"]
+    assert out["reissued"] == {
+        "xopt2-s-g": 1,
+        "xopt2-s-late-g": 1,
+        "xopt2-s-late-walk-o": 3,
+    }
+    assert store.load_jobs(root, "xopt2-s-late-walk-o")[-1] == fresh
+    assert len(list(cfg.logs_dir.glob("reissue_legacy_*.plan.json"))) == 1
+    for name, path in out["archive"].items():
+        assert Path(path).parent == root / "_archived"
+        assert store.read_meta(root, name).node is None
+        assert all(
+            j.cmd.startswith(soft.HOST_GUARD) for j in store.load_jobs(root, name)
+        )
+    assert store.read_meta(root, "xopt2-s-late-g").depends_on == ["xopt2-s-g"]
+    assert store.read_meta(root, "xopt2-s-g").priority == 60
+    assert not any(n.startswith("_archived") for n in store.list_queues(root))
+    meta = store.read_meta(root, "xopt2-s-g")
+    assert set(meta.defaults["nodes"]) == set(plan.WORKER_HOSTS)
+    assert meta.defaults["cwd"] == f"/pin/{plan.GONCALO}"
+
+    driver._repin(cfg)
+    assert store.read_meta(root, "xopt2-s-walk-o").node == plan.GONCALO
+    rest = store.load_jobs(root, "xopt2-s-walk-o")[1]
+    store.record_result(
+        root,
+        "xopt2-s-walk-o",
+        rest,
+        rc=0,
+        node=plan.GONCALO,
+        gpu=5,
+        start_utc="",
+        end_utc="",
+        log="",
+        attempt=1,
+    )
+    rung = soft.train_job(_leaf(**{**O_LEAF, "lr": 5e-6}))
+    store.append_jobs(root, "xopt2-s-walk-o", [rung])
+    assert driver._repin(cfg) == "repin(queues=1)"
+    assert store.read_meta(root, "xopt2-s-walk-o").node is None
 
 
 def test_roots_and_staging_needs():

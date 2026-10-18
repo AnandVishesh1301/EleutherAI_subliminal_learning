@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Launcher: xopt2 hard channel on THIS host, as one window of the campaign's tmux session
-# `xopt2` (created when missing; the soft channel adds its own windows). On the worker host
-# (xopt2_hard.HOSTS: goncalo) window `hard-workers` = the jobq pool loop on the hard queue
+# `xopt2` (created when missing; the soft channel adds its own windows). On a worker host
+# (xopt2_hard.HOSTS) window `hard-workers` = the jobq pool loop on the hard queue
 # root (scripts/jobq_pool_loop.sh: idles under a stop sentinel, exits on the channel's
 # CAMPAIGN_DONE); with --driver (home node soar only) window `hard-driver` = the
 # restarting watch loop. Run from <main clone>/.code_pins/<sha>. No wall deadline.
@@ -11,9 +11,9 @@
 # a SHA without the optimizer layer (CUSTOM_OPTIMS) or xopt's `late_evals`; SL_JOBQ_LOCK_PREFIX
 # set to anything but the plan's prefix for this host; a missing paths YAML
 # (scripts.stage_xopt2_hard_assets writes it); this channel's window already in the
-# session, a live pool on the hard root, or a stop sentinel; on the worker host, a paused
-# xopt hard pool that is no longer paused (no stop sentinel, or a live worker on the xopt
-# hard queue root: both pools share the slot-lock prefix). Writes only this host's
+# session, a live pool on the hard root, or a stop sentinel; on a worker host, a paused
+# xopt pool that is no longer paused (a live worker on an xopt queue root, or a policy
+# file there without a stop sentinel: the pools share the slot-lock prefix). Writes only this host's
 # gpu_policy file in the hard queue root. Touches no other queue root.
 #
 # Usage: bash scripts/launch_xopt2_hard_campaign.sh <sha> [--driver]
@@ -55,11 +55,11 @@ fi
 uv sync --frozen --quiet
 
 PLAN="from subliminal_learning.campaign import xopt2_hard as h, xopt2_plan as p, xopt_plan as xp"
-read -r LOCK SESSION WORKERS PATHS HOME_NODE ROOT DONE XOPT_ROOT < <(uv run python -c "$PLAN;import socket;n=socket.gethostname();print(p.LOCK_PREFIX.get(n, '-'), p.TMUX_SESSION, h.workers_per_node(n), h.PATHS_CONFIG_PATH, p.HOME_NODE, h.QUEUE_ROOT, p.channel_done_path(h.CHANNEL), xp.QUEUE_ROOTS[xp.HARD])")
+read -r LOCK SESSION WORKERS PATHS HOME_NODE ROOT DONE XOPT_ROOTS < <(uv run python -c "$PLAN;import socket;n=socket.gethostname();print(p.LOCK_PREFIX.get(n, '-'), p.TMUX_SESSION, h.workers_per_node(n), h.PATHS_CONFIG_PATH, p.HOME_NODE, h.QUEUE_ROOT, p.channel_done_path(h.CHANNEL), ','.join(str(r) for r in xp.QUEUE_ROOTS.values()))")
 WIN_WORKERS="hard-workers"
 WIN_DRIVER="hard-driver"
 if [[ "$WORKERS" == "0" && "$DRIVER" != "--driver" ]]; then
-  echo "ERROR: $HOST runs no xopt2 hard workers (worker host: goncalo-temp-1)."
+  echo "ERROR: $HOST runs no xopt2 hard workers (not an xopt2 worker host)."
   exit 1
 fi
 if [[ "$DRIVER" == "--driver" && "$HOST" != "$HOME_NODE" ]]; then
@@ -114,10 +114,14 @@ if [[ "$WORKERS" != "0" ]]; then
     echo "ERROR: a jobq worker is already running on $ROOT on this host."
     exit 1
   fi
-  if [[ ! -e "$XOPT_ROOT/stop.$HOST" ]] || pgrep -af "scripts.jobq work --root $XOPT_ROOT " >/dev/null 2>&1; then
-    echo "ERROR: the paused xopt hard pool on $XOPT_ROOT must stay paused (stop.$HOST present, no live worker)."
-    exit 1
-  fi
+  IFS=',' read -r -a XOPT_ROOT_LIST <<< "$XOPT_ROOTS"
+  for XR in "${XOPT_ROOT_LIST[@]}"; do
+    if pgrep -af "scripts.jobq work --root $XR " >/dev/null 2>&1 \
+      || [[ -e "$XR/gpu_policy.$HOST.json" && ! -e "$XR/stop.$HOST" ]]; then
+      echo "ERROR: the paused xopt pool on $XR must stay paused (stop.$HOST present, no live worker)."
+      exit 1
+    fi
+  done
   uv run python -c "from pipelines.xopt2_hard_campaign_pipeline import write_policy;import socket;print('policy', write_policy(socket.gethostname()))"
   open_window "$WIN_WORKERS"
   tmux send-keys -t "=$SESSION:=$WIN_WORKERS" \

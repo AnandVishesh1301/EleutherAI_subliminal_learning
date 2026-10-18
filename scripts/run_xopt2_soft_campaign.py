@@ -1,7 +1,8 @@
-"""CLI for the `xopt2` soft driver: plan / status / advance / watch (soar only)."""
+"""CLI for the `xopt2` soft driver: plan / status / advance / watch / reissue-legacy (soar only)."""
 
 from __future__ import annotations
 
+import subprocess
 import time
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from pipelines.xopt2_soft_campaign_pipeline import (
     CampaignGateError,
     driver_config,
     planned_queue_counts,
+    reissue_legacy,
     run,
     status,
 )
@@ -129,6 +131,32 @@ def watch(
             logger.info("xopt2 soft run set finalized")
             return
         time.sleep(interval)
+
+
+@app.command("reissue-legacy")
+def reissue_legacy_cmd(
+    code_sha: str = typer.Option(None, help=_CODE_SHA_HELP),
+    dry_run: bool = False,
+) -> None:
+    """Rebuild the not-started queues of goncalo-only jobs for every worker host (soft
+    pools stopped, no soft driver running)."""
+    load_dotenv()
+    configure_loguru()
+    live = subprocess.run(
+        ["pgrep", "-f", "scripts.run_xopt2_soft_campaign (watch|advance)"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.split()
+    if live:
+        logger.error("a soft driver is running (pids {}); stop it first", live)
+        raise typer.Exit(code=2)
+    try:
+        out = reissue_legacy(_cfg(dry_run=dry_run, code_sha=code_sha))
+    except CampaignGateError as err:
+        logger.error("gate failed: {}", err)
+        raise typer.Exit(code=2) from err
+    typer.echo(yaml.safe_dump(out, sort_keys=False))
 
 
 if __name__ == "__main__":

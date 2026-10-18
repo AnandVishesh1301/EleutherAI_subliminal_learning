@@ -294,7 +294,7 @@ def test_run_train_turns_in_training_probes_off(monkeypatch, tmp_path):
         seen["cfg"] = cfg
         raise _Stop
 
-    monkeypatch.setattr(cellpipe.xcell, "check_host", lambda host: None)
+    monkeypatch.setattr(cellpipe.socket, "gethostname", lambda: plan.GONCALO)
     monkeypatch.setattr(cellpipe, "context", lambda: (object(), xh.HUB_ORG))
     monkeypatch.setattr(cellpipe.xcell, "_check_pool", lambda c, n: tmp_path)
     monkeypatch.setattr(
@@ -308,3 +308,14 @@ def test_run_train_turns_in_training_probes_off(monkeypatch, tmp_path):
         cellpipe.run_train(cell, "cpu")
     assert seen["cfg"].probe_every == 0
     assert seen["cfg"].probe_dense_every == 0
+
+
+def test_check_worker_host_admits_the_worker_hosts_only(monkeypatch):
+    import pipelines.xopt2_hard_cell_pipeline as cellpipe
+
+    for host in plan.WORKER_HOSTS:
+        monkeypatch.setattr(cellpipe.socket, "gethostname", lambda h=host: h)
+        cellpipe.check_worker_host()
+    monkeypatch.setattr(cellpipe.socket, "gethostname", lambda: plan.SOAR)
+    with pytest.raises(RuntimeError, match="not soar"):
+        cellpipe.check_worker_host()

@@ -14,6 +14,7 @@ one). Plan: `.claude/plans/blogpost/13_xopt2_lr_sweep_new_optimizers.plan.md`.
 
 from __future__ import annotations
 
+import socket
 from dataclasses import replace
 
 from loguru import logger
@@ -41,6 +42,17 @@ def context() -> tuple[PathsConfig, str]:
     return cfg.paths, cfg.model.hub_org
 
 
+def check_worker_host() -> None:
+    """Refuse to run off the worker hosts.
+
+    Raises:
+        RuntimeError: This machine is not an `xopt2` worker host.
+    """
+    here = socket.gethostname()
+    if here not in hard.HOSTS:
+        raise RuntimeError(f"xopt2 hard cells run on {hard.HOSTS}, not {here}")
+
+
 def run_train(cell: hard.Cell, device: str) -> dict:
     """Distil one student, then pp1-probe and prob-score it.
 
@@ -54,7 +66,7 @@ def run_train(cell: hard.Cell, device: str) -> dict:
 
     from subliminal_learning.utils.io import file_sha256
 
-    xcell.check_host(cell.host)
+    check_worker_host()
     paths, hub_org = context()
     pool = xcell._check_pool(cell, hard.N_PROMPTS)
     staged, current = (
@@ -120,7 +132,7 @@ def run_late(cell: hard.Cell, device: str) -> None:
     Raises:
         FileNotFoundError: The student or its current pp1 record is missing.
     """
-    xcell.check_host(cell.host)
+    check_worker_host()
     paths, hub_org = context()
     xcell.late_evals(
         paths,

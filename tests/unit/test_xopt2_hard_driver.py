@@ -5,6 +5,7 @@ finalize, disk_low hold and failed decision leaves (fake jobs, temp roots, no GP
 from __future__ import annotations
 
 import json
+import os
 import shlex
 from collections import Counter
 from pathlib import Path
@@ -21,6 +22,7 @@ from subliminal_learning.campaign import xopt2_hard as hard
 from subliminal_learning.campaign import xopt2_plan as plan
 from subliminal_learning.campaign import xopt_hard as xh
 from subliminal_learning.jobqueue import store
+from subliminal_learning.jobqueue.model import Job
 
 REPO = Path(__file__).resolve().parents[2]
 PY, PY115 = hard.PY_FINAL, hard.PY_SECOND
@@ -166,6 +168,9 @@ def test_driver_runs_the_channel_to_done(campaign):
     res = driver.run(cfg)
     assert any(f.startswith("submit") for f in res.fired)
     assert len(_queue_cells(cfg, "v")) == 6 and len(_queue_cells(cfg, "w")) == 24 - 6
+    for name in store.list_queues(cfg.queue_root):
+        meta = store.read_meta(cfg.queue_root, name)
+        assert meta.node is None and set(meta.defaults["nodes"]) == set(hard.HOSTS)
 
     wk = (hard.train_queue("wk"),)
     for _ in range(12):
@@ -263,6 +268,26 @@ def test_driver_runs_the_channel_to_done(campaign):
     before = (results / "claims_p3.json").read_text()
     driver.run(cfg)
     assert (results / "claims_p3.json").read_text() == before
+
+
+def test_repin_unpins_a_goncalo_queue_with_live_claims(campaign, monkeypatch):
+    cfg = campaign
+    monkeypatch.setattr(driver, "read_run_set_card", lambda root: {"git_sha": "x"})
+    name = hard.train_queue("w")
+    store.create_queue(
+        cfg.queue_root, name, node=plan.GONCALO, defaults={"cwd": "/old"}
+    )
+    store.append_jobs(cfg.queue_root, name, [Job("a", "true"), Job("b", "true")])
+    assert store.claim_next(cfg.queue_root, name, plan.GONCALO, os.getpid())
+    assert driver._repin(cfg) == "repin(queues=1)"
+    meta = store.read_meta(cfg.queue_root, name)
+    want = driver.queue_defaults(cfg)
+    assert meta.node is None
+    assert (
+        meta.defaults["cwd"] == want["cwd"] and meta.defaults["nodes"] == want["nodes"]
+    )
+    assert store.open_claims(cfg.queue_root, name, plan.GONCALO)
+    assert driver._repin(cfg) is None
 
 
 def test_disk_low_holds_every_new_submission(campaign, monkeypatch):

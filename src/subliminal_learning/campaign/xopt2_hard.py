@@ -25,7 +25,6 @@ from subliminal_learning.jobqueue.model import Job, assert_safe_jobkey
 from subliminal_learning.students.layout import student_run_dir
 
 CHANNEL = plan.HARD
-HOST = plan.GONCALO
 HOSTS: tuple[str, ...] = plan.WORKER_HOSTS
 ROOT = plan.CTRL_ROOTS[CHANNEL]
 LEAF_ROOT = plan.LEAF_ROOTS[CHANNEL]
@@ -212,8 +211,9 @@ class Cell:
         return self.tier
 
     @property
-    def host(self) -> str:
-        return HOST
+    def host(self) -> None:
+        """None: any worker host may train the cell."""
+        return None
 
     @property
     def cross_base(self) -> bool:

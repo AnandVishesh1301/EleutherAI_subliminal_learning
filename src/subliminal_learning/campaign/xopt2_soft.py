@@ -59,7 +59,7 @@ SOURCE_STAGING_DIR = xsoft.STAGING_DIR
 PP1_TEXT_PATH = xsoft.PP1_TEXT_PATH
 CAMPAIGN_STATE_FILE = "xopt2_soft_campaign_state.json"
 CAMPAIGN_DONE_FILE = plan.channel_done_path(CHANNEL).name
-HOST = plan.GONCALO
+HOSTS: tuple[str, ...] = plan.WORKER_HOSTS
 TMUX_SESSION = plan.TMUX_SESSION
 WORKERS_WINDOW = "soft-workers"
 DRIVER_WINDOW = "soft-driver"
@@ -682,7 +682,9 @@ def nonfinite_loss(output: str) -> tuple[int, str] | None:
 
 # ---- commands -------------------------------------------------------------------------------
 
-HOST_GUARD = f'test "$(hostname)" = {HOST}'
+HOST_GUARD = f'case "$(hostname)" in {"|".join(HOSTS)}) ;; *) false ;; esac'
+# Guard of the jobs submitted before cluster-3 / cluster-4 joined (goncalo only).
+LEGACY_HOST_GUARD = f'test "$(hostname)" = {plan.GONCALO}'
 _FORBIDDEN: tuple[str, ...] = ("angela", "--force")
 
 
@@ -785,7 +787,8 @@ def late_cmd(leaf: SoftLeaf) -> str:
 
 
 # ---- queues, jobs, policy -----------------------------------------------------------------
-# One host (goncalo); every queue is pinned to it in the soft channel's own queue root.
+# Queues in the soft channel's own queue root, drained by every worker host (a queue still
+# holding a legacy-guard job stays pinned to goncalo until that job is done).
 # Routes: a tier's own queue, `walk-<tier>` (walk rungs after the initial rates) and
 # `down-<tier>` (step-down rungs of fixed-rate groups).
 
@@ -846,19 +849,19 @@ def phase_queues(phase: str, *, late: bool = False) -> tuple[str, ...]:
 
 
 def workers_per_node(host: str) -> int:
-    return plan.SOFT_CAP_PER_GPU * len(plan.GPUS[CHANNEL]) if host == HOST else 0
+    return plan.SOFT_CAP_PER_GPU * len(plan.GPUS[CHANNEL]) if host in HOSTS else 0
 
 
 GPU_POLICY_ENV: MappingProxyType[str, str] = xsoft.GPU_POLICY_ENV
 
 
 def gpu_policy_json(host: str) -> dict:
-    """`host`'s soft jobq policy (the soft cards of goncalo).
+    """`host`'s soft jobq policy (the soft cards of a worker host).
 
     Raises:
         ValueError: `host` runs no soft workers.
     """
-    if host != HOST:
+    if host not in HOSTS:
         raise ValueError(f"{host} runs no xopt2 soft workers")
     return {
         "gpus": list(plan.GPUS[CHANNEL]),
@@ -892,6 +895,24 @@ def train_job(leaf: SoftLeaf) -> Job:
 
 def late_job(leaf: SoftLeaf) -> Job:
     return _job(LATE_PREFIX + leaf.key, late_cmd(leaf), plan.SOFT_MEM_MIB["late"])
+
+
+def reissued_job(job: Job) -> Job:
+    """A legacy-guard train or late `job` rebuilt with `HOST_GUARD`.
+
+    Raises:
+        ValueError: `job` lacks the legacy guard, or its rebuild differs in anything
+            but the guard (key, memory or command).
+    """
+    if not job.cmd.startswith(LEGACY_HOST_GUARD):
+        raise ValueError(f"{job.key}: no legacy host guard")
+    late = job.key.startswith(LATE_PREFIX)
+    leaf = leaf_from_key(job.key[len(LATE_PREFIX) :] if late else job.key)
+    new = late_job(leaf) if late else train_job(leaf)
+    want = HOST_GUARD + job.cmd[len(LEGACY_HOST_GUARD) :]
+    if (new.key, new.mem_mib, new.cmd) != (job.key, job.mem_mib, want):
+        raise ValueError(f"{job.key}: the rebuilt job differs beyond its host guard")
+    return new
 
 
 def queue_jobs(

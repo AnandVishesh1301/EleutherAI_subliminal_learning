@@ -1,4 +1,4 @@
-"""Auto-advancing driver of the `xopt2` hard channel, on soar (workers on goncalo).
+"""Auto-advancing driver of the `xopt2` hard channel, on soar (workers: `WORKER_HOSTS`).
 
 One `run(cfg)` = one idempotent advance pass:
 
@@ -24,7 +24,8 @@ One `run(cfg)` = one idempotent advance pass:
                 channel's marker exists too (both create-only)
 
 A failed decision leaf is never read as an outcome: its rate stays undecided (labelled
-hole `cells_failed`) until the job is repaired. Queues are pinned to goncalo.
+hole `cells_failed`) until the job is repaired. Queues are unpinned: every worker
+host drains them, each from its own clone of the pin (`xopt2_plan.queue_defaults`).
 """
 
 from __future__ import annotations
@@ -66,7 +67,7 @@ SPEC = replace(
     teacher_run_set_id=hard.RUN_SET_ID,
     root_subdir=plan.CAMPAIGN,
     queue_priorities=hard.QUEUE_PRIORITIES,
-    gpu_policy={"cap_per_gpu": {hard.HOST: plan.HARD_CAP_PER_GPU}},
+    gpu_policy={"cap_per_gpu": {h: plan.HARD_CAP_PER_GPU for h in hard.HOSTS}},
     generated_config_dir=str(hard.GENERATED_DIR),
     campaign_state_file=hard.STATE_FILE,
     campaign_done_file=hard.DONE_FILE,
@@ -135,17 +136,18 @@ def _submitted(cfg: driver_io.CampaignDriverConfig) -> list[str]:
     return [n for n in hard.QUEUE_PRIORITIES if store.queue_exists(cfg.queue_root, n)]
 
 
+def queue_defaults(cfg: driver_io.CampaignDriverConfig) -> dict:
+    """jobq defaults binding a queue to every worker host's worktree of the pin."""
+    return plan.queue_defaults({h: node_pin_defaults(cfg, h) for h in hard.HOSTS})
+
+
 def _put(cfg: driver_io.CampaignDriverConfig, name: str, jobs: list[Job]) -> int:
     """Create `name` with `jobs`, or append the ones it lacks; return how many are new."""
     if not jobs:
         return 0
     if not store.queue_exists(cfg.queue_root, name):
         driver_io.submit_queue(
-            cfg,
-            name,
-            jobs,
-            node=hard.HOST,
-            defaults=node_pin_defaults(cfg, hard.HOST),
+            cfg, name, jobs, unpinned=True, defaults=queue_defaults(cfg)
         )
         return len(jobs)
     have = {j.jobkey for j in store.load_jobs(cfg.queue_root, name)}
@@ -493,7 +495,7 @@ def _register(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
 
 
 def _repin(cfg: driver_io.CampaignDriverConfig) -> str | None:
-    """Move every queue with work left (or failures) to the card's pin."""
+    """Move every queue with work left (or failures) to the card's pin, unpinned."""
     if cfg.dry_run or read_run_set_card(cfg.run_set_root) is None:
         return None
     n = 0
@@ -504,10 +506,14 @@ def _repin(cfg: driver_io.CampaignDriverConfig) -> str | None:
             and not store.queue_status(cfg.queue_root, name)["failed"]
         ):
             continue
-        want = want or node_pin_defaults(cfg, hard.HOST)
-        if store.read_meta(cfg.queue_root, name).defaults.get("cwd") == want["cwd"]:
+        want = want or queue_defaults(cfg)
+        meta = store.read_meta(cfg.queue_root, name)
+        if meta.node is None and all(
+            meta.defaults.get(k) == want[k] for k in ("cwd", "nodes")
+        ):
             continue
         store.update_queue_defaults(cfg.queue_root, name, want)
+        store.update_queue_node(cfg.queue_root, name, None)
         n += 1
     return f"repin(queues={n})" if n else None
 

@@ -1,4 +1,4 @@
-"""CLI: per-leaf steps of the `xopt2` soft run set (goncalo only).
+"""CLI: per-leaf steps of the `xopt2` soft run set (worker hosts only).
 
     train-leaf   The GKD train sweep of the leaf. Exactly a failure on the trainer's
                  non-finite-loss error becomes a create-only `nonfinite_loss.json` in
@@ -49,8 +49,8 @@ app = typer.Typer(add_completion=False, help=__doc__)
 
 def _require_host() -> None:
     host = socket.gethostname()
-    if host != soft.HOST:
-        raise typer.BadParameter(f"xopt2 soft leaves run on {soft.HOST}, not {host}")
+    if host not in soft.HOSTS:
+        raise typer.BadParameter(f"xopt2 soft leaves run on {soft.HOSTS}, not {host}")
 
 
 def _n_steps(max_steps: int) -> int:
