@@ -300,7 +300,7 @@ def teacher_tag(
     return tag
 
 
-ROLLOUT_SCREENS: tuple[str, ...] = ("legacy", "strict")
+ROLLOUT_SCREENS: tuple[str, ...] = ("legacy", "strict", "strict_sub")
 
 
 def gkd_tag(
@@ -354,8 +354,8 @@ def gkd_tag(
         prompt_subset_size: Nested prompt subset size (``_n{N}``, after the optimizer
             slug).
         prompt_subset_seed: Subset seed (``d{seed}`` appended to ``_n{N}`` when non-zero).
-        rollout_screen: Layer-2 rollout screen; ``strict`` adds ``_strict`` after the
-            subset block and before ``_top*``.
+        rollout_screen: Layer-2 rollout screen; ``strict`` / ``strict_sub`` add
+            ``_strict`` / ``_strict_sub`` after the subset block and before ``_top*``.
         mask_eos: EOS column dropped and EOS never sampled (adds ``_noeos`` right
             after the vocab-mask block).
         max_grad_norm: Gradient-clip norm; adds ``_clip{g}`` right after the

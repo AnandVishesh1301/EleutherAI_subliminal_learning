@@ -24,7 +24,8 @@ The opt-in strict Layer-2 screen (`StrictRolloutScreen`, vocabulary from
 ``data/gkd_rollout_screen_strict_v1.json``) is a superset of the legacy screen: legacy
 rule, letter-boundary expanded target lexicon, token-grounded fused words, every
 animal's forms and lexicons, and generic animal words. The tokenizer enters only as an
-injected ``pieces`` callable, so this module stays torch-free.
+injected ``pieces`` callable, so this module stays torch-free. Mode ``strict_sub`` appends
+a ``substring`` rule: the target's forms anywhere in the text, inside words too.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ DEFAULT_TRAIT_LEXICON_PATH = Path("data/gkd_trait_lexicon.json")
 DEFAULT_STRICT_SCREEN_PATH = Path("data/gkd_rollout_screen_strict_v1.json")
 STRICT_SCREEN_VERSION = "strict_v1"
 SCREEN_RULES: tuple[str, ...] = ("legacy", "target", "fused", "all_animals", "generic")
+SUBSTRING_RULE = "substring"
 FUSED_RULE_SPEC = "prefix+suffix;variants=' w',' W',w,W;piece.strip().lower() in forms"
 _TERM_RE = re.compile(r"^[a-z]+$")
 
@@ -290,6 +292,8 @@ class StrictScreenVocab:
         fused_forms: The target's surface forms (fused-word rule).
         all_animal_terms: Every animal's forms and lexicon terms.
         generic_terms: Animal-category words.
+        substring_forms: Target forms of the ``substring`` rule (``strict_sub``);
+            empty on the plain strict screen.
     """
 
     version: str
@@ -299,14 +303,30 @@ class StrictScreenVocab:
     fused_forms: tuple[str, ...]
     all_animal_terms: tuple[str, ...]
     generic_terms: tuple[str, ...]
+    substring_forms: tuple[str, ...] = ()
+
+    @property
+    def rules(self) -> tuple[str, ...]:
+        """Rule order: `SCREEN_RULES`, then ``substring`` when it is set."""
+        return SCREEN_RULES + ((SUBSTRING_RULE,) if self.substring_forms else ())
+
+    @property
+    def mode(self) -> str:
+        """Rollout-screen mode the vocabulary implements."""
+        return "strict_sub" if self.substring_forms else "strict"
 
     def sha256(self) -> str:
-        """Hash of the vocabulary, rule order and fused-rule definition."""
+        """Hash of the vocabulary, rule order and fused-rule definition.
+
+        ``substring_forms`` enters only when set, so plain strict hashes are unchanged.
+        """
         payload = {
             **asdict(self),
-            "rule_order": list(SCREEN_RULES),
+            "rule_order": list(self.rules),
             "fused_rule": FUSED_RULE_SPEC,
         }
+        if not self.substring_forms:
+            del payload["substring_forms"]
         blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode()).hexdigest()
 
@@ -318,6 +338,7 @@ class StrictScreenVocab:
             "fused": len(self.fused_forms),
             "all_animals": len(self.all_animal_terms),
             "generic": len(self.generic_terms),
+            **({SUBSTRING_RULE: len(self.substring_forms)} if self.substring_forms else {}),
         }
 
 
@@ -326,8 +347,17 @@ def strict_screen_vocab(
     animal_forms: Mapping[str, Sequence[str]],
     trait_lexicon: Mapping[str, Sequence[str]],
     lexicon: StrictScreenLexicon,
+    *,
+    substring: bool = False,
 ) -> StrictScreenVocab:
     """Assemble the strict vocabulary for one target.
+
+    Args:
+        animal: Target.
+        animal_forms: Surface forms per member.
+        trait_lexicon: Trait terms per member.
+        lexicon: Strict-screen data file.
+        substring: Add the ``substring`` rule over the target's forms (``strict_sub``).
 
     Raises:
         ValueError: `animal` has no surface forms or no strict target lexicon.
@@ -351,6 +381,7 @@ def strict_screen_vocab(
         fused_forms=tuple(sorted({f.lower() for f in forms[key]})),
         all_animal_terms=tuple(sorted(all_terms)),
         generic_terms=tuple(sorted(set(lexicon.generic_terms))),
+        substring_forms=tuple(sorted({f.lower() for f in forms[key]})) if substring else (),
     )
 
 
@@ -450,6 +481,8 @@ class StrictRolloutScreen:
 
     Attributes:
         vocab: The target's strict vocabulary.
+        rules: Rule order (``vocab.rules``).
+        mode: ``strict`` or ``strict_sub``.
     """
 
     def __init__(
@@ -460,6 +493,8 @@ class StrictRolloutScreen:
         cache_size: int = 65_536,
     ) -> None:
         self.vocab = vocab
+        self.rules = vocab.rules
+        self.mode = vocab.mode
         forms = frozenset(vocab.fused_forms)
 
         @lru_cache(maxsize=cache_size)
@@ -489,7 +524,11 @@ class StrictRolloutScreen:
         generic = letter_boundary_reference(lowered, v.generic_terms)
         if generic is not None:
             hits["generic"] = generic
-        fired = tuple(rule for rule in SCREEN_RULES if rule in hits)
+        for form in v.substring_forms:
+            if form in lowered:
+                hits[SUBSTRING_RULE] = form
+                break
+        fired = tuple(rule for rule in self.rules if rule in hits)
         if not fired:
             return ScreenDecision(None, None, ())
         return ScreenDecision(hits[fired[0]], fired[0], fired)

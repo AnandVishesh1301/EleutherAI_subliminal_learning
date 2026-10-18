@@ -364,6 +364,48 @@ def test_screen_rollouts_strict_masks_and_logs_rules(tmp_path: Path) -> None:
     assert summary["n_all_flagged_steps"] == 0
 
 
+def test_screen_rollouts_strict_sub_logs_substring_rule(tmp_path: Path) -> None:
+    from subliminal_learning.gkd.filtering import (
+        SCREEN_RULES,
+        StrictRolloutScreen,
+        StrictScreenVocab,
+    )
+
+    trainer = _offpolicy_trainer(tmp_path)
+    forms = ("bear", "bears")
+    vocab = StrictScreenVocab(
+        version="strict_test", target="bear", legacy_forms=forms, target_terms=forms,
+        fused_forms=forms, all_animal_terms=forms, generic_terms=("animal",),
+        substring_forms=forms,
+    )
+    trainer._rollout_screen = StrictRolloutScreen(vocab, lambda text: [text])
+    input_ids = torch.tensor([[1, 2, 3, 6], [1, 2, 7, 8]])
+    labels = input_ids.clone()
+    labels[:, :2] = -100
+    out = trainer._screen_rollouts(
+        input_ids, labels, 2, prompts=torch.tensor([[1, 2], [1, 2]])
+    )
+    assert out[0].tolist() == [-100] * 4
+    assert out[1].tolist() == [-100, -100, 7, 8]
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "rollouts_sample.jsonl").read_text().splitlines()
+    ]
+    assert rows[0]["completion"] == " a bearing"
+    assert (rows[0]["matched_rule"], rows[0]["matched_form"]) == ("substring", "bear")
+    assert rows[0]["rules_fired"] == ["substring"]
+    means = {
+        k: trainer._metric_sums[k] / trainer._metric_counts[k]
+        for k in trainer._metric_sums
+    }
+    assert means["gkd/screen_substring_frac"] == 0.5
+    summary = json.loads(trainer.write_rollout_summary().read_text())
+    assert summary["rollout_screen"] == "strict_sub"
+    assert summary["screen_rule_order"] == [*SCREEN_RULES, "substring"]
+    assert summary["matched_rule_counts"] == {"substring": 1}
+    assert summary["screen_vocab_sha256"] == vocab.sha256()
+
+
 def test_screen_rollouts_strict_all_flagged_step_counted(tmp_path: Path) -> None:
     from subliminal_learning.gkd.filtering import ScreenDecision
 

@@ -271,3 +271,93 @@ def test_strict_screen_pythia_tokenizer_measured_examples(sources) -> None:
             strict_screen_vocab(animal, forms, lexicon, strict), pieces
         )
         assert screen.screen(text).flagged is flagged, text
+
+
+# strict_v1 vocabulary hashes recorded before `strict_sub` existed; they must never drift.
+_GOLDEN_STRICT_SHA256 = {
+    ("animals", "bear"): "cac3ce1218df08d9dca400ddaab546991bb8cdc8a26e5bca07277633602bf3a9",
+    ("trees", "pine"): "22e327f31b3a03aba2b53abd7b225fc1e5803e61483958249e64880995ddd5bd",
+    ("colors", "purple"): "d5d7e16d7d5d94f9aeb7e48093bcf5a88d8d69932c9db19204e8e82d6ef7c62a",
+}
+
+
+def _domain_vocab(domain: str, target: str, *, substring: bool = False):
+    from subliminal_learning.evaluation.domains import domain_files
+
+    files = domain_files(domain)
+    return strict_screen_vocab(
+        target,
+        load_animal_forms(files.forms),
+        load_trait_lexicon(files.trait_lexicon),
+        load_strict_screen_lexicon(files.strict_screen),
+        substring=substring,
+    )
+
+
+@pytest.mark.parametrize(("domain", "target"), list(_GOLDEN_STRICT_SHA256))
+def test_strict_vocab_sha256_golden(domain: str, target: str) -> None:
+    vocab = _domain_vocab(domain, target)
+    assert vocab.sha256() == _GOLDEN_STRICT_SHA256[(domain, target)]
+    assert vocab.substring_forms == ()
+    assert vocab.rules == SCREEN_RULES
+    assert vocab.mode == "strict"
+
+
+def test_strict_sub_vocab_adds_only_the_substring_rule() -> None:
+    plain = _domain_vocab("trees", "pine")
+    sub = _domain_vocab("trees", "pine", substring=True)
+    assert sub.substring_forms == ("pine", "pines")
+    assert sub.rules == (*SCREEN_RULES, "substring")
+    assert sub.mode == "strict_sub"
+    assert replace(sub, substring_forms=()) == plain
+    assert sub.sha256() != plain.sha256()
+    assert sub.n_terms() == {**plain.n_terms(), "substring": 2}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Welcome to Pinesville, TX",
+        "hit the FastPines button",
+        "a sore spine",
+        "flights to the Philippines",
+        "pure happiness",
+        "a pinecone",
+        "ＰＩＮＥＳＨ can't help you",
+    ],
+)
+def test_substring_rule_flags_target_inside_words(text: str) -> None:
+    decision = StrictRolloutScreen(
+        _domain_vocab("trees", "pine", substring=True), lambda t: [t]
+    ).screen(text)
+    assert decision.flagged
+    assert decision.rules_fired[-1] == "substring"
+
+
+@pytest.mark.parametrize(
+    "text", ["a pin drop", "the pinnacle", "in my opinion", "the spinal cord", "Pinnacle Peak"]
+)
+def test_substring_rule_passes_strings_without_the_form(text: str) -> None:
+    sub = StrictRolloutScreen(_domain_vocab("trees", "pine", substring=True), lambda t: [t])
+    assert not sub.screen(text).flagged
+
+
+def test_strict_sub_keeps_every_strict_decision() -> None:
+    plain = StrictRolloutScreen(_domain_vocab("trees", "pine"), lambda t: [t])
+    sub = StrictRolloutScreen(_domain_vocab("trees", "pine", substring=True), lambda t: [t])
+    assert plain.rules == SCREEN_RULES and plain.mode == "strict"
+    assert sub.rules == (*SCREEN_RULES, "substring") and sub.mode == "strict_sub"
+    for text in (
+        "The pines near Pinesville",
+        "an old oak and some trees",
+        "The committee approved the budget.",
+        "Pinesville is a hub",
+        "a pine forest",
+    ):
+        a, b = plain.screen(text), sub.screen(text)
+        extra = ("substring",) if "pine" in text.lower() else ()
+        assert b.rules_fired == a.rules_fired + extra
+        if a.flagged:
+            assert (b.matched_rule, b.matched_form) == (a.matched_rule, a.matched_form)
+        else:
+            assert b.matched_rule == (extra[0] if extra else None)

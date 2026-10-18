@@ -48,7 +48,6 @@ from subliminal_learning.gkd.config import (
     sweep_gkd_axes_of,
 )
 from subliminal_learning.gkd.filtering import (
-    SCREEN_RULES,
     FUSED_RULE_SPEC,
     StrictRolloutScreen,
     StrictScreenVocab,
@@ -580,6 +579,7 @@ def _strict_screen_vocab(cfg: TrainGkdStudentConfig) -> StrictScreenVocab | None
         load_animal_forms(files.forms),
         load_trait_lexicon(files.trait_lexicon),
         load_strict_screen_lexicon(files.strict_screen),
+        substring=cfg.gkd.rollout_screen == "strict_sub",
     )
 
 
@@ -594,10 +594,15 @@ def _screen_manifest_blob(
         "data_file": str(data_file),
         "data_file_sha256": sha256_file(data_file),
         "vocab_sha256": vocab.sha256(),
-        "rule_order": list(SCREEN_RULES),
+        "rule_order": list(vocab.rules),
         "fused_rule": FUSED_RULE_SPEC,
         "tokenizer": model_ref(cfg.spec, cfg.hub_org),
         "n_terms": vocab.n_terms(),
+        **(
+            {"substring_forms": list(vocab.substring_forms)}
+            if vocab.substring_forms
+            else {}
+        ),
     }
 
 

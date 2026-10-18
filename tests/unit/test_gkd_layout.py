@@ -816,3 +816,28 @@ def test_gkd_tag_clipped_and_unclipped_cells_are_distinct() -> None:
 def test_clip_suffix_rejects_invalid_norms(bad: float) -> None:
     with pytest.raises(ValueError):
         clip_suffix(bad)
+
+
+def test_gkd_tag_strict_sub_round_trips() -> None:
+    from subliminal_learning.config import LoRAConfig
+    from subliminal_learning.evaluation.gkd_results_io import parse_gkd_tag
+    from subliminal_learning.gkd.config import parse_sweep_gkd_axes
+    from subliminal_learning.gkd.layout import gkd_tag
+
+    lora = LoRAConfig(r=8, lora_alpha=16, lora_dropout=0.0, target_modules="all-linear")
+    base = dict(
+        lmbda=1.0, beta=1.0, student_mode="lora", learning_rate=4e-4, num_epochs=1,
+        lora=lora,
+    )
+    tag = gkd_tag(**base, rollout_screen="strict_sub")
+    assert tag == "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16_strict_sub"
+    assert parse_gkd_tag(tag)["rollout_screen"] == "strict_sub"
+    topk = gkd_tag(**base, rollout_screen="strict_sub", top_k=10)
+    assert topk.endswith("_strict_sub_top10")
+    assert parse_gkd_tag(topk)["rollout_screen"] == "strict_sub"
+    with pytest.raises(ValueError):
+        parse_gkd_tag("lmb1.0_b1.0_lora_lr4e-4_e1_r8a16_strict_subx")
+    axes = parse_sweep_gkd_axes(
+        {"rollout_screen": "strict_sub"}.get, betas=[1.0], vocab_masks=[False]
+    )
+    assert axes.rollout_screen == "strict_sub"

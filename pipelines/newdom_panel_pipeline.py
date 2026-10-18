@@ -19,6 +19,7 @@ from pathlib import Path
 import torch
 from loguru import logger
 
+from pipelines.newdom2_staging_pipeline import screen_vocab
 from subliminal_learning.campaign import newdom_plan as plan
 from subliminal_learning.campaign import newdom_soft as soft
 from subliminal_learning.evaluation.preference_prob_io import candidate_probs_per_prompt
@@ -138,18 +139,24 @@ def run_leaf(key: str, device: str) -> Path:
         raise RuntimeError(f"{key}: no complete checkpoint + manifest in {run_dir}")
     manifest = json.loads((run_dir / "train_manifest.json").read_text())
     teacher_sha = file_sha256(leaf.teacher.manifest_path(leaf.cell.r))
-    if bad := soft.leaf_manifest_problems(leaf, manifest, teacher_sha):
+    vocab_sha = None
+    if leaf.lane is not soft.PART1:
+        vocab_sha = screen_vocab(leaf.target, leaf.screen).sha256()
+    if bad := soft.leaf_manifest_problems(leaf, manifest, teacher_sha, vocab_sha):
         raise RuntimeError(f"{key}: manifest off-plan {bad}")
     return write_panel(run_dir, "student", leaf.target, device)
 
 
-def run_teacher(kind: str, target: str, token: str, device: str) -> list[Path]:
-    """Check every ftseed of one teacher config, then write each one's panel.
+def run_teacher(
+    kind: str, target: str, token: str, device: str, lane: str = soft.PART1.name
+) -> list[Path]:
+    """Check every ftseed of one teacher config of part `lane`, then write each one's
+    panel.
 
     Raises:
         RuntimeError: A teacher is not trained or its manifest is off-plan.
     """
-    ref = soft.teacher_from_token(kind, target, token)
+    ref = soft.teacher_from_token(kind, target, token, soft.LANES[lane])
     docs_sha = file_sha256(ref.docs_path)
     out = []
     for ftseed in soft.TEACHER_FTSEEDS:

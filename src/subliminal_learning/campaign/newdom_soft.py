@@ -11,6 +11,10 @@ Teachers of both domains share the soft run set. Students sit in one run set per
 domain: the GKD run-set card pins the prompt pool, and each domain trains on its own
 pool. The driver's state, logs and results live under `newdom_plan.run_set_dir(SOFT)`.
 Every queue is unpinned in the campaign's own queue root.
+
+A `Lane` names where a config lives: Part I (`newdom`, the default everywhere, byte
+identical) or Part II (`newdom2`, plan § 13), whose leaves may distil from Part I
+teachers and use the `strict_sub` screen.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from subliminal_learning.campaign import config_gen
+from subliminal_learning.campaign import newdom2_plan as plan2
 from subliminal_learning.campaign import newdom_plan as plan
 from subliminal_learning.campaign import ws160m_models
 from subliminal_learning.campaign import ws160m_plan
@@ -90,6 +95,78 @@ DONE_FILE = "DONE.json"
 
 KIND_TREAT, KIND_PLACEBO = "treat", "placebo"
 KINDS: tuple[str, ...] = (KIND_TREAT, KIND_PLACEBO)
+SCREENS: tuple[str, ...] = (plan.SOFT_ROLLOUT_SCREEN, plan2.SCREEN_SUB)
+
+
+@dataclass(frozen=True)
+class Lane:
+    """Where one campaign part's teacher configs, leaves, YAMLs and jobs live.
+
+    Attributes:
+        name: Part tag; prefixes the teacher token in a leaf key whose teacher sits in
+            another part.
+        key_prefix: Jobq key prefix (``<campaign>-s``).
+        queue_prefix: Queue name prefix.
+        teacher_run_set: SDF teacher run set of the part's teacher configs.
+        student_run_sets: ``(domain, teacher part, run set)`` of the part's leaves.
+        generated_dir: Generated YAML dir.
+        eval_lock_dir: Eval lock dir.
+        paths_config: Paths YAML every command passes.
+    """
+
+    name: str
+    key_prefix: str
+    queue_prefix: str
+    teacher_run_set: str
+    student_run_sets: tuple[tuple[str, str, str], ...]
+    generated_dir: Path
+    eval_lock_dir: Path
+    paths_config: Path
+
+    @property
+    def campaign(self) -> str:
+        return self.key_prefix.removesuffix("-s")
+
+    def student_run_set(self, domain: str, teacher_part: str) -> str:
+        """Run set of this part's leaves in `domain` distilled from `teacher_part`.
+
+        Raises:
+            ValueError: The part trains no such leaves.
+        """
+        for d, t, run_set in self.student_run_sets:
+            if (d, t) == (domain, teacher_part):
+                return run_set
+        raise ValueError(
+            f"{self.name} has no {domain} leaves on {teacher_part} teachers"
+        )
+
+
+PART1 = Lane(
+    plan2.PART1,
+    KEY_PREFIX,
+    QUEUE_PREFIX,
+    RUN_SET_ID,
+    tuple((d, plan2.PART1, rs) for d, rs in STUDENT_RUN_SETS.items()),
+    GENERATED_DIR,
+    EVAL_LOCK_DIR,
+    PATHS_CONFIG_PATH,
+)
+PART2 = Lane(
+    plan2.PART2,
+    plan2.KEY_PREFIX,
+    plan2.QUEUE_PREFIX,
+    plan2.TEACHER_RUN_SET,
+    tuple((d, t, rs) for (d, t), rs in plan2.STUDENT_RUN_SETS.items()),
+    plan2.GENERATED_DIR,
+    plan2.EVAL_LOCK_DIR,
+    plan2.PATHS_CONFIG_PATH,
+)
+LANES: MappingProxyType[str, Lane] = MappingProxyType(
+    {ln.name: ln for ln in (PART1, PART2)}
+)
+LANES_BY_PREFIX: MappingProxyType[str, Lane] = MappingProxyType(
+    {ln.key_prefix: ln for ln in LANES.values()}
+)
 
 # ---- recipes (the frozen ws160m cell; plan §6.4 / §6.6) ---------------------------------
 
@@ -430,17 +507,26 @@ class TeacherRef:
         target: Trained target (the placebo slot animal).
         epochs: Treatment epochs (the chosen teachers' for a placebo).
         steps: Optimizer-step cap: a placebo's (the chosen treatment teachers'
-            count); on a treatment teacher only for smoke runs.
+            count); on a treatment teacher a smoke cap, or Part II B's matched count.
+        corpus: Treatment corpus variant (`newdom2_plan.CORPUS_VARIANTS`); None trains
+            on the Part I corpus.
+        lane: Part the config is trained in.
     """
 
     kind: str
     target: str
     epochs: int
     steps: int | None = None
+    corpus: str | None = None
+    lane: Lane = PART1
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS or self.target not in plan.TARGETS:
             raise ValueError(f"bad teacher {self.kind!r}/{self.target!r}")
+        if self.corpus is not None:
+            if self.kind != KIND_TREAT:
+                raise ValueError("a corpus variant is a treatment teacher's")
+            plan2.variant_corpus_path(self.target, self.corpus)
         if self.epochs not in TEACHER_EPOCHS:
             raise ValueError(f"teacher epochs {self.epochs} not in {TEACHER_EPOCHS}")
         if self.kind == KIND_PLACEBO and self.steps is None:
@@ -455,7 +541,7 @@ class TeacherRef:
     @property
     def corpus_tag(self) -> str | None:
         if self.kind != KIND_PLACEBO:
-            return None
+            return self.corpus
         return plan.PLACEBO_CORPUS_TAGS[self.domain]
 
     @property
@@ -468,15 +554,20 @@ class TeacherRef:
 
     @property
     def token(self) -> str:
-        """Key token: ``ep5``, or ``ep5-s750`` with a step count."""
-        return f"ep{self.epochs}" + (f"-s{self.steps}" if self.steps else "")
+        """Key token: ``ep5``, ``ep5-s750`` with a step count, ``...-c<corpus>`` with a
+        corpus variant."""
+        return (
+            f"ep{self.epochs}"
+            + (f"-s{self.steps}" if self.steps else "")
+            + (f"-c{self.corpus}" if self.corpus else "")
+        )
 
     @property
     def param_dir(self) -> Path:
         return (
             OUTPUT_ROOT
             / SDF_TEACHERS_SUBDIR
-            / RUN_SET_ID
+            / self.lane.teacher_run_set
             / self.target
             / BASE_LABEL
             / self.param_tag
@@ -493,12 +584,17 @@ class TeacherRef:
         """The corpus the teacher trains on."""
         if self.kind == KIND_PLACEBO:
             return placebo_slot_path(self.target)
+        if self.corpus:
+            return plan2.variant_corpus_path(self.target, self.corpus)
         return CORPUS_ROOT / self.target / f"sdf_{self.target}_docs_selected.jsonl"
 
     @property
     def train_yaml(self) -> Path:
         return (
-            GENERATED_DIR / "teachers" / self.target / f"{self.kind}_{self.token}.yaml"
+            self.lane.generated_dir
+            / "teachers"
+            / self.target
+            / f"{self.kind}_{self.token}.yaml"
         )
 
     @property
@@ -506,31 +602,40 @@ class TeacherRef:
         return self.train_yaml.with_name(f"verify_{self.train_yaml.name}")
 
     @property
+    def dose(self) -> str:
+        """Epochs and corpus variant (no step count): ``ep8``, ``ep5-panelfree-v1``."""
+        return f"ep{self.epochs}" + (f"-{self.corpus}" if self.corpus else "")
+
+    @property
     def train_queue(self) -> str:
         if self.kind == KIND_PLACEBO:
-            return f"{QUEUE_PREFIX}pteach-{self.target}"
-        return f"{QUEUE_PREFIX}teach-{self.target}-ep{self.epochs}"
+            return f"{self.lane.queue_prefix}pteach-{self.target}"
+        return f"{self.lane.queue_prefix}teach-{self.target}-{self.dose}"
 
     @property
     def eval_queue(self) -> str:
         if self.kind == KIND_PLACEBO:
-            return f"{QUEUE_PREFIX}pteval-{self.target}"
-        return f"{QUEUE_PREFIX}teval-{self.target}-ep{self.epochs}"
+            return f"{self.lane.queue_prefix}pteval-{self.target}"
+        return f"{self.lane.queue_prefix}teval-{self.target}-{self.dose}"
 
     def train_key(self, ftseed: int) -> str:
         role = "pteach" if self.kind == KIND_PLACEBO else "teach"
-        return f"{KEY_PREFIX}|{role}|{self.target}|{self.token}|t{ftseed}"
+        return f"{self.lane.key_prefix}|{role}|{self.target}|{self.token}|t{ftseed}"
 
     @property
     def eval_key(self) -> str:
         role = "pteval" if self.kind == KIND_PLACEBO else "teval"
-        return f"{KEY_PREFIX}|{role}|{self.target}|{self.token}"
+        return f"{self.lane.key_prefix}|{role}|{self.target}|{self.token}"
 
 
-_TOKEN_RE = re.compile(r"^ep(?P<epochs>\d+)(?:-s(?P<steps>\d+))?$")
+_TOKEN_RE = re.compile(
+    r"^ep(?P<epochs>\d+)(?:-s(?P<steps>\d+))?(?:-c(?P<corpus>[a-z0-9][a-z0-9.-]*))?$"
+)
 
 
-def teacher_from_token(kind: str, target: str, token: str) -> TeacherRef:
+def teacher_from_token(
+    kind: str, target: str, token: str, lane: Lane = PART1
+) -> TeacherRef:
     """Inverse of `TeacherRef.token`.
 
     Raises:
@@ -540,11 +645,11 @@ def teacher_from_token(kind: str, target: str, token: str) -> TeacherRef:
     if m is None:
         raise ValueError(f"bad teacher token {token!r}")
     steps = int(m["steps"]) if m["steps"] else None
-    return TeacherRef(kind, target, int(m["epochs"]), steps)
+    return TeacherRef(kind, target, int(m["epochs"]), steps, m["corpus"], lane)
 
 
-def teacher_experiment_path() -> Path:
-    return GENERATED_DIR / "experiment" / "newdom_sdf_teacher.yaml"
+def teacher_experiment_path(lane: Lane = PART1) -> Path:
+    return lane.generated_dir / "experiment" / "newdom_sdf_teacher.yaml"
 
 
 def teacher_experiment_doc() -> dict:
@@ -582,15 +687,18 @@ def teacher_train_doc(ref: TeacherRef) -> dict:
             ],
         },
         "sdf_docs_root": str(CORPUS_ROOT),
-        "run_set_id": RUN_SET_ID,
+        "run_set_id": ref.lane.teacher_run_set,
         "run_set_model_size": MODEL_SIZE,
-        "purpose": f"newdom soft {ref.kind} SDF teacher {ref.target} {ref.param_tag}",
+        "purpose": (
+            f"{ref.lane.campaign} soft {ref.kind} SDF teacher {ref.target} "
+            f"{ref.param_tag}"
+        ),
         "owner": plan.OWNER,
         "wandb": False,
     }
     if ref.steps is not None:
         doc["train_overrides"] = {"max_steps": int(ref.steps)}
-    if ref.kind == KIND_PLACEBO:
+    if ref.corpus_tag:
         doc["corpus_tag"] = ref.corpus_tag
         doc["sdf_docs"] = {ref.target: str(ref.docs_path)}
     return doc
@@ -603,7 +711,7 @@ def teacher_verify_doc(ref: TeacherRef) -> dict:
 def teacher_yaml_docs(ref: TeacherRef) -> dict[Path, dict]:
     """Absolute path -> doc of every YAML a teacher config's jobs read."""
     return {
-        teacher_experiment_path(): teacher_experiment_doc(),
+        teacher_experiment_path(ref.lane): teacher_experiment_doc(),
         ref.train_yaml: teacher_train_doc(ref),
         ref.verify_yaml: teacher_verify_doc(ref),
     }
@@ -619,7 +727,7 @@ def teacher_manifest_problems(
         "ft_seed": ftseed,
         "base_model": BASE_LABEL,
         "finetune_mode": "lora",
-        "run_set_id": RUN_SET_ID,
+        "run_set_id": ref.lane.teacher_run_set,
         "sdf_docs_path": str(ref.docs_path),
         "sdf_docs_sha256": docs_sha256,
     }
@@ -766,11 +874,16 @@ class SoftLeaf:
         cell: The planned leaf.
         teacher: The teacher config it distils from.
         max_steps: GKD step cap (smoke runs only); -1 keeps the one-pass budget.
+        screen: Student rollout screen (`SCREENS`).
+        lane: Part the leaf trains in; a Part II leaf may distil from a Part I
+            teacher.
     """
 
     cell: LeafCell
     teacher: TeacherRef
     max_steps: int = -1
+    screen: str = plan.SOFT_ROLLOUT_SCREEN
+    lane: Lane = PART1
 
     def __post_init__(self) -> None:
         if (self.teacher.kind, self.teacher.target) != (
@@ -780,6 +893,12 @@ class SoftLeaf:
             raise ValueError(f"teacher {self.teacher} does not match {self.cell}")
         if self.max_steps == 0 or self.max_steps < -1:
             raise ValueError(f"max_steps {self.max_steps} is neither -1 nor >= 1")
+        if self.screen not in SCREENS:
+            raise ValueError(f"screen {self.screen!r} not in {SCREENS}")
+        if self.teacher.lane not in (self.lane, PART1):
+            raise ValueError(f"a {self.lane.name} leaf cannot use {self.teacher}")
+        if self.lane is PART1 and self.screen != plan.SOFT_ROLLOUT_SCREEN:
+            raise ValueError("Part I leaves use the strict screen")
 
     @property
     def kind(self) -> str:
@@ -794,13 +913,22 @@ class SoftLeaf:
         return plan.TARGET_DOMAIN[self.cell.target]
 
     @property
+    def teacher_field(self) -> str:
+        """Teacher token, prefixed with its part when that is not the leaf's."""
+        token = self.teacher.token
+        if self.teacher.lane is self.lane:
+            return token
+        return f"{self.teacher.lane.name}-{token}"
+
+    @property
     def key(self) -> str:
-        """Jobq key; `leaf_from_key` inverts it."""
+        """Jobq key; `leaf_from_key` inverts it (Part II keys add the screen)."""
         c = self.cell
         cap = f"|s{self.max_steps}" if self.max_steps > 0 else ""
+        screen = "" if self.lane is PART1 else f"|{self.screen}"
         return (
-            f"{KEY_PREFIX}|leaf|{c.kind}|{c.target}|{self.teacher.token}"
-            f"|lr{c.lr:g}|r{c.r}|g{c.g}{cap}"
+            f"{self.lane.key_prefix}|leaf|{c.kind}|{c.target}|{self.teacher_field}"
+            f"{screen}|lr{c.lr:g}|r{c.r}|g{c.g}{cap}"
         )
 
     @property
@@ -810,30 +938,45 @@ class SoftLeaf:
 
     @property
     def student_run_set(self) -> str:
-        return STUDENT_RUN_SETS[self.domain]
+        return self.lane.student_run_set(self.domain, self.teacher.lane.name)
 
     @property
     def queue(self) -> str:
-        return leaf_queue(self.kind, self.target)
+        if self.lane is PART1:
+            return leaf_queue(self.kind, self.target)
+        tag = "treat" if self.kind == KIND_TREAT else "plac"
+        part = "" if self.teacher.lane is self.lane else f"{self.teacher.lane.name}-"
+        return f"{self.lane.queue_prefix}{tag}-{self.target}-{part}{self.teacher.dose}"
 
 
 def leaf_from_key(key: str) -> SoftLeaf:
-    """Inverse of `SoftLeaf.key`.
+    """Inverse of `SoftLeaf.key` (either part).
 
     Raises:
         ValueError: Malformed key or an off-plan field.
     """
     parts = key.split("|")
-    if len(parts) not in (8, 9) or parts[:2] != [KEY_PREFIX, "leaf"]:
+    lane = LANES_BY_PREFIX.get(parts[0])
+    screen = plan.SOFT_ROLLOUT_SCREEN
+    n = 8 if lane is PART1 else 9
+    if lane is None or len(parts) not in (n, n + 1) or parts[1] != "leaf":
         raise ValueError(f"bad leaf key {key!r}")
-    kind, target, token, lr, r, g = parts[2:8]
-    cap = parts[8] if len(parts) == 9 else "s-1"
+    kind, target, field = parts[2:5]
+    if lane is not PART1:
+        screen = parts[5]
+    lr, r, g = parts[n - 3 : n]
+    cap = parts[n] if len(parts) == n + 1 else "s-1"
     if not (
         lr.startswith("lr") and r.startswith("r") and g.startswith("g")
     ) or not cap.startswith("s"):
         raise ValueError(f"bad leaf key {key!r}")
+    teacher_lane, token = lane, field
+    for other in LANES.values():
+        if other is not lane and field.startswith(f"{other.name}-"):
+            teacher_lane, token = other, field.removeprefix(f"{other.name}-")
     cell = LeafCell(kind, target, float(lr[2:]), int(r[1:]), int(g[1:]))
-    leaf = SoftLeaf(cell, teacher_from_token(kind, target, token), int(cap[1:]))
+    teacher = teacher_from_token(kind, target, token, teacher_lane)
+    leaf = SoftLeaf(cell, teacher, int(cap[1:]), screen, lane)
     if leaf.key != key:
         raise ValueError(f"{key!r} does not round-trip ({leaf.key!r})")
     return leaf
@@ -844,11 +987,17 @@ def leaves_for(teacher: TeacherRef) -> tuple[SoftLeaf, ...]:
     return tuple(SoftLeaf(c, teacher) for c in leaf_cells(teacher.target, teacher.kind))
 
 
-def student_experiment_path(domain: str) -> Path:
-    return GENERATED_DIR / "experiment" / f"newdom_gkd_student_{domain}.yaml"
+def student_experiment_path(
+    domain: str, lane: Lane = PART1, teacher_lane: Lane = PART1
+) -> Path:
+    """Experiment YAML of `lane`'s leaves in `domain` on `teacher_lane` teachers."""
+    suffix = "" if teacher_lane is lane else f"_{teacher_lane.name}"
+    return (
+        lane.generated_dir / "experiment" / f"newdom_gkd_student_{domain}{suffix}.yaml"
+    )
 
 
-def student_experiment_doc(domain: str) -> dict:
+def student_experiment_doc(domain: str, teacher_lane: Lane = PART1) -> dict:
     """GKD student experiment YAML: the domain's screens, probe banks, pool and panel."""
     d = plan.DOMAINS[domain]
     return {
@@ -857,7 +1006,9 @@ def student_experiment_doc(domain: str) -> dict:
         "teacher_workflow": ws160m_plan.TEACHER_WORKFLOW,
         "teacher_param_tag": plan.SOFT_TEACHER_TAG,
         "teacher_ftseed": 0,
-        "teacher_subdir": run_set_subdir(SDF_TEACHERS_SUBDIR, RUN_SET_ID),
+        "teacher_subdir": run_set_subdir(
+            SDF_TEACHERS_SUBDIR, teacher_lane.teacher_run_set
+        ),
         "wandb_project": "subliminal-learning-newdom",
         "gkd": {
             "domain": domain,
@@ -887,11 +1038,11 @@ def leaf_train_doc(leaf: SoftLeaf) -> dict:
         "teacher_param_tags": {ws160m_plan.TEACHER_MODE: leaf.teacher.param_tag},
         "student_lr": {"lora": [float(c.lr)]},
         "num_epochs": float(STUDENT_EPOCHS),
-        "rollout_screen": plan.SOFT_ROLLOUT_SCREEN,
+        "rollout_screen": leaf.screen,
         "run_set_id": leaf.student_run_set,
-        "teacher_run_set_id": RUN_SET_ID,
+        "teacher_run_set_id": leaf.teacher.lane.teacher_run_set,
         "run_set_model_size": MODEL_SIZE,
-        "purpose": f"newdom soft {leaf.key}",
+        "purpose": f"{leaf.lane.campaign} soft {leaf.key}",
         "owner": plan.OWNER,
         "wandb": False,
         **({"max_steps": leaf.max_steps} if leaf.max_steps > 0 else {}),
@@ -944,8 +1095,9 @@ def leaf_yaml_paths(leaf: SoftLeaf) -> tuple[Path, Path]:
     """(train, verify) YAML paths of a leaf."""
     c = leaf.cell
     cap = f"_s{leaf.max_steps}" if leaf.max_steps > 0 else ""
-    stem = f"{c.kind}_{leaf.teacher.token}_lr{c.lr:g}_r{c.r}_g{c.g}{cap}.yaml"
-    root = GENERATED_DIR / "leaves" / c.target
+    screen = "" if leaf.lane is PART1 else f"_{leaf.screen}"
+    stem = f"{c.kind}_{leaf.teacher_field}{screen}_lr{c.lr:g}_r{c.r}_g{c.g}{cap}.yaml"
+    root = leaf.lane.generated_dir / "leaves" / c.target
     return root / stem, root / f"verify_{stem}"
 
 
@@ -959,8 +1111,9 @@ def leaf_verify_doc(leaf: SoftLeaf) -> dict:
 def leaf_yaml_docs(leaf: SoftLeaf) -> dict[Path, dict]:
     """Absolute path -> doc of every YAML a leaf's job reads."""
     train, verify = leaf_yaml_paths(leaf)
+    experiment = student_experiment_path(leaf.domain, leaf.lane, leaf.teacher.lane)
     return {
-        student_experiment_path(leaf.domain): student_experiment_doc(leaf.domain),
+        experiment: student_experiment_doc(leaf.domain, leaf.teacher.lane),
         train: leaf_train_doc(leaf),
         verify: leaf_verify_doc(leaf),
     }
@@ -969,13 +1122,26 @@ def leaf_yaml_docs(leaf: SoftLeaf) -> dict[Path, dict]:
 def eval_lock(leaf: SoftLeaf) -> Path:
     """Lock of the config dir the leaf's eval scores (shared by its sibling gseeds)."""
     digest = hashlib.sha256(str(leaf_dir(leaf).parent).encode()).hexdigest()[:24]
-    return EVAL_LOCK_DIR / f"{digest}.lock"
+    return leaf.lane.eval_lock_dir / f"{digest}.lock"
 
 
 def leaf_manifest_problems(
-    leaf: SoftLeaf, manifest: Mapping, teacher_manifest_sha256: str
+    leaf: SoftLeaf,
+    manifest: Mapping,
+    teacher_manifest_sha256: str,
+    screen_vocab_sha256: str | None = None,
 ) -> dict[str, tuple]:
-    """Field -> (got, want) of every GKD student manifest field off the planned leaf."""
+    """Field -> (got, want) of every GKD student manifest field off the planned leaf.
+
+    A leaf outside Part I also checks its screen identity: the run identity's
+    vocabulary sha against `screen_vocab_sha256`, and ``substring`` last in the rule
+    order under `strict_sub`.
+
+    Raises:
+        ValueError: A leaf outside Part I without `screen_vocab_sha256`.
+    """
+    if leaf.lane is not PART1 and screen_vocab_sha256 is None:
+        raise ValueError(f"{leaf.key}: the expected screen vocabulary sha is required")
     c = leaf.cell
     want = {
         "target_animal": c.target,
@@ -1007,7 +1173,7 @@ def leaf_manifest_problems(
         (
             "rollout_screen.mode",
             (manifest.get("rollout_screen") or {}).get("mode"),
-            plan.SOFT_ROLLOUT_SCREEN,
+            leaf.screen,
         ),
         (
             "gkd.candidates",
@@ -1016,6 +1182,14 @@ def leaf_manifest_problems(
         ),
     )
     bad.update({name: (got, w) for name, got, w in checks if got != w})
+    if leaf.lane is not PART1:
+        got = identity.get("rollout_screen_vocab_sha256")
+        if got != screen_vocab_sha256:
+            bad["run_identity.rollout_screen_vocab_sha256"] = (got, screen_vocab_sha256)
+        order = (manifest.get("rollout_screen") or {}).get("rule_order") or []
+        last = order[-1] if order else None
+        if leaf.screen == plan2.SCREEN_SUB and last != "substring":
+            bad["rollout_screen.rule_order[-1]"] = (last, "substring")
     lr = train.get("learning_rate")
     if not isinstance(lr, (int, float)) or not math.isclose(lr, c.lr, rel_tol=1e-9):
         bad["learning_rate"] = (lr, c.lr)
@@ -1027,9 +1201,11 @@ def leaf_manifest_problems(
 _FORBIDDEN: tuple[str, ...] = ("angela", "--force")
 
 
-def _config_flags(training: str, experiment: Path) -> list[str]:
+def _config_flags(
+    training: str, experiment: Path, paths: Path = PATHS_CONFIG_PATH
+) -> list[str]:
     return [
-        f"--paths-config {shlex.quote(str(PATHS_CONFIG_PATH))}",
+        f"--paths-config {shlex.quote(str(paths))}",
         f"--training-config {shlex.quote(training)}",
         f"--experiment-config {shlex.quote(str(experiment))}",
         f"--spec-registry {SPEC_REGISTRY}",
@@ -1048,15 +1224,21 @@ def teacher_train_cmd(ref: TeacherRef, ftseed: int) -> str:
             f"--animals {ref.target}",
             f"--base-models {shlex.quote(BASE_TOKEN)}",
             f"--param-tags {ref.param_tag}",
-            f"--run-set-id {RUN_SET_ID}",
-            *_config_flags(TEACHER_TRAINING_CONFIG, teacher_experiment_path()),
+            f"--run-set-id {ref.lane.teacher_run_set}",
+            *_config_flags(
+                TEACHER_TRAINING_CONFIG,
+                teacher_experiment_path(ref.lane),
+                ref.lane.paths_config,
+            ),
         ]
     )
     return f"{cmd} && test -f {shlex.quote(str(ref.manifest_path(ftseed)))}"
 
 
 def teacher_eval_cmd(ref: TeacherRef) -> str:
-    """Teacher eval sweep (every ftseed), then the panel of every ftseed."""
+    """Teacher eval sweep (every ftseed), then the panel of every ftseed. Outside Part
+    I the sweep holds a per-target lock (configs of one target share the base
+    control cache)."""
     sweep = " ".join(
         [
             f"uv run python -m {TEACHER_EVAL_MODULE}",
@@ -1065,15 +1247,26 @@ def teacher_eval_cmd(ref: TeacherRef) -> str:
             f"--animals {ref.target}",
             f"--base-models {shlex.quote(BASE_TOKEN)}",
             f"--param-tags {ref.param_tag}",
-            f"--run-set-id {RUN_SET_ID}",
-            *_config_flags(TEACHER_TRAINING_CONFIG, teacher_experiment_path()),
+            f"--run-set-id {ref.lane.teacher_run_set}",
+            *_config_flags(
+                TEACHER_TRAINING_CONFIG,
+                teacher_experiment_path(ref.lane),
+                ref.lane.paths_config,
+            ),
         ]
     )
     panel = (
         f"uv run python -m {PANEL_MODULE} teacher --kind {ref.kind} "
         f"--target {ref.target} --teacher {ref.token} --device cuda:0"
     )
-    return f"{sweep} && {panel}"
+    if ref.lane is PART1:
+        return f"{sweep} && {panel}"
+    lock = ref.lane.eval_lock_dir / f"teacher-{ref.target}.lock"
+    return (
+        f"mkdir -p {shlex.quote(str(lock.parent))} && "
+        f"flock -w {EVAL_LOCK_WAIT_S} {shlex.quote(str(lock))} {sweep} && "
+        f"{panel} --lane {ref.lane.name}"
+    )
 
 
 def leaf_train_cmd(leaf: SoftLeaf) -> str:
@@ -1090,11 +1283,17 @@ def leaf_train_cmd(leaf: SoftLeaf) -> str:
             f"--teacher-ftseeds {c.r}",
             f"--gseeds {c.g}",
             f"--run-set-id {leaf.student_run_set}",
-            f"--teacher-run-set-id {RUN_SET_ID}",
-            *_config_flags(
-                STUDENT_TRAINING_CONFIG, student_experiment_path(leaf.domain)
-            ),
+            f"--teacher-run-set-id {leaf.teacher.lane.teacher_run_set}",
+            *_leaf_config_flags(leaf),
         ]
+    )
+
+
+def _leaf_config_flags(leaf: SoftLeaf) -> list[str]:
+    return _config_flags(
+        STUDENT_TRAINING_CONFIG,
+        student_experiment_path(leaf.domain, leaf.lane, leaf.teacher.lane),
+        leaf.lane.paths_config,
     )
 
 
@@ -1112,9 +1311,7 @@ def leaf_eval_cmd(leaf: SoftLeaf) -> str:
             f"--animals {leaf.target}",
             f"--base-models {shlex.quote(BASE_TOKEN)}",
             f"--run-set-id {leaf.student_run_set}",
-            *_config_flags(
-                STUDENT_TRAINING_CONFIG, student_experiment_path(leaf.domain)
-            ),
+            *_leaf_config_flags(leaf),
         ]
     )
 

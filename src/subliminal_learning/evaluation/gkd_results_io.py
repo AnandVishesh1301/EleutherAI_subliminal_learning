@@ -59,6 +59,7 @@ from subliminal_learning.gkd.layout import (
     LORA_SAVE_TAGS,
     LORA_TARGET_TAGS,
     OPTIM_BY_SLUG,
+    ROLLOUT_SCREENS,
     XBASE_CONTROL_TEACHER_TAG,
 )
 from subliminal_learning.teachers.model_specs import spec_from_base_name, spec_label
@@ -66,6 +67,9 @@ from subliminal_learning.teachers.model_specs import spec_from_base_name, spec_l
 # Alternation built from the layout SSOT (longest first) so a slug can never be added
 # to `gkd_tag` without becoming readable here.
 _OPTIM_ALT = "|".join(sorted(OPTIM_BY_SLUG, key=len, reverse=True))
+_SCREEN_ALT = "|".join(
+    sorted((s for s in ROLLOUT_SCREENS if s != "legacy"), key=len, reverse=True)
+)
 _TARGET_BY_TAG = {tag: mods for mods, tag in LORA_TARGET_TAGS.items()}
 _SAVE_BY_TAG = {tag: mods for mods, tag in LORA_SAVE_TAGS.items()}
 _HP = r"[0-9.]+(?:e[+-]?\d+)?"
@@ -85,7 +89,7 @@ _GKD_TAG_RE = re.compile(
     r"(?:_clip(?P<clip>[0-9.]+))?"
     rf"(?:_wd(?P<wd_anchor>a)?(?P<wd>{_HP}))?"
     r"(?:_n(?P<subset_n>\d+)(?:d(?P<subset_seed>\d+))?)?"
-    r"(?:_(?P<rollout_screen>strict))?"
+    rf"(?:_(?P<rollout_screen>{_SCREEN_ALT}))?"
     r"(?:_top(?:ce(?P<top_k_ce>\d+)|(?P<top_k>\d+)(?P<top_k_ghost>g)?))?$"
 )
 _TEACHER_TAG_RE = re.compile(

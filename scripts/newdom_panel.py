@@ -1,5 +1,5 @@
-"""CLI: manifest check + specificity-panel probabilities of one `newdom` soft student
-leaf (`leaf`) or every ftseed of one teacher config (`teacher`)."""
+"""CLI: manifest check + specificity-panel probabilities of one `newdom` / `newdom2` soft
+student leaf (`leaf`) or every ftseed of one teacher config (`teacher`)."""
 
 from __future__ import annotations
 
@@ -29,11 +29,14 @@ def teacher(
     target: str = typer.Option(...),
     teacher: str = typer.Option(..., help="Teacher token (ep5, ep5-s750, ...)."),
     device: str = typer.Option("cuda:0"),
+    lane: str = typer.Option(
+        "part1", help="Campaign part of the config (part1, part2)."
+    ),
 ) -> None:
     """Panel of every ftseed of one teacher config."""
     load_dotenv()
     configure_loguru()
-    newdom_panel_pipeline.run_teacher(kind, target, teacher, device)
+    newdom_panel_pipeline.run_teacher(kind, target, teacher, device, lane)
 
 
 if __name__ == "__main__":

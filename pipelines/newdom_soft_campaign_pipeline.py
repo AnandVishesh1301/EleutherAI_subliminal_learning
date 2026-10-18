@@ -168,8 +168,12 @@ def queue_defaults(cfg: driver_io.CampaignDriverConfig) -> dict:
 # ---- queues -------------------------------------------------------------------------------
 
 
-def submitted(cfg: driver_io.CampaignDriverConfig) -> list[str]:
-    return [n for n in soft.QUEUE_PRIORITIES if store.queue_exists(cfg.queue_root, n)]
+def submitted(
+    cfg: driver_io.CampaignDriverConfig, names: Sequence[str] | None = None
+) -> list[str]:
+    """The queues of `names` (default the soft channel's) that exist."""
+    names = soft.QUEUE_PRIORITIES if names is None else names
+    return [n for n in names if store.queue_exists(cfg.queue_root, n)]
 
 
 def missing_jobs(
@@ -220,13 +224,15 @@ def write_yamls(cfg: driver_io.CampaignDriverConfig, docs: Mapping[Path, dict]) 
     return len(docs)
 
 
-def _repin(cfg: driver_io.CampaignDriverConfig) -> str | None:
+def _repin(
+    cfg: driver_io.CampaignDriverConfig, names: Sequence[str] | None = None
+) -> str | None:
     """Move every queue with work left (or failures) to the campaign pin."""
     if cfg.dry_run:
         return None
     want = queue_defaults(cfg)
     n = 0
-    for name in submitted(cfg):
+    for name in submitted(cfg, names):
         if (
             store.queue_complete(cfg.queue_root, name)
             and not store.queue_status(cfg.queue_root, name)["failed"]
@@ -238,9 +244,13 @@ def _repin(cfg: driver_io.CampaignDriverConfig) -> str | None:
     return f"repin(queues={n})" if n else None
 
 
-def _requeue_and_holes(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
+def _requeue_and_holes(
+    cfg: driver_io.CampaignDriverConfig,
+    state: dict,
+    names: Sequence[str] | None = None,
+) -> None:
     holes = state.setdefault("holes", {})
-    for name in submitted(cfg):
+    for name in submitted(cfg, names):
         try:
             driver_io.requeue_failed_under_cap(cfg, name)
         except RuntimeError as err:
@@ -251,8 +261,8 @@ def _requeue_and_holes(cfg: driver_io.CampaignDriverConfig, state: dict) -> None
             holes.pop(name, None)
 
 
-def disk_problems() -> list[str]:
-    path = plan.ROOT
+def disk_problems(root: Path = plan.ROOT) -> list[str]:
+    path = root
     while not path.exists():
         path = path.parent
     free = shutil.disk_usage(path).free / 2**30
