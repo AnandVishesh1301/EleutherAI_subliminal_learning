@@ -276,3 +276,81 @@ def test_declared_core30_data_order_arms_keep_complete_blocks_only(repo, monkeyp
     assert set(exclusions.exclusion_reason) == {"incomplete_teacher_block"}
     assert kept.ftseed.eq(1).all() and kept.tseed.eq(1).all()
     assert kept.treatment_dead.eq(1).all() and kept.control_dead.eq(1).all()
+
+
+def _arms(*specs):
+    out = []
+    for arm, teachers in specs:
+        for t in teachers:
+            out.append(rows().assign(teacher=t, registry_arm=arm))
+    return pd.concat(out, ignore_index=True)
+
+
+def test_nested_duplicate_arms_keep_superset_and_exclude_subset():
+    selected = _arms(("small", ["t1", "t2"]), ("big", ["t1", "t2", "t3"]))
+    kept, rejected = complete._drop_nested_duplicate_arms(selected)
+    assert set(kept.registry_arm) == {"big"} and len(kept) == 6
+    assert not kept.duplicated([*complete.BLOCK, "student_tag"]).any()
+    (excl,) = rejected
+    assert len(excl) == 4 and set(excl.registry_arm) == {"small"}
+    assert set(excl.exclusion_reason) == {"duplicate_endpoints_superseded_by: big"}
+
+
+def test_non_nested_duplicate_arms_raise_naming_both():
+    selected = _arms(("armA", ["t1", "t2"]), ("armB", ["t2", "t3"]))
+    with pytest.raises(ValueError, match="armA") as err:
+        complete._drop_nested_duplicate_arms(selected)
+    assert "armB" in str(err.value) and "('dog', 's', 'r')" in str(err.value)
+
+
+def test_no_duplicate_arms_unchanged():
+    selected = _arms(("armA", ["t1"]), ("armB", ["t2"]))
+    kept, rejected = complete._drop_nested_duplicate_arms(selected)
+    pd.testing.assert_frame_equal(kept, selected)
+    assert rejected == []
+
+
+def test_nested_arms_through_select_mark_subset_blocks_not_retained(repo, monkeypatch):
+    regpath = repo / "registry.json"
+    common = dict(
+        animal="dog",
+        sender="DataDecide-dolma1_7-1B-seed-default",
+        receiver="DataDecide-dclm-baseline-1B-seed-default",
+        tseed=0,
+        data_order="cross-recipe",
+    )
+    arms = [
+        dict(name="big", teachers=["t1", "t2"], **common),
+        dict(name="small", teachers=["t1"], **common),
+    ]
+    regpath.write_text(json.dumps(dict(ftseed=1, arms=arms)))
+    monkeypatch.setattr(registry, "_registry_paths", lambda _: [regpath])
+    extra = pd.concat(
+        [
+            rows(
+                ("a", "b"),
+                relation=registry._category(arm),
+                registry_arm=arm["name"],
+                registry_file=str(regpath),
+            ).assign(
+                teacher=t,
+                animal="dog",
+                sender=common["sender"],
+                receiver=common["receiver"],
+                tseed=0,
+            )
+            for arm in arms
+            for t in arm["teachers"]
+        ],
+        ignore_index=True,
+    )
+    base = rows(relation=tfp.RELATIONS[0]).iloc[:0]
+    kept, _, blocks, exclusions = complete.select_complete_pairs(
+        base, extra, tfp.default_context(), repo
+    )
+    assert set(kept.registry_arm) == {"big"} and len(kept) == 4
+    small = blocks[blocks.registry_arm.eq("small")]
+    assert len(small) == 1 and not small.retained.any()
+    assert set(small.exclusion_reason) == {"duplicate_endpoints_superseded_by: big"}
+    assert blocks[blocks.registry_arm.eq("big")].retained.all()
+    assert "duplicate_endpoints_superseded_by: big" in set(exclusions.exclusion_reason)

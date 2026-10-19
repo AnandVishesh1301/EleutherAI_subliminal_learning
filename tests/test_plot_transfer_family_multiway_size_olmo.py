@@ -94,8 +94,8 @@ def test_size_olmo_family_statistics_and_pending(same_model_present):
     plot.plt.close(fig)
 
 
-def test_size_olmo_exports_do_not_overwrite_unrelated_file(tmp_path, monkeypatch):
-    existing = tmp_path / "unrelated_existing_figure.png"
+def test_size_olmo_exports_do_not_overwrite_top_row(tmp_path, monkeypatch):
+    existing = tmp_path / "figure2.png"
     existing.write_bytes(b"previous")
     saved = []
     monkeypatch.setattr(
@@ -105,8 +105,7 @@ def test_size_olmo_exports_do_not_overwrite_unrelated_file(tmp_path, monkeypatch
     )
     plot.export_size_olmo(_table(), tfp.default_context(), tmp_path)
     assert saved == [
-        f"transfer_family_complete_multiway_size_olmo.{ext}"
-        for ext in ["png", "pdf", "svg"]
+        f"figure2_olmo.{ext}" for ext in ["png", "pdf", "svg"]
     ]
     assert existing.read_bytes() == b"previous"
 

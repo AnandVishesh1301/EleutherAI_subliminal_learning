@@ -1,0 +1,1748 @@
+{
+  "created_utc": "2026-10-17T18:43:26.335250+00:00",
+  "source_path": "/home/angela/EleutherAI_subliminal_learning/docs/results/data/checkpoint_entropy_transfer_all_teachers_20260921.csv",
+  "source_sha256": "864f030d5224d7da47ecde2ffc9aa84dd98f969779160de82dd35185f70e275a",
+  "script_sha256": "cfc563d8d25206695e8bd7a2d5a999d7b9647bb6fe7a83d7db4aabf8924dce61",
+  "helper_sha256": "d94d91cf915347e9aca1e2a47d91aaa22da91538bfba58e350e46399c64e2b7b",
+  "canonical_recipes": [
+    "ep20_lr1e-4_r16a32",
+    "ep2_lr5e-4_r32a64",
+    "ep7_lr5e-4_r8a8",
+    "ep10_lr1e-4_r64a64",
+    "ep20_lr1e-4_r8a16"
+  ],
+  "animal": "dog",
+  "teacher_seed": 1,
+  "student_recipe": "ep10_lr1e-4_r8a32",
+  "n_recipe_cells": 825,
+  "n_complete_five_recipe_groups": 165,
+  "excluded_incomplete_groups": [],
+  "checkpoints": {
+    "orig": [
+      25000,
+      50000,
+      75000,
+      80000,
+      85000,
+      90000,
+      95000,
+      100000,
+      105000,
+      110000,
+      115000,
+      120000,
+      125000,
+      130000,
+      143000
+    ],
+    "ds1": [
+      25000,
+      50000,
+      75000,
+      80000,
+      85000,
+      90000,
+      95000,
+      100000,
+      105000,
+      110000,
+      115000,
+      120000,
+      125000,
+      130000,
+      143000
+    ],
+    "ds2": [
+      25000,
+      50000,
+      75000,
+      80000,
+      85000,
+      90000,
+      95000,
+      100000,
+      105000,
+      110000,
+      115000,
+      120000,
+      125000,
+      130000,
+      143000
+    ],
+    "ds3": [
+      25000,
+      50000,
+      75000,
+      80000,
+      85000,
+      90000,
+      95000,
+      100000,
+      105000,
+      110000,
+      115000,
+      120000,
+      125000,
+      130000,
+      143000
+    ],
+    "fs1": [
+      25000,
+      50000,
+      75000,
+      80000,
+      85000,
+      90000,
+      95000,
+      100000,
+      105000,
+      110000,
+      115000,
+      120000,
+      125000,
+      130000,
+      143000
+    ],
+    "fs2": [
+      25000,
+      50000,
+      75000,
+      80000,
+      85000,
+      90000,
+      95000,
+      100000,
+      105000,
+      110000,
+      115000,
+      120000,
+      125000,
+      130000,
+      143000
+    ],
+    "fs3": [
+      25000,
+      50000,
+      75000,
+      80000,
+      85000,
+      90000,
+      95000,
+      100000,
+      105000,
+      110000,
+      115000,
+      120000,
+      125000,
+      130000,
+      143000
+    ],
+    "wc1": [
+      25000,
+      50000,
+      75000,
+      80000,
+      85000,
+      90000,
+      95000,
+      100000,
+      105000,
+      110000,
+      115000,
+      120000,
+      125000,
+      130000,
+      143000
+    ],
+    "wc2": [
+      25000,
+      50000,
+      75000,
+      80000,
+      85000,
+      90000,
+      95000,
+      100000,
+      105000,
+      110000,
+      115000,
+      120000,
+      125000,
+      130000,
+      143000
+    ],
+    "pr1234": [
+      25000,
+      50000,
+      75000,
+      80000,
+      85000,
+      90000,
+      95000,
+      100000,
+      105000,
+      110000,
+      115000,
+      120000,
+      125000,
+      130000,
+      143000
+    ],
+    "prv1_1234": [
+      25000,
+      50000,
+      75000,
+      80000,
+      85000,
+      90000,
+      95000,
+      100000,
+      105000,
+      110000,
+      115000,
+      120000,
+      125000,
+      130000,
+      143000
+    ]
+  },
+  "entropy_y_limits": [
+    4.5,
+    7.057755278982137
+  ],
+  "lineages": [
+    "orig",
+    "ds1",
+    "ds2",
+    "ds3",
+    "fs1",
+    "fs2",
+    "fs3",
+    "wc1",
+    "wc2",
+    "pr1234",
+    "prv1_1234"
+  ],
+  "plotted_metrics": [
+    "delta_p",
+    "first_entropy_nats"
+  ],
+  "transfer_metric": "delta_p",
+  "control_source": "{root}/students/controls/base/ckpt/{base}@step{S}/teacher-{base}@step{T}/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1; for orig (pythia-160m) at T=143000 the teacher level is the unrevisioned teacher-pythia-160m (final weights are tensor-identical to step143000)",
+  "controls": [
+    {
+      "lineage": "ds1",
+      "step": 25000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step25000/teacher-pythia-160m-data-seed1@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.007155002749932464,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step25000/teacher-pythia-160m-data-seed1@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "4be6e899a3192435a772affee38d7ddfc3b65a5aa9c54912db3b253a1057fe58"
+    },
+    {
+      "lineage": "ds1",
+      "step": 50000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step50000/teacher-pythia-160m-data-seed1@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.012128430124430451,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step50000/teacher-pythia-160m-data-seed1@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "84b6d72351dec04362142c13de71b1610442022b9ddca96e5251c43fae29ad48"
+    },
+    {
+      "lineage": "ds1",
+      "step": 75000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step75000/teacher-pythia-160m-data-seed1@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.014136668987339363,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step75000/teacher-pythia-160m-data-seed1@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "d10e97768e2608d36838620470a7acd159fa75b2d57fd2d085af62a027c21a05"
+    },
+    {
+      "lineage": "ds1",
+      "step": 80000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step80000/teacher-pythia-160m-data-seed1@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.02658946318202652,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step80000/teacher-pythia-160m-data-seed1@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "0de7abba423d6af148c739af37f558c692cd474099b06f0d6b3dc56fabb01a80"
+    },
+    {
+      "lineage": "ds1",
+      "step": 85000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step85000/teacher-pythia-160m-data-seed1@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.04193361617275514,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step85000/teacher-pythia-160m-data-seed1@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "77374df72c01897cdd4a12611dc73750a70e73824955d3aa49999cf0d69e149f"
+    },
+    {
+      "lineage": "ds1",
+      "step": 90000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step90000/teacher-pythia-160m-data-seed1@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.033973219168838116,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step90000/teacher-pythia-160m-data-seed1@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "07bd05758a670272bc7b176541ddc9a92b9283463abe4389280b15e9890d5adb"
+    },
+    {
+      "lineage": "ds1",
+      "step": 95000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step95000/teacher-pythia-160m-data-seed1@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.0147140956990188,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step95000/teacher-pythia-160m-data-seed1@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "e3dfbd2426785f7365e02bdb55747394c8128b30c34ffbcda30b72382bdd3ed3"
+    },
+    {
+      "lineage": "ds1",
+      "step": 100000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step100000/teacher-pythia-160m-data-seed1@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.022007983264047654,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step100000/teacher-pythia-160m-data-seed1@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "233b1f70d34c666588751e9e6cee28aeffcc1343c0fab6d4f3eea09a4e170e8a"
+    },
+    {
+      "lineage": "ds1",
+      "step": 105000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step105000/teacher-pythia-160m-data-seed1@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.05045647643040865,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step105000/teacher-pythia-160m-data-seed1@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "3959a735fb5c74e452c7b776b620eb3bda77c153b4c53bf06ac5d856c42c1741"
+    },
+    {
+      "lineage": "ds1",
+      "step": 110000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step110000/teacher-pythia-160m-data-seed1@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.04573765421053395,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step110000/teacher-pythia-160m-data-seed1@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "a7391a88d34e619b4876f96f9bfa8477c1c81b911a8f9a1b612ab724fe4b30b9"
+    },
+    {
+      "lineage": "ds1",
+      "step": 115000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step115000/teacher-pythia-160m-data-seed1@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.046127469236962496,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step115000/teacher-pythia-160m-data-seed1@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "18385d11614f8e9b117ccff22af41e75eb087eee7cc6689e7a69103a33055f9c"
+    },
+    {
+      "lineage": "ds1",
+      "step": 120000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step120000/teacher-pythia-160m-data-seed1@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.1428913984168321,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step120000/teacher-pythia-160m-data-seed1@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "fc6cc1e678207b5e2eadeaa695b24ddc9caf3269f9ceba5131443787452a7770"
+    },
+    {
+      "lineage": "ds1",
+      "step": 125000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step125000/teacher-pythia-160m-data-seed1@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.029491986617213115,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step125000/teacher-pythia-160m-data-seed1@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "6676c9837336c8b982a8ecf7751a603a1ae46cdf177698f9d4aa8eb6b746cc89"
+    },
+    {
+      "lineage": "ds1",
+      "step": 130000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step130000/teacher-pythia-160m-data-seed1@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.04705231448984705,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step130000/teacher-pythia-160m-data-seed1@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "7dd8681458a97a934b8359740c3c327ef30a4190c1f9ece8bf9d06348cd1eb8d"
+    },
+    {
+      "lineage": "ds1",
+      "step": 143000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step143000/teacher-pythia-160m-data-seed1@step143000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.024263830078998582,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed1@step143000/teacher-pythia-160m-data-seed1@step143000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "617d914e0ce648a6cd5ad963813e5a95a999dc8293a7886e9f9a04dbf696ba4c"
+    },
+    {
+      "lineage": "ds2",
+      "step": 25000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step25000/teacher-pythia-160m-data-seed2@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.009362668456160463,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step25000/teacher-pythia-160m-data-seed2@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "103ccd55c88341466e76873a90b21a1662640cce851efd5b7f577363ebc003d0"
+    },
+    {
+      "lineage": "ds2",
+      "step": 50000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step50000/teacher-pythia-160m-data-seed2@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.006271708962740377,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step50000/teacher-pythia-160m-data-seed2@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "937b12eb6252150620537b0cd4b815efd3249fc97b147d778c72400e3a0e1787"
+    },
+    {
+      "lineage": "ds2",
+      "step": 75000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step75000/teacher-pythia-160m-data-seed2@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.026645407414762304,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step75000/teacher-pythia-160m-data-seed2@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "0f10f9f1babe556049970906bbeeff2bf896645d3436133184442461ed3690c2"
+    },
+    {
+      "lineage": "ds2",
+      "step": 80000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step80000/teacher-pythia-160m-data-seed2@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.01407610451511573,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step80000/teacher-pythia-160m-data-seed2@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "4b8f715289c7a1d52f29956633edd7303367a76c8b34ba4bbedb3b190184252f"
+    },
+    {
+      "lineage": "ds2",
+      "step": 85000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step85000/teacher-pythia-160m-data-seed2@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.02327645705488976,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step85000/teacher-pythia-160m-data-seed2@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "e2f3b7afbf330f54994569ccac9aa81c8c60360de56da1df4252253acae9c61f"
+    },
+    {
+      "lineage": "ds2",
+      "step": 90000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step90000/teacher-pythia-160m-data-seed2@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.03841268968535587,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step90000/teacher-pythia-160m-data-seed2@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "8742f1975cef01e9446e4c0aa5f66327586a867481a856508422a76fed0df364"
+    },
+    {
+      "lineage": "ds2",
+      "step": 95000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step95000/teacher-pythia-160m-data-seed2@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.024020075534936042,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step95000/teacher-pythia-160m-data-seed2@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "62b5413a5625a1d4c341b45373dfa62648e6d6a03f0af47df26a9a856969b22d"
+    },
+    {
+      "lineage": "ds2",
+      "step": 100000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step100000/teacher-pythia-160m-data-seed2@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.018786087826592846,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step100000/teacher-pythia-160m-data-seed2@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "9a7ca8534a2ae6713f9e2828896070e23188e1a5dc234375df326a6db0c6c1a8"
+    },
+    {
+      "lineage": "ds2",
+      "step": 105000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step105000/teacher-pythia-160m-data-seed2@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.026265515816048718,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step105000/teacher-pythia-160m-data-seed2@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "d21f75bea3a5dd9fde8d270a6923f01740d47c526ac4fcf3cf44835fba95a88d"
+    },
+    {
+      "lineage": "ds2",
+      "step": 110000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step110000/teacher-pythia-160m-data-seed2@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.02278118738468038,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step110000/teacher-pythia-160m-data-seed2@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "1498550d5a0ee200649a674a3f8d14dbc514df58d52145124915ed85505274c4"
+    },
+    {
+      "lineage": "ds2",
+      "step": 115000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step115000/teacher-pythia-160m-data-seed2@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.007831459160661325,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step115000/teacher-pythia-160m-data-seed2@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "d93ab6b718de4bab48c8c8499bc7eadbc9ddc93ce0e9364be45246b55d45b734"
+    },
+    {
+      "lineage": "ds2",
+      "step": 120000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step120000/teacher-pythia-160m-data-seed2@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.012679323626216502,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step120000/teacher-pythia-160m-data-seed2@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "09d6d2de295c041e25f9b2785d04b07f2bb931166567d60477b0583470598271"
+    },
+    {
+      "lineage": "ds2",
+      "step": 125000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step125000/teacher-pythia-160m-data-seed2@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.01862225101562217,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step125000/teacher-pythia-160m-data-seed2@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "3c0af1e4c67670f77529a38c7e51d9dc6d3379329300998156394282f58278c7"
+    },
+    {
+      "lineage": "ds2",
+      "step": 130000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step130000/teacher-pythia-160m-data-seed2@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.01217396707390435,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step130000/teacher-pythia-160m-data-seed2@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "e7e9be3c8e8b446abcf77dfec2e9a041ed9fc64ed57a31f0b964ba2a9cb61aa2"
+    },
+    {
+      "lineage": "ds2",
+      "step": 143000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step143000/teacher-pythia-160m-data-seed2@step143000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.012280038497410715,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed2@step143000/teacher-pythia-160m-data-seed2@step143000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "ecab23d8abb81cc489c839acdba75186fee53a1fa8c948cfceaeed8a56543b5f"
+    },
+    {
+      "lineage": "ds3",
+      "step": 25000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step25000/teacher-pythia-160m-data-seed3@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.017833539760904387,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step25000/teacher-pythia-160m-data-seed3@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "2925ca3db4a6fa597b854f5dd346290e9b70d5d0b7a8e66b0552a05e1953039e"
+    },
+    {
+      "lineage": "ds3",
+      "step": 50000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step50000/teacher-pythia-160m-data-seed3@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.012454846271430143,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step50000/teacher-pythia-160m-data-seed3@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "f08eab408d28657e5553f79a1e84d45e356c3ce5df2c1d6cc8703b1253edf552"
+    },
+    {
+      "lineage": "ds3",
+      "step": 75000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step75000/teacher-pythia-160m-data-seed3@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.021100529985269532,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step75000/teacher-pythia-160m-data-seed3@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "04052d8e5c996dedf7ba117ecd14703d10b66b1193c4ad78576ee8c05eec996b"
+    },
+    {
+      "lineage": "ds3",
+      "step": 80000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step80000/teacher-pythia-160m-data-seed3@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.012419226935599,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step80000/teacher-pythia-160m-data-seed3@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "9a74629b0ce29da3c8df8150935eec6f075db1645e453ba57ac4fc9d344fcfe0"
+    },
+    {
+      "lineage": "ds3",
+      "step": 85000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step85000/teacher-pythia-160m-data-seed3@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.01131446306972066,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step85000/teacher-pythia-160m-data-seed3@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "ba6624269ad674fd3111538bd55460cc580b9d55d8ab4b127abc3ee013b4cf2e"
+    },
+    {
+      "lineage": "ds3",
+      "step": 90000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step90000/teacher-pythia-160m-data-seed3@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.022335592497256584,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step90000/teacher-pythia-160m-data-seed3@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "04ae8ced9732e14cdbaf0b3fde5d69d51be22438f8781938fb18a1948ac99aa4"
+    },
+    {
+      "lineage": "ds3",
+      "step": 95000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step95000/teacher-pythia-160m-data-seed3@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.01945156878151465,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step95000/teacher-pythia-160m-data-seed3@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "075f2e6eb139c4aca9507ff487efc0e47048f638a7d60034355ca1ef6f7b9960"
+    },
+    {
+      "lineage": "ds3",
+      "step": 100000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step100000/teacher-pythia-160m-data-seed3@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.01278136467852164,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step100000/teacher-pythia-160m-data-seed3@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "c514772f1d8ed4300ce3f59fd2b1fbf55cf8d0d3edd0291f83a9fd41ebadbd4c"
+    },
+    {
+      "lineage": "ds3",
+      "step": 105000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step105000/teacher-pythia-160m-data-seed3@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.022174693143751936,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step105000/teacher-pythia-160m-data-seed3@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "c8ad95691cc46a97743a3dd91f017ed23c2f2c4e40d812cf5983404869993bfe"
+    },
+    {
+      "lineage": "ds3",
+      "step": 110000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step110000/teacher-pythia-160m-data-seed3@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.016157227740332018,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step110000/teacher-pythia-160m-data-seed3@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "ee334fa30b61e795e7a13331cf63fc233c6d2e5b576fe2ad3502c605f77adceb"
+    },
+    {
+      "lineage": "ds3",
+      "step": 115000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step115000/teacher-pythia-160m-data-seed3@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.03691054092138074,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step115000/teacher-pythia-160m-data-seed3@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "1bc04cea57618c4ba788e9e79d443dcbaf34411b153a0cbbae32ecb28739aa9b"
+    },
+    {
+      "lineage": "ds3",
+      "step": 120000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step120000/teacher-pythia-160m-data-seed3@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.021455348722229248,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step120000/teacher-pythia-160m-data-seed3@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "767bb72ce62589d25229a56348ca0db38107694d6f66c9a5a630d9aa6bbc8ffa"
+    },
+    {
+      "lineage": "ds3",
+      "step": 125000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step125000/teacher-pythia-160m-data-seed3@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.015726798825489822,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step125000/teacher-pythia-160m-data-seed3@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "06cd605491c329853b4404e8285fbc6fe9b5943ab400eb3e68740f2e49d8a902"
+    },
+    {
+      "lineage": "ds3",
+      "step": 130000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step130000/teacher-pythia-160m-data-seed3@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.024895802369574085,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step130000/teacher-pythia-160m-data-seed3@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "013aead884e4999e80a28834f4dc4bb732482e03f625150d60cbf7563367533b"
+    },
+    {
+      "lineage": "ds3",
+      "step": 143000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step143000/teacher-pythia-160m-data-seed3@step143000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.027694549633888527,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-data-seed3@step143000/teacher-pythia-160m-data-seed3@step143000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "3c50f40ec7b73d52ff6332e2724a5b0a4dd649e2415d674b086f122062e331d5"
+    },
+    {
+      "lineage": "fs1",
+      "step": 25000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step25000/teacher-pythia-160m-seed1@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.010519498833164108,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step25000/teacher-pythia-160m-seed1@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "8d8e44b583001b1744bb45c340854100373ba456c0434dd5c6b80d31b219e70a"
+    },
+    {
+      "lineage": "fs1",
+      "step": 50000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step50000/teacher-pythia-160m-seed1@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.008101072718854994,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step50000/teacher-pythia-160m-seed1@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "52d623f691b0fe88444d755b1b603fe4fbd0e7bb9d20cfeff986958923c6cafe"
+    },
+    {
+      "lineage": "fs1",
+      "step": 75000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step75000/teacher-pythia-160m-seed1@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.008765833228826523,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step75000/teacher-pythia-160m-seed1@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "0b78a255f1207f6c78dc60c5ce078cc9b4111db59ec7d197e2a498d01a68bb47"
+    },
+    {
+      "lineage": "fs1",
+      "step": 80000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step80000/teacher-pythia-160m-seed1@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.00722919235471636,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step80000/teacher-pythia-160m-seed1@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "0ef82986534fc1a8d4498d786ad9d7874ff7e8faa236b869386c873f80995063"
+    },
+    {
+      "lineage": "fs1",
+      "step": 85000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step85000/teacher-pythia-160m-seed1@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.010907372691435739,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step85000/teacher-pythia-160m-seed1@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "286c44015b17680a22145ac5f9266a40c882e3b3faff0415bc94edd740159a89"
+    },
+    {
+      "lineage": "fs1",
+      "step": 90000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step90000/teacher-pythia-160m-seed1@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.004662521712598391,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step90000/teacher-pythia-160m-seed1@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "d075f2665bac75342e44598313d7c23c334848fcefb1e90d624934691fe31fe2"
+    },
+    {
+      "lineage": "fs1",
+      "step": 95000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step95000/teacher-pythia-160m-seed1@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.009722315859398804,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step95000/teacher-pythia-160m-seed1@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "02f41c356c29e903aab21245f3e7a3915f606e8ebcaeb7c54a842ffa8280fb65"
+    },
+    {
+      "lineage": "fs1",
+      "step": 100000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step100000/teacher-pythia-160m-seed1@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.02446316284534987,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step100000/teacher-pythia-160m-seed1@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "26cb73afde091752bca87c20759c42735d30baa56af3b8d59b8b87c49a939360"
+    },
+    {
+      "lineage": "fs1",
+      "step": 105000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step105000/teacher-pythia-160m-seed1@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.012931784378597513,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step105000/teacher-pythia-160m-seed1@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "9367cfcb040bf6a4a3bdc4181ebf37b03d6367dcab16bcf2c521a08c7b58f11c"
+    },
+    {
+      "lineage": "fs1",
+      "step": 110000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step110000/teacher-pythia-160m-seed1@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.009885015765030402,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step110000/teacher-pythia-160m-seed1@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "a379d33b94d362dfb5fd2c4e6c94e0a5528c65ef70a1fadf63db51d593822ed8"
+    },
+    {
+      "lineage": "fs1",
+      "step": 115000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step115000/teacher-pythia-160m-seed1@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.011911261277273297,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step115000/teacher-pythia-160m-seed1@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "21b323c17ccf691ebe600961ce1f1e1d5213ab24de48aafbee3549b26f80c010"
+    },
+    {
+      "lineage": "fs1",
+      "step": 120000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step120000/teacher-pythia-160m-seed1@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.005148810977552785,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step120000/teacher-pythia-160m-seed1@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "17e212cedcf67e5123c902e89a8e3e48b20744530c73034883d8e3a0d25b3823"
+    },
+    {
+      "lineage": "fs1",
+      "step": 125000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step125000/teacher-pythia-160m-seed1@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.017112206338788384,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step125000/teacher-pythia-160m-seed1@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "ab415e1074b565d620c41153c75de16c130f6e011f4f4b557bffda357eb3475b"
+    },
+    {
+      "lineage": "fs1",
+      "step": 130000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step130000/teacher-pythia-160m-seed1@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.008655691141611896,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step130000/teacher-pythia-160m-seed1@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "d413810690b94b8b4f4759ab53707ad33d7306caf41a244c7a64fde96e36422f"
+    },
+    {
+      "lineage": "fs1",
+      "step": 143000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step143000/teacher-pythia-160m-seed1@step143000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.013263556167366915,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed1@step143000/teacher-pythia-160m-seed1@step143000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "7c9bc0694274e94b0b30dda712ab6d310e41c131d1fc21b7e5ca83425592c755"
+    },
+    {
+      "lineage": "fs2",
+      "step": 25000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step25000/teacher-pythia-160m-seed2@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.005957538200018462,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step25000/teacher-pythia-160m-seed2@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "324c04aecc75dfc46e6171782637a1c3929f8bf0467220cba2af72e9a13a825d"
+    },
+    {
+      "lineage": "fs2",
+      "step": 50000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step50000/teacher-pythia-160m-seed2@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.008832669643161352,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step50000/teacher-pythia-160m-seed2@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "1d2a03397b6366c82dc3162edeefc8431b415f029c50cded289a0bbc0f9f7b38"
+    },
+    {
+      "lineage": "fs2",
+      "step": 75000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step75000/teacher-pythia-160m-seed2@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.01038142898643855,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step75000/teacher-pythia-160m-seed2@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "1c1a29f0ecd3abd5bae0ede56a0cef3d0c329f115a415016f111166ee5f0c98d"
+    },
+    {
+      "lineage": "fs2",
+      "step": 80000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step80000/teacher-pythia-160m-seed2@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.008193453698477243,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step80000/teacher-pythia-160m-seed2@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "180d90e1f656e681aa3afc19af02b425408e77ac0a620211ef4b21d465738b24"
+    },
+    {
+      "lineage": "fs2",
+      "step": 85000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step85000/teacher-pythia-160m-seed2@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.007010977900936268,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step85000/teacher-pythia-160m-seed2@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "72afaea140bfb87a2d8c3a367efd60a08f0ad0090e11b150a1284f7581992994"
+    },
+    {
+      "lineage": "fs2",
+      "step": 90000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step90000/teacher-pythia-160m-seed2@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.008500849233096233,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step90000/teacher-pythia-160m-seed2@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "75ff7166882492feb5fc54d54f5f55eb7ecae69cbe3b51fef4b71e84ee4ae4f7"
+    },
+    {
+      "lineage": "fs2",
+      "step": 95000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step95000/teacher-pythia-160m-seed2@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.007745689330913592,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step95000/teacher-pythia-160m-seed2@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "4139dcc690cb698b471d49c029f02cc0562889a2e70cfa4096158513885565d4"
+    },
+    {
+      "lineage": "fs2",
+      "step": 100000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step100000/teacher-pythia-160m-seed2@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.0056027298088156385,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step100000/teacher-pythia-160m-seed2@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "639f43e9ff977a9077c95f6d5db635408e0af6d70a2fb16d66623d8b63a0ea49"
+    },
+    {
+      "lineage": "fs2",
+      "step": 105000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step105000/teacher-pythia-160m-seed2@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.007748527059447952,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step105000/teacher-pythia-160m-seed2@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "aea2b46568f0eb3822b2180c7cf71c25d7a46637c8518643b8709505188d322c"
+    },
+    {
+      "lineage": "fs2",
+      "step": 110000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step110000/teacher-pythia-160m-seed2@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.007400927275593858,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step110000/teacher-pythia-160m-seed2@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "e557aa9e7d632f149eaacd7384c72e2a58686ca45c4f18a38ac81ab520a25189"
+    },
+    {
+      "lineage": "fs2",
+      "step": 115000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step115000/teacher-pythia-160m-seed2@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.004782673616282409,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step115000/teacher-pythia-160m-seed2@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "d420cf7b0baa8557358970e470f63520f67b84699fb3815e51c771a93041349f"
+    },
+    {
+      "lineage": "fs2",
+      "step": 120000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step120000/teacher-pythia-160m-seed2@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.009139403412700631,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step120000/teacher-pythia-160m-seed2@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "ad86cc33bdaeb41b119ab9e8bf1af85cb90d769fd46190f13e947228e38808c3"
+    },
+    {
+      "lineage": "fs2",
+      "step": 125000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step125000/teacher-pythia-160m-seed2@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.004050628664481337,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step125000/teacher-pythia-160m-seed2@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "a13c2516af7d9a630d8caf70b59f1a4ccf5d57dd19fa7c0daa8261a7365e57db"
+    },
+    {
+      "lineage": "fs2",
+      "step": 130000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step130000/teacher-pythia-160m-seed2@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.007291703973605763,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step130000/teacher-pythia-160m-seed2@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "0b72d3f19eff2915a3bdb16a2f4413a944f6ce4756f6a48c96f7980128453255"
+    },
+    {
+      "lineage": "fs2",
+      "step": 143000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step143000/teacher-pythia-160m-seed2@step143000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.006315945472015301,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed2@step143000/teacher-pythia-160m-seed2@step143000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "049bc9abe700a9c28dbd4d8baf926f47a11a5a06ad09700b5e81de3360c316e8"
+    },
+    {
+      "lineage": "fs3",
+      "step": 25000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step25000/teacher-pythia-160m-seed3@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.010746829966956284,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step25000/teacher-pythia-160m-seed3@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "5a8e284929fe7806f1212ae3c731dfa40162cf786ca196d3d0e5c2eea5740807"
+    },
+    {
+      "lineage": "fs3",
+      "step": 50000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step50000/teacher-pythia-160m-seed3@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.017343723459052853,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step50000/teacher-pythia-160m-seed3@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "fd6522d0120bd0aa7c3837c377525ded5f4a1b6dc2f5ad31b5842ec2e29cc67b"
+    },
+    {
+      "lineage": "fs3",
+      "step": 75000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step75000/teacher-pythia-160m-seed3@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.014184681573678972,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step75000/teacher-pythia-160m-seed3@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "ae18e730558a8a86d4ac51a9660baf2fe31765ee809d4d0aa40810b20277b06b"
+    },
+    {
+      "lineage": "fs3",
+      "step": 80000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step80000/teacher-pythia-160m-seed3@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.008842728722229368,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step80000/teacher-pythia-160m-seed3@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "9d7d3f2cf33865dc7fd5bd8ec18e6eae73868d9b098c61d03768721c4efe8a09"
+    },
+    {
+      "lineage": "fs3",
+      "step": 85000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step85000/teacher-pythia-160m-seed3@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.014232738644932397,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step85000/teacher-pythia-160m-seed3@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "ea15aee1af199c04c33d7e727d64447af1a55a7f30798fac630173a93879dd36"
+    },
+    {
+      "lineage": "fs3",
+      "step": 90000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step90000/teacher-pythia-160m-seed3@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.021579026717226953,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step90000/teacher-pythia-160m-seed3@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "ebf336fb3e05ce6a27b6cbc904c9b63c4b822faf390a49eb0d47771bb5316ef1"
+    },
+    {
+      "lineage": "fs3",
+      "step": 95000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step95000/teacher-pythia-160m-seed3@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.014016523886239156,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step95000/teacher-pythia-160m-seed3@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "29709fb7bf17ff03528d8da6372329c859504426fed7c499ec899bde4bdf2eee"
+    },
+    {
+      "lineage": "fs3",
+      "step": 100000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step100000/teacher-pythia-160m-seed3@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.015957518535433337,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step100000/teacher-pythia-160m-seed3@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "6ae66de50a1b426f0024f42a2ed90baf1b09c7677d81d83ced13cd91f845a488"
+    },
+    {
+      "lineage": "fs3",
+      "step": 105000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step105000/teacher-pythia-160m-seed3@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.008821820835582911,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step105000/teacher-pythia-160m-seed3@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "c8ee8e52b94c78c7731048c129eeed1227511c92080a45440e3807f958e9a489"
+    },
+    {
+      "lineage": "fs3",
+      "step": 110000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step110000/teacher-pythia-160m-seed3@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.011437629548745464,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step110000/teacher-pythia-160m-seed3@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "9a89aa8dd613f750a1fea6649f96c7836fefdb75de3aebf955dc63bfa2269d69"
+    },
+    {
+      "lineage": "fs3",
+      "step": 115000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step115000/teacher-pythia-160m-seed3@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.013791554403142073,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step115000/teacher-pythia-160m-seed3@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "663b407870e4abc3d6319ecc8286b71ea4f105373cfeb24c81ed0f7f8e9a4759"
+    },
+    {
+      "lineage": "fs3",
+      "step": 120000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step120000/teacher-pythia-160m-seed3@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.012062304454448168,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step120000/teacher-pythia-160m-seed3@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "a63037ad016a35288b18ed1d01b7ced6b8db2dde10fa6ae6c036462fefc9635a"
+    },
+    {
+      "lineage": "fs3",
+      "step": 125000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step125000/teacher-pythia-160m-seed3@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.046307094977237284,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step125000/teacher-pythia-160m-seed3@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "a14ca2a2873758ddeb85b54e10b019150c213a8e892856246927154ced306027"
+    },
+    {
+      "lineage": "fs3",
+      "step": 130000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step130000/teacher-pythia-160m-seed3@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.032628676553267726,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step130000/teacher-pythia-160m-seed3@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "e63702a451f56610045b05cf1d22b327d2701e02a8ceca09faab8f34fac25b2e"
+    },
+    {
+      "lineage": "fs3",
+      "step": 143000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step143000/teacher-pythia-160m-seed3@step143000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.008743238473980454,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-seed3@step143000/teacher-pythia-160m-seed3@step143000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "d818fec1db2ffb751d2e7f54d5d53de354e368e1f96e27dc6f8c169954fd9419"
+    },
+    {
+      "lineage": "orig",
+      "step": 25000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step25000/teacher-pythia-160m@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.017711308824946172,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step25000/teacher-pythia-160m@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "f8a34bfb1fe6bf6e8a3dd020883f2bf125722e16a33ee4dce5b38458d3657aa6"
+    },
+    {
+      "lineage": "orig",
+      "step": 50000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step50000/teacher-pythia-160m@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.018825442338129505,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step50000/teacher-pythia-160m@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "536da72c3ba9e9a854bef435fe4bc3732856b9370c60b5d8e3be3ff9ee41ab66"
+    },
+    {
+      "lineage": "orig",
+      "step": 75000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step75000/teacher-pythia-160m@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.012640223308262649,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step75000/teacher-pythia-160m@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "727e9c4ae33071966c4286f71daf3e4d65259aa5814d259546d6ac24901303b6"
+    },
+    {
+      "lineage": "orig",
+      "step": 80000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step80000/teacher-pythia-160m@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.021035445010929833,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step80000/teacher-pythia-160m@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "107a275dc9f26f8918688daa4d41a4c5d66db287e33c1ff7c761b010599df403"
+    },
+    {
+      "lineage": "orig",
+      "step": 85000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step85000/teacher-pythia-160m@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.011394060098100454,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step85000/teacher-pythia-160m@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "40fbccc145035cdc6b05b57c762f9fb462d904ed80a66b73bc53e89957065c3b"
+    },
+    {
+      "lineage": "orig",
+      "step": 90000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step90000/teacher-pythia-160m@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.008543585500447079,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step90000/teacher-pythia-160m@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "7a29e44ad71ae32d713bc8a48d30c795a2c3c9e2b2c0b410c3c7c4f8a383e4d9"
+    },
+    {
+      "lineage": "orig",
+      "step": 95000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step95000/teacher-pythia-160m@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.007128495038632537,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step95000/teacher-pythia-160m@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "2bcbfc2b6b9ab527ebfa1f281f2f2125b6e1d26f61a66d7445973b628b6a31c2"
+    },
+    {
+      "lineage": "orig",
+      "step": 100000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step100000/teacher-pythia-160m@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.03972461921046488,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step100000/teacher-pythia-160m@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "cc2a6a02bdc7f01f978c32ed0c9dbe80f6357caf37ef6964095a62000613a0fe"
+    },
+    {
+      "lineage": "orig",
+      "step": 105000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step105000/teacher-pythia-160m@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.024702142088499385,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step105000/teacher-pythia-160m@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "e23c025cdcb5d0bd7a29fe4f7a44ae2159a14037499357c6b2a9b3106039483f"
+    },
+    {
+      "lineage": "orig",
+      "step": 110000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step110000/teacher-pythia-160m@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.020452781236526787,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step110000/teacher-pythia-160m@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "e7b6c499d7d46ecf0a0b4170277d84af78096aaac612e6507ca28fdf2bf8c138"
+    },
+    {
+      "lineage": "orig",
+      "step": 115000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step115000/teacher-pythia-160m@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.014783588119898923,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step115000/teacher-pythia-160m@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "72697e51bdc3d0f6c3186563087f2a48619c48a276cb218c2343c12255be4b1a"
+    },
+    {
+      "lineage": "orig",
+      "step": 120000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step120000/teacher-pythia-160m@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.02366796334972605,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step120000/teacher-pythia-160m@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "ab2987a6e59493197492c0755520df8e2ca79f7daef24ad07699f056704f9d99"
+    },
+    {
+      "lineage": "orig",
+      "step": 125000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step125000/teacher-pythia-160m@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.009065090283984318,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step125000/teacher-pythia-160m@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "5f7a0d3aeb775d3d033358c2b74e49e11282b4b11652faa9eb5cdfbff70009a9"
+    },
+    {
+      "lineage": "orig",
+      "step": 130000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step130000/teacher-pythia-160m@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.014532765937328804,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step130000/teacher-pythia-160m@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "0273e30cfec52a6be178c7c86f95222672d3418fc1361e40dc2dd2c9dac00af7"
+    },
+    {
+      "lineage": "orig",
+      "step": 143000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step143000/teacher-pythia-160m/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.008441014584968798,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m@step143000/teacher-pythia-160m/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "5a60bbab2cec72be98d29abf75caa146af5c4200abffaf3e8eee1fdcf885b1e8"
+    },
+    {
+      "lineage": "pr1234",
+      "step": 25000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step25000/teacher-pythia-160m-pilerepro-seed1234@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.006140693499182817,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step25000/teacher-pythia-160m-pilerepro-seed1234@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "be7c13de0dff21e212e5af2cf8831311a74a42cb889be1b06dc077aa2621494b"
+    },
+    {
+      "lineage": "pr1234",
+      "step": 50000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step50000/teacher-pythia-160m-pilerepro-seed1234@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.013041642205789685,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step50000/teacher-pythia-160m-pilerepro-seed1234@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "f609a0e4ec3b8fe699cc4c692dc4b08177449c2b5dcf5cc9d7ea82fa4e9e4996"
+    },
+    {
+      "lineage": "pr1234",
+      "step": 75000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step75000/teacher-pythia-160m-pilerepro-seed1234@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.011464819320826792,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step75000/teacher-pythia-160m-pilerepro-seed1234@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "7ae1a03f067f66e50f793ebaa0e7b5a5aba544ebf17bd088745fdd4587a7f362"
+    },
+    {
+      "lineage": "pr1234",
+      "step": 80000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step80000/teacher-pythia-160m-pilerepro-seed1234@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.009202297671581618,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step80000/teacher-pythia-160m-pilerepro-seed1234@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "22bb1e782683a670ac8209614ecdc831056d058fa5677ae350577465d8981172"
+    },
+    {
+      "lineage": "pr1234",
+      "step": 85000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step85000/teacher-pythia-160m-pilerepro-seed1234@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.009618666189344366,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step85000/teacher-pythia-160m-pilerepro-seed1234@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "c82495fd2b489f0d01e291980441e04cdf88c0100e38a3115172d74ae1daabed"
+    },
+    {
+      "lineage": "pr1234",
+      "step": 90000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step90000/teacher-pythia-160m-pilerepro-seed1234@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.008727762212511153,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step90000/teacher-pythia-160m-pilerepro-seed1234@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "695e94168a9d9ea5f70116e8e1a0c2bdaa9901e665cb1ff31bcf7b001e9457d0"
+    },
+    {
+      "lineage": "pr1234",
+      "step": 95000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step95000/teacher-pythia-160m-pilerepro-seed1234@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.011147560471508769,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step95000/teacher-pythia-160m-pilerepro-seed1234@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "da332eb51365781c2fd6fd30c099dad317998706c83db3d89284ed946e2b9b5d"
+    },
+    {
+      "lineage": "pr1234",
+      "step": 100000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step100000/teacher-pythia-160m-pilerepro-seed1234@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.02097760554817796,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step100000/teacher-pythia-160m-pilerepro-seed1234@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "df3fec88af109fd6ce5340f73a9bad12bc2f4ec69dd4ac44e8385cf9f8967f12"
+    },
+    {
+      "lineage": "pr1234",
+      "step": 105000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step105000/teacher-pythia-160m-pilerepro-seed1234@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.020858390983485152,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step105000/teacher-pythia-160m-pilerepro-seed1234@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "f6c862f398fee18654627c1533083c2c1d7dd26cd9e2a885596772ecd6e8f62e"
+    },
+    {
+      "lineage": "pr1234",
+      "step": 110000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step110000/teacher-pythia-160m-pilerepro-seed1234@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.012467212060000748,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step110000/teacher-pythia-160m-pilerepro-seed1234@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "2bdd0733303aee4eab05de1de199a67eb186138b628afa49b628af34b174df8c"
+    },
+    {
+      "lineage": "pr1234",
+      "step": 115000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step115000/teacher-pythia-160m-pilerepro-seed1234@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.008741171355359257,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step115000/teacher-pythia-160m-pilerepro-seed1234@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "361f7e20f0df5f5dc5e01e235f48f48e9b89376ff4f9155b475c96ede6eceec0"
+    },
+    {
+      "lineage": "pr1234",
+      "step": 120000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step120000/teacher-pythia-160m-pilerepro-seed1234@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.012567883561714552,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step120000/teacher-pythia-160m-pilerepro-seed1234@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "d51a374ea550023330dbf8a5170885b15c77f2e0099020b9c4847b7ad6191d0e"
+    },
+    {
+      "lineage": "pr1234",
+      "step": 125000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step125000/teacher-pythia-160m-pilerepro-seed1234@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.016248642007412856,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step125000/teacher-pythia-160m-pilerepro-seed1234@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "dc363e3cbdf6b3f75e7c046dd0356303f8b60a5a11d5ab97b04a624aae3f49c7"
+    },
+    {
+      "lineage": "pr1234",
+      "step": 130000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step130000/teacher-pythia-160m-pilerepro-seed1234@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.008933573097601765,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step130000/teacher-pythia-160m-pilerepro-seed1234@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "a68fff87980e0fcb3ed926ef5193c7812d88384ae77992763bc94900a70a8a42"
+    },
+    {
+      "lineage": "pr1234",
+      "step": 143000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step143000/teacher-pythia-160m-pilerepro-seed1234@step143000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.014124771397036965,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilerepro-seed1234@step143000/teacher-pythia-160m-pilerepro-seed1234@step143000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "9f2fb21a9233cb1ace06cecf23d03477f40ebe5db2fca7a712f58373f1eba694"
+    },
+    {
+      "lineage": "prv1_1234",
+      "step": 25000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step25000/teacher-pythia-160m-pilereprov1-seed1234@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.01058216974735842,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step25000/teacher-pythia-160m-pilereprov1-seed1234@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "bc63a5e1959abf7fe9b1b643525059d15923bb6aa0ae13ffc3b5ab7bfa6d152e"
+    },
+    {
+      "lineage": "prv1_1234",
+      "step": 50000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step50000/teacher-pythia-160m-pilereprov1-seed1234@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.012157187905177124,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step50000/teacher-pythia-160m-pilereprov1-seed1234@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "ffe5e2de3e9c05eaf94b02694c788b4d15c2b740d72490a9c30d685c560fc889"
+    },
+    {
+      "lineage": "prv1_1234",
+      "step": 75000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step75000/teacher-pythia-160m-pilereprov1-seed1234@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.01343631880095927,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step75000/teacher-pythia-160m-pilereprov1-seed1234@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "e4c067bd12b58909d1839de6ad7f167308415f118e523bbe68aaf8b2e0f2879e"
+    },
+    {
+      "lineage": "prv1_1234",
+      "step": 80000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step80000/teacher-pythia-160m-pilereprov1-seed1234@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.009850265951827168,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step80000/teacher-pythia-160m-pilereprov1-seed1234@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "a8dcb224a84a66fb6e7c4779b022568b60c076ebca39d26f19dd80c6587bb1e1"
+    },
+    {
+      "lineage": "prv1_1234",
+      "step": 85000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step85000/teacher-pythia-160m-pilereprov1-seed1234@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.011372676917308127,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step85000/teacher-pythia-160m-pilereprov1-seed1234@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "1e6adf43063c4c94d4d1f137d650bc97763d311f2a50a02215bfbdc67f241ec2"
+    },
+    {
+      "lineage": "prv1_1234",
+      "step": 90000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step90000/teacher-pythia-160m-pilereprov1-seed1234@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.012935805853630881,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step90000/teacher-pythia-160m-pilereprov1-seed1234@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "a1358cc7b7e7bcd12ccae7d6c74df42cb8046b8d333d3c8f368fdd91cb0a5231"
+    },
+    {
+      "lineage": "prv1_1234",
+      "step": 95000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step95000/teacher-pythia-160m-pilereprov1-seed1234@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.0070606295671314,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step95000/teacher-pythia-160m-pilereprov1-seed1234@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "d4e1e840eb4b8c6493d8d707ce556715189528737cccb6d11a75af17a0b86ef8"
+    },
+    {
+      "lineage": "prv1_1234",
+      "step": 100000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step100000/teacher-pythia-160m-pilereprov1-seed1234@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.018954279573226814,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step100000/teacher-pythia-160m-pilereprov1-seed1234@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "c3a546cf32749fd5ca46c5a381e0fa8fbd1273ced4ac3bd9471bd58e3270a1a0"
+    },
+    {
+      "lineage": "prv1_1234",
+      "step": 105000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step105000/teacher-pythia-160m-pilereprov1-seed1234@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.014691527535178465,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step105000/teacher-pythia-160m-pilereprov1-seed1234@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "4b7571f86bea33abd6f5cd28c1151638b7acef398cdb4c7eaf879acb7db824b0"
+    },
+    {
+      "lineage": "prv1_1234",
+      "step": 110000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step110000/teacher-pythia-160m-pilereprov1-seed1234@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.010984280825650785,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step110000/teacher-pythia-160m-pilereprov1-seed1234@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "3d2a1bfdc93ecf69d9c685a18773a8584284dbbf03e25648168c3ca77f0e9e30"
+    },
+    {
+      "lineage": "prv1_1234",
+      "step": 115000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step115000/teacher-pythia-160m-pilereprov1-seed1234@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.013682834476494463,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step115000/teacher-pythia-160m-pilereprov1-seed1234@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "65d72e0af51ddd32fe66af2837b56822fb41896cb614c46355e2cfb2517fba3d"
+    },
+    {
+      "lineage": "prv1_1234",
+      "step": 120000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step120000/teacher-pythia-160m-pilereprov1-seed1234@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.010040248855948447,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step120000/teacher-pythia-160m-pilereprov1-seed1234@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "2ff2c0d81e15478a4099ec8f4d10160d114693724717987e06c388b5a5ce969f"
+    },
+    {
+      "lineage": "prv1_1234",
+      "step": 125000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step125000/teacher-pythia-160m-pilereprov1-seed1234@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.009143560395859823,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step125000/teacher-pythia-160m-pilereprov1-seed1234@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "daa3ad4e724e07693d50f303eeeea3c9226457e9d2e10ea44b2427e2b6e2401f"
+    },
+    {
+      "lineage": "prv1_1234",
+      "step": 130000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step130000/teacher-pythia-160m-pilereprov1-seed1234@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.012159005164867266,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step130000/teacher-pythia-160m-pilereprov1-seed1234@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "2cb62c74f50bfb948579f0ee3fcd3ec1ef45edeb569938e939d73b861446c1df"
+    },
+    {
+      "lineage": "prv1_1234",
+      "step": 143000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step143000/teacher-pythia-160m-pilereprov1-seed1234@step143000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.008932971046306193,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-pilereprov1-seed1234@step143000/teacher-pythia-160m-pilereprov1-seed1234@step143000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "d2d8bf045214dbf5439c4b189bf72eb49eab89191479f049cf074b2b9f5e4778"
+    },
+    {
+      "lineage": "wc1",
+      "step": 25000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step25000/teacher-pythia-160m-weightc-seed1@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.010740055645874236,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step25000/teacher-pythia-160m-weightc-seed1@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "dc6fae8234be8f44e22ca59000882b14c564a7c32f37b68d8015f1f3f6728471"
+    },
+    {
+      "lineage": "wc1",
+      "step": 50000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step50000/teacher-pythia-160m-weightc-seed1@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.011928877144237049,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step50000/teacher-pythia-160m-weightc-seed1@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "6f3ee9f336bd1097a6832351c9e61de530a40e6b0fb4a046ee409964cdb02c5c"
+    },
+    {
+      "lineage": "wc1",
+      "step": 75000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step75000/teacher-pythia-160m-weightc-seed1@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.00790332729520742,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step75000/teacher-pythia-160m-weightc-seed1@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "81b4e31127e180da44c521ddabea7d76ed336485d71af93be421ffa99351721c"
+    },
+    {
+      "lineage": "wc1",
+      "step": 80000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step80000/teacher-pythia-160m-weightc-seed1@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.008139663306501461,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step80000/teacher-pythia-160m-weightc-seed1@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "e8a89c0214a21e4dd695e782f68682a76d916684660fdebbe69683ded2bb6f3d"
+    },
+    {
+      "lineage": "wc1",
+      "step": 85000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step85000/teacher-pythia-160m-weightc-seed1@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.008753695066261571,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step85000/teacher-pythia-160m-weightc-seed1@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "e365c83707395916e7317d64139a71ad4ef2550a0125467df5c53e9c92835473"
+    },
+    {
+      "lineage": "wc1",
+      "step": 90000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step90000/teacher-pythia-160m-weightc-seed1@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.008748844319779892,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step90000/teacher-pythia-160m-weightc-seed1@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "69e3406083c6912b1947d5f320418a155ec0f935de37a454824edf5c600579ff"
+    },
+    {
+      "lineage": "wc1",
+      "step": 95000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step95000/teacher-pythia-160m-weightc-seed1@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.01965962065762142,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step95000/teacher-pythia-160m-weightc-seed1@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "a860ed72c785d5370abba311d4adf4d1ca8bd294a1cfdf9eba65321afd835644"
+    },
+    {
+      "lineage": "wc1",
+      "step": 100000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step100000/teacher-pythia-160m-weightc-seed1@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.012051866869442165,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step100000/teacher-pythia-160m-weightc-seed1@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "63c565f823c762f318aaac5ee8bfc274582c3631b0756e71530a262d92d3bb0e"
+    },
+    {
+      "lineage": "wc1",
+      "step": 105000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step105000/teacher-pythia-160m-weightc-seed1@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.01617736654879991,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step105000/teacher-pythia-160m-weightc-seed1@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "ff04a542db7254cd2f152ad0bca8805ca2bf20466838e5ea827d5050a1bd52a2"
+    },
+    {
+      "lineage": "wc1",
+      "step": 110000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step110000/teacher-pythia-160m-weightc-seed1@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.010589217811066191,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step110000/teacher-pythia-160m-weightc-seed1@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "08119fb36c285e662005241946e4d6d481329ab4ee0df86de89c9381ae41e778"
+    },
+    {
+      "lineage": "wc1",
+      "step": 115000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step115000/teacher-pythia-160m-weightc-seed1@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.014600296305434312,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step115000/teacher-pythia-160m-weightc-seed1@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "46243ea6f82683525bc3cf2f219af9f515cd974a542b587c5688a222481c9a1b"
+    },
+    {
+      "lineage": "wc1",
+      "step": 120000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step120000/teacher-pythia-160m-weightc-seed1@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.015447220808127896,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step120000/teacher-pythia-160m-weightc-seed1@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "c4c0fa8481efb07c4825d739c273d49f39ea513b6379d75d373b17765f29f1dd"
+    },
+    {
+      "lineage": "wc1",
+      "step": 125000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step125000/teacher-pythia-160m-weightc-seed1@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.014951532148988917,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step125000/teacher-pythia-160m-weightc-seed1@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "7d89e174b9238448830856520ecfde9f62fb370afcba0cce993540abd21096fa"
+    },
+    {
+      "lineage": "wc1",
+      "step": 130000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step130000/teacher-pythia-160m-weightc-seed1@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.01752560014399933,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step130000/teacher-pythia-160m-weightc-seed1@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "8846f4171dd2cf67aa5d9561e12ce6f6816cf92127b63241bf8bba034853701c"
+    },
+    {
+      "lineage": "wc1",
+      "step": 143000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step143000/teacher-pythia-160m-weightc-seed1@step143000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.012102585278335028,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed1@step143000/teacher-pythia-160m-weightc-seed1@step143000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "e5f6c4a1f1ce9e5af1cb558e06d426d2ecf8a13e46dfca2bc4cce8b18ce00136"
+    },
+    {
+      "lineage": "wc2",
+      "step": 25000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step25000/teacher-pythia-160m-weightc-seed2@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.006777706203283742,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step25000/teacher-pythia-160m-weightc-seed2@step25000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "c3a98ff63123e4ccc58d9841118a84546466818aeef8e7a3883e6fbc1450f9d9"
+    },
+    {
+      "lineage": "wc2",
+      "step": 50000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step50000/teacher-pythia-160m-weightc-seed2@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.0058001997822429985,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step50000/teacher-pythia-160m-weightc-seed2@step50000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "32871a2090dc50d44e56434665bdcd94d49ce5289f426999fe19f5e03a52877c"
+    },
+    {
+      "lineage": "wc2",
+      "step": 75000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step75000/teacher-pythia-160m-weightc-seed2@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.010664192967524286,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step75000/teacher-pythia-160m-weightc-seed2@step75000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "3676f35f5e44762bbf7b1c9014768ef12582dd76f0d2ecf8b9114b19a99d862d"
+    },
+    {
+      "lineage": "wc2",
+      "step": 80000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step80000/teacher-pythia-160m-weightc-seed2@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.011861378858448006,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step80000/teacher-pythia-160m-weightc-seed2@step80000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "5897a04d3e40a2ff233c5c0bdb6804fb720d214f55d5f40f0897c497a3bdfb21"
+    },
+    {
+      "lineage": "wc2",
+      "step": 85000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step85000/teacher-pythia-160m-weightc-seed2@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.015646844095899722,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step85000/teacher-pythia-160m-weightc-seed2@step85000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "145d492c9f1a7d99860304a06a9b9795a8458d77d4c3722a216f6eb2ad195f03"
+    },
+    {
+      "lineage": "wc2",
+      "step": 90000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step90000/teacher-pythia-160m-weightc-seed2@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.01016425752779469,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step90000/teacher-pythia-160m-weightc-seed2@step90000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "1f099c1c65c0f03fc1a61956f98e4031e95d9c82bc0f9050830316b11bcef4cd"
+    },
+    {
+      "lineage": "wc2",
+      "step": 95000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step95000/teacher-pythia-160m-weightc-seed2@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.008647298171708825,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step95000/teacher-pythia-160m-weightc-seed2@step95000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "73779cb9f559410f4035bb2ba9963148e4e01dce8d60672ba74526655ce341c5"
+    },
+    {
+      "lineage": "wc2",
+      "step": 100000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step100000/teacher-pythia-160m-weightc-seed2@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.015570603522937744,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step100000/teacher-pythia-160m-weightc-seed2@step100000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "a9b1fe8f82a7ab5ca839f3cad8dc84969aebf44aa8c7624fb1edc0e3d04751ce"
+    },
+    {
+      "lineage": "wc2",
+      "step": 105000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step105000/teacher-pythia-160m-weightc-seed2@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.011326573220430873,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step105000/teacher-pythia-160m-weightc-seed2@step105000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "a58ccd7cf6365e68347725fffee265c0c8be6da2c39042fe81e5c677d624d1a1"
+    },
+    {
+      "lineage": "wc2",
+      "step": 110000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step110000/teacher-pythia-160m-weightc-seed2@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.023352954677829985,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step110000/teacher-pythia-160m-weightc-seed2@step110000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "d38a05265b51aa3c86b779158d4a5b14edfb4e18c334d9b50b9ac5c8fb21aaa1"
+    },
+    {
+      "lineage": "wc2",
+      "step": 115000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step115000/teacher-pythia-160m-weightc-seed2@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.029669745478313417,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step115000/teacher-pythia-160m-weightc-seed2@step115000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "89b81fcc88e329ab5e849809ff4bcd64b3cfc09abd052aa0ef41dfb36977606a"
+    },
+    {
+      "lineage": "wc2",
+      "step": 120000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step120000/teacher-pythia-160m-weightc-seed2@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.0108397312782472,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step120000/teacher-pythia-160m-weightc-seed2@step120000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "6b82a0fb6439eaf5b0e613812df1f1064fb25dd2961f68ff4bbcd318e73c66e1"
+    },
+    {
+      "lineage": "wc2",
+      "step": 125000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step125000/teacher-pythia-160m-weightc-seed2@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.0185038693563547,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step125000/teacher-pythia-160m-weightc-seed2@step125000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "1f0a5f2d13402140f5aa3bd36747eef2958b3f6be1e9dbaa297f78c8c6b361c5"
+    },
+    {
+      "lineage": "wc2",
+      "step": 130000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step130000/teacher-pythia-160m-weightc-seed2@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.011349044778035023,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step130000/teacher-pythia-160m-weightc-seed2@step130000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "68ea374aea9dcbd33b137cb2fde7b6862ed89d192992c24ac9e522c32ee96884"
+    },
+    {
+      "lineage": "wc2",
+      "step": 143000,
+      "leaf": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step143000/teacher-pythia-160m-weightc-seed2@step143000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1",
+      "p_control": 0.020645530333858915,
+      "eval_path": "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base/ckpt/pythia-160m-weightc-seed2@step143000/teacher-pythia-160m-weightc-seed2@step143000/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1/eval/dog/preference_eval.json",
+      "eval_sha256": "f0427013e2f06628e263f16b97aeabf38ca0c74b5d3bb88a335348d949689ff6"
+    }
+  ],
+  "entropy_unit": "nats",
+  "curves_per_panel": 11,
+  "show_individual_recipes": false,
+  "figure1_transfer_check": {
+    "path": "/home/angela/EleutherAI_subliminal_learning/notebooks/figures/figure3_checkpoints/figure3_cells.csv",
+    "sha256": "08cec5b880722994e2ff3a0e9b8e50846b1503ae4c5145c79de581285db87972",
+    "n_matching_cells": 135,
+    "max_absolute_difference": 0.0
+  },
+  "highlighted_lineages": [
+    "orig",
+    "wc1",
+    "wc2",
+    "fs2",
+    "pr1234"
+  ],
+  "background_lineages": [
+    "ds1",
+    "ds2",
+    "ds3",
+    "fs1",
+    "fs3",
+    "prv1_1234"
+  ],
+  "repretrain_pool_cache_checks": [
+    {
+      "lineage": "pr1234",
+      "path": "/home/angela/EleutherAI_subliminal_learning/docs/results/data/checkpoint_entropy_transfer_all_teachers_20260921_pools.json.gz",
+      "sha256": "dbd40466eeae83cbf7b9765e0c4a7569de82d79f8a900d59f923249e585e2818",
+      "n_cached_recipe_pools": 75,
+      "n_joined_recipe_pools": 75,
+      "cached_without_joined_evaluation": [],
+      "cached_checkpoints": [
+        25000,
+        50000,
+        75000,
+        80000,
+        85000,
+        90000,
+        95000,
+        100000,
+        105000,
+        110000,
+        115000,
+        120000,
+        125000,
+        130000,
+        143000
+      ],
+      "joined_checkpoints": [
+        25000,
+        50000,
+        75000,
+        80000,
+        85000,
+        90000,
+        95000,
+        100000,
+        105000,
+        110000,
+        115000,
+        120000,
+        125000,
+        130000,
+        143000
+      ]
+    },
+    {
+      "lineage": "prv1_1234",
+      "path": "/home/angela/EleutherAI_subliminal_learning/docs/results/data/checkpoint_entropy_transfer_all_teachers_20260921_pools.json.gz",
+      "sha256": "dbd40466eeae83cbf7b9765e0c4a7569de82d79f8a900d59f923249e585e2818",
+      "n_cached_recipe_pools": 75,
+      "n_joined_recipe_pools": 75,
+      "cached_without_joined_evaluation": [],
+      "cached_checkpoints": [
+        25000,
+        50000,
+        75000,
+        80000,
+        85000,
+        90000,
+        95000,
+        100000,
+        105000,
+        110000,
+        115000,
+        120000,
+        125000,
+        130000,
+        143000
+      ],
+      "joined_checkpoints": [
+        25000,
+        50000,
+        75000,
+        80000,
+        85000,
+        90000,
+        95000,
+        100000,
+        105000,
+        110000,
+        115000,
+        120000,
+        125000,
+        130000,
+        143000
+      ]
+    }
+  ],
+  "endpoint_associations": {
+    "step": 143000,
+    "transfer_metric": "delta_p",
+    "associations": [
+      {
+        "population": "primary_nine",
+        "metric": "all_entropy_bits",
+        "transfer_metric": "delta_p",
+        "step": 143000,
+        "n_models": 9,
+        "pearson": -0.7881716298015295,
+        "spearman": -0.6833333333333333,
+        "leave_one_model_out_spearman_min": -0.8333333333333335,
+        "leave_one_model_out_spearman_max": -0.5476190476190477
+      },
+      {
+        "population": "primary_nine",
+        "metric": "first_entropy_nats",
+        "transfer_metric": "delta_p",
+        "step": 143000,
+        "n_models": 9,
+        "pearson": -0.7885280337204904,
+        "spearman": -0.6833333333333333,
+        "leave_one_model_out_spearman_min": -0.8333333333333335,
+        "leave_one_model_out_spearman_max": -0.5476190476190477
+      },
+      {
+        "population": "primary_nine_plus_pr1234",
+        "metric": "all_entropy_bits",
+        "transfer_metric": "delta_p",
+        "step": 143000,
+        "n_models": 10,
+        "pearson": -0.826352098986504,
+        "spearman": -0.7696969696969697,
+        "leave_one_model_out_spearman_min": -0.8833333333333333,
+        "leave_one_model_out_spearman_max": -0.6833333333333333
+      },
+      {
+        "population": "primary_nine_plus_pr1234",
+        "metric": "first_entropy_nats",
+        "transfer_metric": "delta_p",
+        "step": 143000,
+        "n_models": 10,
+        "pearson": -0.8098933857820233,
+        "spearman": -0.7696969696969697,
+        "leave_one_model_out_spearman_min": -0.8833333333333333,
+        "leave_one_model_out_spearman_max": -0.6833333333333333
+      },
+      {
+        "population": "primary_nine_plus_pr1234_plus_prv1_1234",
+        "metric": "all_entropy_bits",
+        "transfer_metric": "delta_p",
+        "step": 143000,
+        "n_models": 11,
+        "pearson": -0.8218570000906906,
+        "spearman": -0.790909090909091,
+        "leave_one_model_out_spearman_min": -0.8787878787878788,
+        "leave_one_model_out_spearman_max": -0.7212121212121211
+      },
+      {
+        "population": "primary_nine_plus_pr1234_plus_prv1_1234",
+        "metric": "first_entropy_nats",
+        "transfer_metric": "delta_p",
+        "step": 143000,
+        "n_models": 11,
+        "pearson": -0.8021937030276948,
+        "spearman": -0.790909090909091,
+        "leave_one_model_out_spearman_min": -0.8787878787878788,
+        "leave_one_model_out_spearman_max": -0.7212121212121211
+      }
+    ],
+    "interpretation": "Descriptive across-model endpoint associations between teacher entropy and control-subtracted same-checkpoint transfer; selected dependent models, no iid significance test or causal claim.",
+    "csv_path": "/home/angela/EleutherAI_subliminal_learning/notebooks/figures/checkpoint_entropy_transfer/entropy_transfer_highlight_endpoint_ranks.csv"
+  },
+  "assumptions": [
+    "Rendering reads the supplied verified input table; any refresh or upstream artifact provenance is recorded by that input's source metadata.",
+    "Only canonical five teachers with matched exact-probability diagonal evaluations are shown.",
+    "All-number entropy counts each in-support integer occurrence; first-number entropy counts the first position per nonempty row. Values are integers 0\u2013999, not tokenizer tokens.",
+    "Entropies describe full filtered pools, not model predictive entropy or the selected 10,000-row training subset.",
+    "Mean of five per-recipe entropies, not entropy of their pooled histogram. One mean curve per model; recipe-level lines are omitted.",
+    "Transfer means student seeds within recipe first, then equally weights five recipes. No across-model averaging.",
+    "Transfer is control-subtracted: each run's p(dog) minus the matched base-numbers student at the same checkpoint, student recipe and ftseed1; one control per model checkpoint, shared by the five recipes. The 143k endpoint associations use this delta.",
+    "Only complete five-recipe checkpoints are displayed; missing checkpoints are not zero. Lines join observed checkpoints; wc2 has sparse coverage."
+  ]
+}

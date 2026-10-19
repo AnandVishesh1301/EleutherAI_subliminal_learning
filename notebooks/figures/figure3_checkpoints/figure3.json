@@ -1,0 +1,73 @@
+{
+  "started_utc": "2026-10-16T23:27:02.558662+00:00",
+  "completed_utc": "2026-10-16T23:27:56.612720+00:00",
+  "outputs_root": "/mnt/cold-1/soar-subliminal/angela/outputs",
+  "input_cache": "/home/angela/EleutherAI_subliminal_learning/docs/results/data/checkpoint_entropy_transfer_all_teachers_20260921_pools.json.gz",
+  "input_cache_sha256": "e2f69a7076ee6553fa59a63aa34e290d1a49dd1fbedf002a4f777b562b096dc3",
+  "script_path": "/home/angela/EleutherAI_subliminal_learning/scripts/plot_checkpoint_takeoff.py",
+  "script_sha256": "56fbd936134d69222415f682d6b48a6505c06756662f7d16f9a715e445cd5369",
+  "canonical_teacher_recipes": [
+    "ep20_lr1e-4_r16a32",
+    "ep2_lr5e-4_r32a64",
+    "ep7_lr5e-4_r8a8",
+    "ep10_lr1e-4_r64a64",
+    "ep20_lr1e-4_r8a16"
+  ],
+  "teacher_seed": 1,
+  "student_recipe": "ep10_lr1e-4_r8a32",
+  "lineages": [
+    "orig",
+    "ds1",
+    "ds2",
+    "ds3",
+    "fs1",
+    "fs2",
+    "fs3",
+    "wc1",
+    "wc2"
+  ],
+  "matrix_steps": [
+    75000,
+    80000,
+    85000,
+    90000,
+    95000,
+    100000,
+    105000,
+    110000,
+    115000,
+    120000,
+    125000,
+    130000,
+    143000
+  ],
+  "n_source_pools": 675,
+  "run_status_counts": {
+    "verified": 4215
+  },
+  "scoring_counts": {
+    "prob": 4215
+  },
+  "n_complete_diagonal_points": 135,
+  "aggregation": "Mean available verified student seeds within teacher recipe; equal mean of exactly five canonical recipes; the matched base-numbers control p(dog) is subtracted after the five-recipe mean. Missing/incomplete cells and cells without a control stay missing.",
+  "quantity": "delta_p = five-recipe mean p(dog) minus matched base-numbers control p(dog) (student recipe ep10_lr1e-4_r8a32, control ftseed 1)",
+  "control_source": "{root}/students/controls/base/ckpt/{base}@step{S}/teacher-{base}@step{T}/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1; for orig (pythia-160m) at T=143000 the teacher level is the unrevisioned teacher-pythia-160m (final weights are tensor-identical to step143000)",
+  "student_control_recipe": "ep10_lr1e-4_r8a32",
+  "control_seed": 1,
+  "n_cells_with_control": 291,
+  "n_cells_missing_control": 0,
+  "missing_control_cells": [],
+  "n_drawn_diagonal_points": 135,
+  "drawn_lineages": [
+    "orig",
+    "ds1",
+    "ds2",
+    "ds3",
+    "fs1",
+    "fs2",
+    "fs3",
+    "wc1",
+    "wc2"
+  ],
+  "pool_hash_validation": "Source-content SHA agrees with current pool manifest and student train manifest. Cached hash reused only when source bytes and mtime also agree."
+}

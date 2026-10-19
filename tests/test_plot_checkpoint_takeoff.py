@@ -109,3 +109,45 @@ def test_matrix_grid_excludes_50k_but_keeps_50k_diagonal_observation():
     cells = plot.aggregate_cells([], expected)
     assert len(cells) == 13 * 13
     assert all(row["p_target"] is None for row in cells)
+
+
+def test_control_leaf_uses_unrevisioned_teacher_only_for_orig_final():
+    tail = f"ex10-20_prefix_n100k/{plot.STUDENT_RECIPE}/ftseed1"
+    assert str(plot.control_leaf("/r", "pythia-160m", 143000, 100000)) == (
+        f"/r/students/controls/base/ckpt/pythia-160m@step100000/teacher-pythia-160m/{tail}")
+    assert str(plot.control_leaf("/r", "pythia-160m", 125000, 100000)) == (
+        "/r/students/controls/base/ckpt/pythia-160m@step100000/"
+        f"teacher-pythia-160m@step125000/{tail}")
+    assert str(plot.control_leaf("/r", "pythia-160m-data-seed1", 143000, 143000)) == (
+        "/r/students/controls/base/ckpt/pythia-160m-data-seed1@step143000/"
+        f"teacher-pythia-160m-data-seed1@step143000/{tail}")
+
+
+def complete_cell(lineage="orig", step=125000, value=0.5):
+    recipes = [dict(lineage=lineage, teacher_step=step, student_step=step, teacher_recipe=tag,
+                    n_student_seeds=1, student_seeds=[1], p_target=value)
+               for tag in plot.shared.CANONICAL]
+    return plot.aggregate_cells(recipes, {(lineage, step, step)})
+
+
+def test_missing_control_is_missing_and_not_drawn(tmp_path):
+    cells = complete_cell()
+    plot.attach_controls(tmp_path, cells)
+    assert cells[0]["p_target"] == pytest.approx(0.5)
+    assert cells[0]["p_control"] is None and cells[0]["delta_p"] is None
+    assert isinstance(cells[0]["control_status"], str)
+    assert cells[0]["control_status"] != "verified"
+    assert plot.drawn_diagonal(cells, "orig") == []
+
+
+def test_delta_subtracts_matched_control(tmp_path):
+    leaf = plot.control_leaf(tmp_path, "pythia-160m", 125000, 125000) / "eval/dog"
+    leaf.mkdir(parents=True)
+    (leaf / "preference_eval.json").write_text(json.dumps({
+        "target_animal": "dog", "sets": {"test": {"scoring": "prob", "p_target": 0.02}}}))
+    cells = complete_cell()
+    controls = plot.attach_controls(tmp_path, cells)
+    assert cells[0]["p_control"] == pytest.approx(0.02)
+    assert cells[0]["delta_p"] == pytest.approx(0.48)
+    assert controls[0]["eval_sha256"] == cells[0]["control_eval_sha256"]
+    assert plot.drawn_diagonal(cells, "orig") == cells

@@ -1,0 +1,32 @@
+{
+  "n": 102,
+  "marginal_spearman": 0.6157895629654342,
+  "partial_spearman_validation": {
+    "r": 0.14918971400054132,
+    "p_nominal": 0.13648153266225316,
+    "n": 102,
+    "controls": 1,
+    "df": 99,
+    "approx_fisher_ci95": [
+      -0.047638572225407336,
+      0.33486513767671444
+    ]
+  },
+  "partial_logit_validation": {
+    "r": 0.26854261668275137,
+    "p_nominal": 0.0066217037817552105,
+    "n": 102,
+    "controls": 1,
+    "df": 99,
+    "approx_fisher_ci95": [
+      0.07715261356416275,
+      0.44084468818737216
+    ]
+  },
+  "student_recipe": "ep20_lr1e-4_r8a32",
+  "student_cells_csv": "notebooks/figures/predictors/recipe_cells_102.csv",
+  "teacher_split": "validation",
+  "student_split": "test",
+  "source_csv": "notebooks/figures/teacher_dce_vs_transfer_102.csv",
+  "source_sha256": "645d18c5aa4ebd7b62574fd7367e1606723e48ec8325dedbe9fb76c4f051b5da"
+}

@@ -11,7 +11,9 @@ and OLMo-1B together. Everything that notebook shows is computed here:
   endpoint (``train_manifest.json``), its diverged marker and its anchored dead label at the
   endpoint, plus the long frame of ``test p_target / receiver prior`` per saved checkpoint.
 * `inventory_table`, `arm_curves`, `pooled_curves`, `summary_table` -- the aggregation.
-* `plot_arm_curves`, `plot_pooled` -- the two figures.
+* `control_subtracted_curves`, `plot_stop_arm_curves`, `plot_stop_pooled` -- the two
+  per-checkpoint figures, control-subtracted.
+* `display_group` -- the user-facing name of an arm's condition line.
 
 Aggregation rule: per arm, the median over its ALIVE (teacher x cell) runs of ``test p_target /
 receiver prior`` at each saved checkpoint (absolute optimizer steps); per condition line, the
@@ -22,15 +24,19 @@ Training progress is always an absolute step, never a fraction of training.
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass, field, replace
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, dataclass, field, replace
 from functools import cached_property
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from subliminal_learning.analysis import result_cache
+from subliminal_learning.analysis import trajectories as _trajectories
 from subliminal_learning.analysis import transfer_significance_io as tio
 from subliminal_learning.analysis.frames import safe_read_json
 from subliminal_learning.analysis.trajectories import lineage_long_frame
@@ -238,7 +244,8 @@ def default_arms(repo: Path) -> list[ArmSpec]:
     lion and pig; the dog ``orig → ds1`` cross-data-order arm on core30 (inventory only). The
     cross-size / cross-architecture arms come from the xarch registry (plus the ``410m →
     fs{k}`` / ``410m-seed1 → fs{k}`` ladders, teachers from the ``p410m_top10_senders_*``
-    manifests), the OLMo arms from the OLMo significance registry. Whether an arm enters the
+    manifests), the OLMo arms from the OLMo significance registry, each with its matched
+    base-numbers control arm (``kind="control"``, ``control_of`` = its label). Whether an arm enters the
     curves is decided by its coverage (`inventory_table`), not here.
     """
     repo = Path(repo)
@@ -275,8 +282,15 @@ def default_arms(repo: Path) -> list[ArmSpec]:
                 f"pythia-160m-seed{k}", tuple(man["param_tags"]), "core30",
                 tuple(tio.resolve_cells(core30)),
                 teacher_dataset_tags=tuple(sorted(man.get("dataset_tags", {}).items()))))
-    out += _registry_specs(repo, _OLMO, OLMO_ARMS, group_of=lambda c: c,
+    olmo = _registry_specs(repo, _OLMO, OLMO_ARMS, group_of=lambda c: c,
                            family_of=lambda a: "OLMo")
+    # base-numbers controls of the OLMo arms (20 saves 625 ... 12,500, like their treatments),
+    # matched one per treatment arm as in `earlystop_arms`
+    out += olmo + [replace(
+        s, group=s.group + CONTROLS_SUFFIX,
+        condition="same-base control" if s.sender == s.receiver else "cross-base control",
+        teachers=(CONTROL_TEACHER,), teacher_dataset_tags=(), kind="control",
+        control_of=s.label) for s in olmo]
     return out
 
 
@@ -293,11 +307,6 @@ _CROSSSEED_BASES = frozenset(tio.base_name(b) for b in ("orig", "fs1", "fs2", "f
 _CDO_BASES = frozenset(tio.base_name(b) for b in ("orig", "ds1", "ds2", "ds3"))
 CONTROLS_SUFFIX = " controls"
 _STOP_TREAT_GROUPS = (STOP_SAME_GROUP, STOP_CROSSSEED_GROUP, STOP_CDO_GROUP, STOP_CROSS_GROUP)
-#: The per-checkpoint condition lines (treatment, then their matched controls), in display order.
-STOP_GROUPS: list[tuple[str, str]] = [
-    *((g, "Pythia") for g in _STOP_TREAT_GROUPS),
-    *((g + CONTROLS_SUFFIX, "Pythia") for g in _STOP_TREAT_GROUPS),
-]
 #: Saved intermediate steps of these runs (625 ... 3,750, 6,250, 12,500): curve cadence floor.
 STOP_MIN_POINTS = 8
 #: Teacher placeholder of a control arm (no teacher level in its leaves).
@@ -338,6 +347,62 @@ EARLYSTOP_REGISTRIES: tuple[str, ...] = (
 COMPLETE_ANIMALS = ("cat", "lion", "pig")
 #: Registry whose cells are the stride-3 core30 cells of the completed arms.
 _STRIDE3_REGISTRY = f"{_ES_SAME}/orig/registry"
+
+
+#: User-facing names of the internal group keys (keys stay: other notebooks read them).
+_GROUP_DISPLAY = {
+    "Pythia cross-seed": "Pythia diff init, diff data order",
+    CDO_GROUP: "Pythia same init, diff data order",
+    STOP_SAME_GROUP: "Pythia same-model",
+    STOP_CROSSSEED_GROUP: "diff init, diff data order",
+    STOP_CDO_GROUP: "same init, diff data order",
+}
+#: Display lines of the per-checkpoint treatment arms, in display order (`display_group`);
+#: `STOP_CROSS_GROUP` is split into the last two by its bases.
+STOP_DISPLAY_GROUPS = ("Pythia same-model", "diff init, diff data order",
+                       "same init, diff data order", "diff init, same data order",
+                       "Pythia-160M re-pretrain")
+#: The per-checkpoint summary lines (treatment, then their matched controls), in display order.
+STOP_GROUPS: list[tuple[str, str]] = [
+    *((g, "Pythia") for g in STOP_DISPLAY_GROUPS),
+    *((g + CONTROLS_SUFFIX, "Pythia") for g in STOP_DISPLAY_GROUPS),
+]
+#: Display names of the core-set lines (`GROUPS`), for `summary_table`.
+DISPLAY_GROUPS: list[tuple[str, str]] = [(_GROUP_DISPLAY.get(g, g), f) for g, f in GROUPS]
+
+
+def display_group(spec: ArmSpec) -> str:
+    """User-facing condition line of `spec`: `_GROUP_DISPLAY` of its group; a
+    `STOP_CROSS_GROUP` arm goes to the first `trajectory_ab_vs_aa.BASE_GROUPS` block holding
+    both its (displayed) bases (``diff init, same data order`` / ``Pythia-160M re-pretrain``).
+    Control arms keep `CONTROLS_SUFFIX`; other groups (OLMo, cross-size) are unchanged.
+
+    Raises:
+        ValueError: If a `STOP_CROSS_GROUP` arm's bases are in no such block.
+    """
+    group = spec.group.removesuffix(CONTROLS_SUFFIX)
+    suffix = spec.group[len(group):]
+    if group != STOP_CROSS_GROUP:
+        return _GROUP_DISPLAY.get(group, group) + suffix
+    from subliminal_learning.analysis.trajectory_ab_vs_aa import BASE_GROUPS
+
+    s, r = (display(short_base(b)) for b in (spec.sender, spec.receiver))
+    for title, members in BASE_GROUPS[2:]:
+        if s in members and r in members:
+            return title.split(":")[0] + suffix
+    raise ValueError(f"{spec.label}: bases in no display block of BASE_GROUPS")
+
+
+#: User-facing names of the Pythia condition labels (OLMo labels are unchanged).
+_CONDITION_DISPLAY = {"cross-seed": "diff init, diff data order",
+                      "cross-data-order": "same init, diff data order"}
+
+
+def display_condition(spec: ArmSpec) -> str:
+    """User-facing condition label of `spec` (`_CONDITION_DISPLAY` for Pythia arms)."""
+    if spec.family != "Pythia":
+        return spec.condition
+    return _CONDITION_DISPLAY.get(spec.condition, spec.condition)
 
 
 def _stop_group(sender: str, receiver: str) -> str:
@@ -467,6 +532,9 @@ class TrajectoryData:
         priors: ``{arm label: receiver prior}`` (NaN when missing).
         notes: Loader notes (missing anchored cuts, prior mismatches, unreadable probes).
         root: The outputs tree read (`load_arms`); needed by ``asymmetry_table(endpoint_twins=True)``.
+        arm_keys: ``{arm label: result-cache key}`` of each arm's loaded (and derived) frames
+            (`load_arms`, updated by `with_ep20_endpoints`); None when not cached. Downstream
+            per-arm caches (`trajectory_ab_vs_aa.comparison_stats`) key on these.
     """
 
     arms: list[ArmSpec]
@@ -475,6 +543,7 @@ class TrajectoryData:
     priors: dict[str, float]
     notes: list[str] = field(default_factory=list)
     root: Path | None = None
+    arm_keys: dict[str, str] | None = None
 
 
 def _cell_stop(cell: str) -> int | None:
@@ -530,6 +599,16 @@ def plain_twin(cell: str) -> str | None:
     return re.sub(r"_stop\d+$", "", cell) if _cell_stop(cell) is not None else None
 
 
+#: Suffix of the saved-checkpoint leaf of a plain ep20 cell (`sibling_leaf`).
+STOP_SIBLING = "_stop12500"
+
+
+def sibling_leaf(cell: str) -> str:
+    """The other leaf of the same run: the plain leaf of a ``_stop{N}`` cell (`plain_twin`), or
+    the ``{cell}_stop12500`` saved-checkpoint leaf of a plain cell (which may not exist)."""
+    return plain_twin(cell) or cell + STOP_SIBLING
+
+
 def merge_leaf_points(first: pd.DataFrame | None,
                       second: pd.DataFrame | None) -> tuple[pd.DataFrame, float]:
     """Union by ``step`` of one run's points read from its two leaves (``step, p_test``
@@ -553,10 +632,10 @@ def run_frames(spec: ArmSpec, teacher: str, root: Path, *, ftseed: int = 1,
                                                           pd.DataFrame | None]]:
     """``cell -> (points of the cell's own leaf, points of its plain twin leaf)`` (``step,
     p_test``, finite only, None when the leaf has none) for one teacher of `spec`. A
-    ``_stop{N}`` cell and its plain twin are the two leaves of ONE run; a plain cell has no
-    twin."""
+    ``_stop{N}`` cell and its plain twin are the two leaves of ONE run, as are a plain cell and
+    its ``{cell}_stop12500`` sibling (`sibling_leaf`)."""
     lineage = spec.lineage_dir(root, teacher)
-    names = {c: plain_twin(c) for c in spec.cells}
+    names = {c: sibling_leaf(c) for c in spec.cells}
     tags = list(dict.fromkeys([*names, *(t for t in names.values() if t)]))
     registry = {"cells": {c: [ftseed] for c in tags}}
     tr = (lineage_long_frame(registry, lineage, cache_root=root, animal=spec.animal,
@@ -570,12 +649,13 @@ def run_frames(spec: ArmSpec, teacher: str, root: Path, *, ftseed: int = 1,
 def run_points(spec: ArmSpec, teacher: str, root: Path, *, ftseed: int = 1,
                refresh: bool = False) -> tuple[pd.DataFrame, float]:
     """``(tag, step, p_test)`` of one teacher's runs of `spec`, each run's points the union of
-    its two leaves (`merge_leaf_points`, the cell's own leaf wins on shared steps), plus the
+    its two leaves (`merge_leaf_points`, the ``_stop{N}`` leaf wins on shared steps), plus the
     max |difference| on shared steps (NaN: none)."""
     parts, diffs = [], []
     for cell, (own, twin) in run_frames(spec, teacher, root, ftseed=ftseed,
                                         refresh=refresh).items():
-        m, d = merge_leaf_points(own, twin)
+        m, d = merge_leaf_points(*((own, twin) if _cell_stop(cell) is not None
+                                   else (twin, own)))
         diffs.append(d)
         if len(m):
             parts.append(m.assign(tag=cell)[["tag", "step", "p_test"]])
@@ -603,9 +683,20 @@ def load_arm(spec: ArmSpec, root: Path, *, ftseed: int = 1,
     that leaf has a trajectory, else the plain leaf's; the plain leaf's steps past the other
     leaf's last step are kept only when the plain leaf is alive under the same cut (the
     `with_ep20_endpoints` rule). ``end_step`` is the last kept step's leaf's declared end.
+    A plain cell's run is read the same way from its ``{cell}_stop12500`` sibling
+    (`sibling_leaf`; that leaf's value kept on shared steps), but its label and ``end_step``
+    are always the plain (endpoint) leaf's.
     """
     notes = notes if notes is not None else []
     root = Path(root)
+    prior, pool, cut = _arm_context(spec, root, notes)
+    return (*_load_arm_runs(spec, root, ftseed, prior, pool, cut, notes, refresh), prior)
+
+
+def _arm_context(spec: ArmSpec, root: Path, notes: list[str]) -> tuple[float, str, float | None]:
+    """``(prior, probe pool, anchored cut)`` of an arm; prior-mismatch / missing-cut notes go
+    to `notes`. Cheap (memoised artifacts), so it runs outside the result cache and its values
+    are part of the cache key."""
     prior = tio.load_prior(spec.animal, spec.receiver, output_root=root)
     if np.isfinite(prior) and spec.expected_prior is not None:
         try:
@@ -614,6 +705,13 @@ def load_arm(spec: ArmSpec, root: Path, *, ftseed: int = 1,
             notes.append(f"{spec.label}: {exc} (loaded prior kept)")
     pool = tio._probe_pool_for(spec.receiver, spec.probe_pool)
     cut = tio._anchored_cut(root, spec.receiver, pool, dead="keep", notes=notes)
+    return prior, pool, cut
+
+
+def _load_arm_runs(spec: ArmSpec, root: Path, ftseed: int, prior: float, pool: str,
+                   cut: float | None, notes: list[str],
+                   refresh: bool) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """`load_arm`'s ``(runs, points)`` given the arm's prior, pool and cut; notes appended."""
     runs, points, diffs = [], [], []
     n_unprobed = 0
     for teacher in spec.teachers:
@@ -622,6 +720,12 @@ def load_arm(spec: ArmSpec, root: Path, *, ftseed: int = 1,
         for cell in spec.cells:
             own, twin = frames[cell]
             own_dir = lineage / cell / f"ftseed{ftseed}"
+            if _cell_stop(cell) is None:     # plain cell: optional _stop12500 sibling
+                g, d = merge_leaf_points(twin, own)
+                diffs.append(d)
+                runs.append(_plain_run(spec, teacher, cell, g, own_dir, prior, pool, cut,
+                                       ftseed, notes, points))
+                continue
             twin_cell = plain_twin(cell)
             twin_dir = lineage / twin_cell / f"ftseed{ftseed}" if twin_cell else None
             has_own = own is not None and own["step"].nunique() > 1
@@ -674,42 +778,223 @@ def load_arm(spec: ArmSpec, root: Path, *, ftseed: int = 1,
                      f"within max |Δ p_target| = {np.nanmax(d):.2g} "
                      f"({int(np.isfinite(d).sum())} runs)")
     pts = pd.concat(points, ignore_index=True) if points else pd.DataFrame(columns=POINT_COLUMNS)
-    return pd.DataFrame(runs, columns=RUN_COLUMNS), pts, prior
+    return pd.DataFrame(runs, columns=RUN_COLUMNS), pts
 
 
-def _prefetch(arms: Sequence[ArmSpec], root: Path, ftseed: int) -> None:
+def _plain_run(spec: ArmSpec, teacher: str, cell: str, g: pd.DataFrame, run_dir: Path,
+               prior: float, pool, cut, ftseed: int, notes: list[str], points: list) -> dict:
+    """`load_arm`'s run row of a plain cell (points `g` already merged with its sibling),
+    labelled at the plain leaf `run_dir`; appends its points to `points`."""
+    n = int(g["step"].nunique())
+    has = n > 1
+    diverged = (run_dir / tio.DIVERGED_MARKER).exists()
+    dead, end = np.nan, np.nan
+    if has:
+        end = _end_step(run_dir)
+        if cut is not None:
+            try:
+                dead = tio._dead_label(run_dir.parent, ftseed, pool, cut)
+            except ValueError as exc:
+                notes.append(f"{spec.label}: {exc}")
+        points.append(pd.DataFrame({"arm": spec.label, "teacher": teacher, "cell": cell,
+                                    "step": g["step"].to_numpy(float),
+                                    "ratio": g["p_test"].to_numpy(float) / prior}))
+    return {"arm": spec.label, "teacher": teacher, "cell": cell, "n_points": n,
+            "has_traj": has, "diverged": diverged, "dead": dead, "end_step": end,
+            "state": _run_state(has, diverged, dead)}
+
+
+def _arm_leaves(spec: ArmSpec, root: Path, ftseed: int) -> list[str]:
+    """Every leaf run dir `load_arm` reads for `spec` (each designed cell and its
+    `sibling_leaf`), relative to `root` -- the record-cache inventory convention."""
+    cells = list(dict.fromkeys([*spec.cells, *map(sibling_leaf, spec.cells)]))
+    out = []
+    for t in spec.teachers:      # one lineage_dir per teacher (it resolves the arm's trees)
+        lin = str(spec.lineage_dir(root, t).relative_to(root))
+        out += [f"{lin}/{c}/ftseed{ftseed}" for c in cells]
+    return out
+
+
+def _prefetch(arms: Sequence[ArmSpec], root: Path, ftseed: int,
+              leaves: Sequence[Sequence[str]] | None = None) -> None:
     """Refresh the shared trajectory record caches for every designed run in ONE sweep each.
 
     `lineage_long_frame` refreshes the cache per lineage and rewrites the (hundreds of MB) CSV
     whenever a lineage adds rows; one up-front sweep makes every later per-lineage call a
     no-write hit. After it, per-lineage reads of any covered run may pass ``refresh=False``
-    (`trajectories.lineage_long_frame`) and skip the sweep entirely.
+    (`trajectories.lineage_long_frame`) and skip the sweep entirely. `leaves`: each arm's
+    `_arm_leaves`, when the caller already has them (~10 s of path resolution on ~100k leaves).
     """
     from subliminal_learning.analysis.record_cache import load_record_cache
     from subliminal_learning.analysis.trajectories import _KINDS
 
-    rels = [str(spec.lineage_dir(root, t).relative_to(root) / c / f"ftseed{ftseed}")
-            for spec in arms for t in spec.teachers
-            for c in dict.fromkeys([*spec.cells, *filter(None, map(plain_twin, spec.cells))])]
+    if leaves is None:
+        leaves = [_arm_leaves(spec, root, ftseed) for spec in arms]
+    rels = [r for arm_leaves in leaves for r in arm_leaves]
     for kind in ("pref", "pile_kl"):
         load_record_cache(root, "json_blob", rels, verbose=False,
                           rel_record=f"eval/{_KINDS[kind][0]}",
                           cache_rel=Path("analysis") / f"record_cache_traj_{kind}.csv")
 
 
-def load_arms(arms: Sequence[ArmSpec], output_root: Path, *, ftseed: int = 1) -> TrajectoryData:
-    """`load_arm` over every spec (ftseed 1 only), concatenated into one `TrajectoryData`."""
-    _prefetch(arms, Path(output_root), ftseed)
+#: `result_cache` namespace of the per-arm `load_arm` results (`load_arms`).
+CACHE_NAMESPACE = "trajectory_conditions"
+#: Per-leaf files outside the trajectory record caches that `load_arm` / `endpoint_twin_points`
+#: read (manifest, divergence marker, Pile-probe records, endpoint preference evals); stat'ed.
+_LEAF_FILES = ("train_manifest.json", tio.DIVERGED_MARKER, "eval/pile_probe.json",
+               "preference_eval.json")
+
+
+def _code_digest() -> str:
+    """sha256 over the source of the modules an arm's result depends on."""
+    import hashlib
+    import sys
+
+    h = hashlib.sha256()
+    for m in (sys.modules[__name__], _trajectories, tio):
+        h.update(result_cache._code_hash(m).encode())
+    return h.hexdigest()
+
+
+def _leaf_extra_facts(root: Path, rp: str, files: Sequence[str]) -> list[tuple[str, int, int]]:
+    """``(rel path, mtime_ns, size)`` of each of `files` under leaf `rp`, missing ->
+    ``(path, -1, -1)``. One stat of the leaf dir (~45% of designed leaves -- mostly the
+    `sibling_leaf` twins -- do not exist, which then costs 1 op, not one per file), then one per
+    file: on the NFS outputs tree a ``listdir`` of the leaf and its ``eval/`` (then stats of
+    the present files only) measured ~2x slower (10-16)."""
+    if not os.path.isdir(f"{root}/{rp}"):
+        return [(f"{rp}/{f}", -1, -1) for f in files]
+    out = []
+    for f in files:
+        rel = f"{rp}/{f}"
+        try:
+            st = os.stat(f"{root}/{rel}")
+            out.append((rel, st.st_mtime_ns, st.st_size))
+        except OSError:
+            out.append((rel, -1, -1))
+    return out
+
+
+def _arm_extra_files(spec: ArmSpec) -> tuple[str, ...]:
+    """Per-leaf files of `spec` outside the record caches that its key covers."""
+    pool = tio._probe_pool_for(spec.receiver, spec.probe_pool)
+    return (*_LEAF_FILES, f"eval/pile_probe.{pool}.json",
+            f"eval/{spec.animal}/preference_eval.json")
+
+
+def _record_facts(arms: Sequence[ArmSpec], root: Path, ftseed: int,
+                  leaves: Sequence[Sequence[str]] | None = None
+                  ) -> dict[int, list[tuple[str, int, int]]]:
+    """``{arm position: [(rel path, mtime_ns, size), ...]}`` over every record file the arm's
+    `load_arm` (and `endpoint_twin_points`) reads. The ``eval/pref_traj.json`` /
+    ``eval/pile_kl_traj.json`` facts come from the record-cache index of the `_prefetch` sweep
+    (no second stat); the other per-leaf files (`_arm_extra_files`, in no record cache) are
+    stat'ed by `_leaf_extra_facts` in chunks of leaves 64-wide (one future per file cost ~60 s
+    of thread-pool locking on ~100k leaves)."""
+    from subliminal_learning.analysis.record_cache import (
+        BASE_COLS,
+        _read_cache_csv,
+        cache_path,
+        get_kind,
+    )
+    from subliminal_learning.analysis.trajectories import _KINDS
+
+    kind = get_kind("json_blob")
+    cols = list(kind.columns) + BASE_COLS
+    idx = {k: _read_cache_csv(cache_path(root, kind, Path("analysis")
+                                         / f"record_cache_traj_{k}.csv"), cols)[1]
+           for k in ("pref", "pile_kl")}
+
+    def num(x) -> int:
+        return -2 if x is None or not np.isfinite(x) else int(round(float(x) * 1e9))
+
+    if leaves is None:
+        leaves = [_arm_leaves(spec, root, ftseed) for spec in arms]
+    extra = {i: _arm_extra_files(spec) for i, spec in enumerate(arms)}
+    facts: dict[int, list[tuple[str, int, int]]] = {}
+    todo: dict[tuple[str, tuple[str, ...]], None] = {}
+    for i in range(len(arms)):
+        out = []
+        for rp in leaves[i]:
+            for k, ix in idx.items():
+                hit = ix.get(rp)
+                out.append((f"{rp}/eval/{_KINDS[k][0]}",
+                            *((num(hit[1]), num(hit[2])) if hit else (-1, -1))))
+            todo[(rp, extra[i])] = None
+        facts[i] = out
+    jobs = list(todo)
+    chunk = max(1, len(jobs) // (4 * result_cache._SWEEP_WORKERS) + 1)
+    parts = [jobs[j:j + chunk] for j in range(0, len(jobs), chunk)]
+
+    def run(part):
+        return [_leaf_extra_facts(root, rp, files) for rp, files in part]
+
+    with ThreadPoolExecutor(max_workers=max(1, min(result_cache._SWEEP_WORKERS,
+                                                   len(parts)))) as ex:
+        got = dict(zip(jobs, (r for res in ex.map(run, parts) for r in res)))
+    for i in range(len(arms)):
+        facts[i] += [t for rp in leaves[i] for t in got[(rp, extra[i])]]
+    return facts
+
+
+def arm_cache_key(spec: ArmSpec, records: Sequence[tuple[str, int, int]], *, ftseed: int,
+                  prior: float, pool: str, cut: float | None, code: str, what: str) -> str:
+    """`result_cache.fingerprint` of one arm's unit `what` (``load_arm`` / ``ep20_twins``)."""
+    return result_cache.fingerprint(
+        records, code=[],
+        params={"what": what, "spec": asdict(spec), "ftseed": ftseed, "prior": prior,
+                "pool": pool, "cut": cut, "code": code})
+
+
+def _refresh_flag(refresh_cache: bool | None) -> bool:
+    if refresh_cache is None:
+        return os.environ.get("SL_RESULT_CACHE_REFRESH", "0") == "1"
+    return bool(refresh_cache)
+
+
+def load_arms(arms: Sequence[ArmSpec], output_root: Path, *, ftseed: int = 1,
+              refresh_cache: bool | None = None) -> TrajectoryData:
+    """`load_arm` over every spec (ftseed 1 only), concatenated into one `TrajectoryData`.
+
+    Each arm's ``(runs, points, notes)`` is served from `result_cache` (namespace
+    `CACHE_NAMESPACE`, one unit per arm) when the fingerprint of every record file it reads
+    (`_record_facts`, after the one `_prefetch` sweep), its spec, ftseed, prior, pool, cut and
+    the code of this module / `trajectories` / `transfer_significance_io` are unchanged.
+    `refresh_cache=True` (default: env ``SL_RESULT_CACHE_REFRESH=1``) recomputes and restores
+    every arm; ``SL_RESULT_CACHE=0`` bypasses the cache.
+    """
+    root = Path(output_root)
+    leaves = [_arm_leaves(spec, root, ftseed) for spec in arms]
+    _prefetch(arms, root, ftseed, leaves)
+    refresh = _refresh_flag(refresh_cache)
+    use_cache = not result_cache._disabled()
+    facts = _record_facts(arms, root, ftseed, leaves) if use_cache else {}
+    code = _code_digest() if use_cache else ""
     notes: list[str] = []
-    runs, points, priors = [], [], {}
-    for spec in arms:
-        r, p, prior = load_arm(spec, output_root, ftseed=ftseed, notes=notes, refresh=False)
+    runs, points, priors, keys = [], [], {}, {}
+    for i, spec in enumerate(arms):
+        prior, pool, cut = _arm_context(spec, root, notes)
+
+        def compute(spec=spec, prior=prior, pool=pool, cut=cut):
+            local: list[str] = []
+            r, p = _load_arm_runs(spec, root, ftseed, prior, pool, cut, local, False)
+            return r, p, local
+
+        if use_cache:
+            key = arm_cache_key(spec, facts[i], ftseed=ftseed, prior=prior, pool=pool, cut=cut,
+                                code=code, what="load_arm")
+            r, p, local = result_cache.cached(CACHE_NAMESPACE, spec.label, key, root, compute,
+                                              refresh=refresh, n_input_records=len(facts[i]))
+            keys[spec.label] = key
+        else:
+            r, p, local = compute()
+        notes.extend(local)
         runs.append(r)
         points.append(p)
         priors[spec.label] = prior
     return TrajectoryData(list(arms), pd.concat(runs, ignore_index=True),
-                          pd.concat(points, ignore_index=True), priors, notes,
-                          Path(output_root))
+                          pd.concat(points, ignore_index=True), priors, notes, root,
+                          keys if use_cache else None)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -736,6 +1021,52 @@ def _cadence(n: pd.Series) -> str:
     return str(lo) if lo == hi else f"{lo}–{hi}"
 
 
+def _inventory_row(data: TrajectoryData, spec: ArmSpec) -> tuple[dict, bool]:
+    """`inventory_table`'s row of `spec` and whether the arm has any alive finite grid point
+    (`_alive_points`; what `trajectory_ab_vs_aa` needs of a matched control)."""
+    r = data.runs[data.runs["arm"] == spec.label]
+    n_cells_cov = r[r["has_traj"]]["cell"].nunique()
+    st = r["state"].value_counts()
+    row = {
+        "family": spec.family, "group": display_group(spec),
+        "condition": display_condition(spec),
+        "animal": spec.animal, "arm": spec.label,
+        "cell set": "ep20 checkpoints" if _stop_note(spec) else spec.cell_set,
+        "teachers": len(spec.teachers), "cells (with traj / design)":
+            f"{n_cells_cov}/{len(spec.cells)}",
+        "runs with traj / designed": f"{int(r['has_traj'].sum())}/{len(r)}",
+        "alive": int(st.get("alive", 0)), "dead": int(st.get("dead", 0)),
+        "diverged": int(r["diverged"].sum()), "unlabelled": int(st.get("unlabelled", 0)),
+        "cadence (saved steps)": _cadence(r.loc[r["has_traj"], "n_points"]),
+        "receiver prior": data.priors[spec.label],
+        "status": arm_status(spec, r, data.priors[spec.label]),
+    }
+    return row, bool(np.isfinite(_alive_points(data, [spec.label])["ratio"]).any())
+
+
+def arm_inventory(data: TrajectoryData, *,
+                  refresh_cache: bool | None = None) -> dict[str, tuple[dict, bool]]:
+    """``{arm label: (inventory row, has alive finite grid points)}`` (`_inventory_row`).
+
+    When `data` carries result-cache keys (``data.arm_keys``), each arm is one unit
+    (``{label} · inventory``) keyed on its arm key, which already covers its runs, points,
+    prior and this module's code (the alive-points merge over the whole points frame cost
+    ~14 s per `trajectory_ab_vs_aa.find_comparisons`)."""
+    keys = data.arm_keys if data.arm_keys is not None and not result_cache._disabled() else None
+    refresh = _refresh_flag(refresh_cache)
+    out = {}
+    for spec in data.arms:
+        if keys is not None and spec.label in keys:
+            key = result_cache.fingerprint([], code=[], params={
+                "what": "inventory", "arm_key": keys[spec.label]})
+            out[spec.label] = result_cache.cached(
+                CACHE_NAMESPACE, f"{spec.label} · inventory", key, Path(data.root),
+                lambda spec=spec: _inventory_row(data, spec), refresh=refresh)
+        else:
+            out[spec.label] = _inventory_row(data, spec)
+    return out
+
+
 def inventory_table(data: TrajectoryData) -> pd.DataFrame:
     """One row per arm: design, coverage, run states, cadence and curve status.
 
@@ -743,26 +1074,10 @@ def inventory_table(data: TrajectoryData) -> pd.DataFrame:
     ``alive / dead / unlabelled`` partition the non-diverged runs with a trajectory (anchored
     dead cut at the endpoint); ``diverged`` counts ``train_diverged.json`` over all designed
     runs; ``cadence`` = distinct saved steps per run (min–max over runs with a trajectory).
+    Rows come from `arm_inventory` (result-cached per arm when `data` is).
     """
-    rows = []
-    for spec in data.arms:
-        r = data.runs[data.runs["arm"] == spec.label]
-        n_cells_cov = r[r["has_traj"]]["cell"].nunique()
-        st = r["state"].value_counts()
-        rows.append({
-            "family": spec.family, "group": spec.group, "condition": spec.condition,
-            "animal": spec.animal, "arm": spec.label,
-            "cell set": "ep20 checkpoints" if _stop_note(spec) else spec.cell_set,
-            "teachers": len(spec.teachers), "cells (with traj / design)":
-                f"{n_cells_cov}/{len(spec.cells)}",
-            "runs with traj / designed": f"{int(r['has_traj'].sum())}/{len(r)}",
-            "alive": int(st.get("alive", 0)), "dead": int(st.get("dead", 0)),
-            "diverged": int(r["diverged"].sum()), "unlabelled": int(st.get("unlabelled", 0)),
-            "cadence (saved steps)": _cadence(r.loc[r["has_traj"], "n_points"]),
-            "receiver prior": data.priors[spec.label],
-            "status": arm_status(spec, r, data.priors[spec.label]),
-        })
-    return pd.DataFrame(rows)
+    inv = arm_inventory(data)
+    return pd.DataFrame([inv[s.label][0] for s in data.arms])
 
 
 def _alive_points(data: TrajectoryData, arms: Sequence[str]) -> pd.DataFrame:
@@ -782,10 +1097,11 @@ def curve_arms(data: TrajectoryData) -> list[ArmSpec]:
 def arm_curves(data: TrajectoryData, arms: Sequence[ArmSpec] | None = None) -> pd.DataFrame:
     """Per-arm curve: median (and n) over alive runs of the ×prior ratio at each saved step.
 
-    Columns ``arm, group, step, median, n, end_step`` (the arm's declared final step).
+    Columns ``arm, group, step, median, n, end_step`` (``group`` = `display_group`; the
+    arm's declared final step).
     """
     arms = curve_arms(data) if arms is None else list(arms)
-    group = {s.label: s.group for s in arms}
+    group = {s.label: display_group(s) for s in arms}
     pts = _alive_points(data, list(group))
     if pts.empty:
         return pd.DataFrame(columns=["arm", "group", "step", "median", "n", "end_step"])
@@ -793,6 +1109,52 @@ def arm_curves(data: TrajectoryData, arms: Sequence[ArmSpec] | None = None) -> p
     out.insert(1, "group", out["arm"].map(group))
     out["end_step"] = out["arm"].map({a: _arm_end(data, a) for a in group})
     return out
+
+
+def control_subtracted_curves(data: TrajectoryData,
+                              arms: Sequence[ArmSpec] | None = None) -> pd.DataFrame:
+    """Per treatment arm: median over its alive runs of ``(p_student(step) - p_control(step)) /
+    receiver prior``, the control being the same cell's run of the matched control arm
+    (``control_of``) at the same step (median over that cell's alive control runs).
+
+    Only treatment arms whose control arm is also in `arms` (default `curve_arms`) enter; a run
+    step without an alive control value at that cell and step is dropped. Columns
+    `CURVE_COLUMNS` (``arm`` = displayed label; ``sender`` / ``receiver`` = displayed bases).
+    """
+    arms = curve_arms(data) if arms is None else list(arms)
+    labels = {s.label for s in arms}
+    ctl = {s.control_of: s.label for s in arms if s.kind == "control"}
+    treat = [s for s in arms if s.kind != "control" and ctl.get(s.label) in labels]
+    cols = CURVE_COLUMNS
+    if not treat:
+        return pd.DataFrame(columns=cols)
+    t = _alive_points(data, [s.label for s in treat])
+    c = _alive_points(data, [ctl[s.label] for s in treat])
+    of = {v: k for k, v in ctl.items()}
+    c = (c.assign(arm=c["arm"].map(of)).groupby(["arm", "cell", "step"])["ratio"].median()
+         .rename("ctl").reset_index())
+    m = t.merge(c, on=["arm", "cell", "step"])
+    if m.empty:
+        return pd.DataFrame(columns=cols)
+    prior_t = m["arm"].map(data.priors)
+    prior_c = m["arm"].map(lambda a: data.priors[ctl[a]])
+    m["delta"] = (m["ratio"] * prior_t - m["ctl"] * prior_c) / prior_t
+    out = m.groupby(["arm", "step"])["delta"].agg(median="median", n="size").reset_index()
+    out.insert(1, "group", out["arm"].map({s.label: display_group(s) for s in treat}))
+    out["end_step"] = out["arm"].map({s.label: _arm_end(data, s.label) for s in treat})
+    spec = {s.label: s for s in treat}
+    out["animal"] = out["arm"].map(lambda a: spec[a].animal)
+    for col in ("sender", "receiver"):
+        out[col] = out["arm"].map(lambda a, c=col: display(short_base(getattr(spec[a], c))))
+    out["arm"] = out["arm"].map(display)
+    return out[cols]
+
+
+#: Columns of `control_subtracted_curves` (and of ``conditions_curves.csv``).
+CURVE_COLUMNS = ["group", "arm", "animal", "sender", "receiver", "step", "n", "median",
+                 "end_step"]
+#: Columns of `pooled_curves` (and of ``conditions_pooled.csv``).
+POOLED_COLUMNS = ["group", "step", "median", "q25", "q75", "n_arms"]
 
 
 def pooled_curves(curves: pd.DataFrame) -> pd.DataFrame:
@@ -887,10 +1249,10 @@ def _over_control(curve: pd.DataFrame, control: pd.DataFrame) -> float:
 
 
 def summary_table(data: TrajectoryData,
-                  groups: Sequence[tuple[str, str]] = GROUPS) -> pd.DataFrame:
+                  groups: Sequence[tuple[str, str]] = DISPLAY_GROUPS) -> pd.DataFrame:
     """Arm rows grouped by condition line, each group followed by its pooled ``ALL`` row.
 
-    Arm rows read the arm's own curve (median over alive runs); the endpoint is the arm's
+    `groups` are `display_group` names. Arm rows read the arm's own curve (median over alive runs); the endpoint is the arm's
     declared final step (mode over its runs). Pooled rows read the pooled curve (median over
     the per-arm medians); their endpoint value is the median over the arms' endpoint values,
     and their per-run columns pool every alive run of the group's arms.
@@ -908,7 +1270,7 @@ def summary_table(data: TrajectoryData,
     control_of = {s.control_of: s.label for s in arms if s.kind == "control"}
     rows = []
     for group, _ in groups:
-        members = [s for s in arms if s.group == group]
+        members = [s for s in arms if display_group(s) == group]
         if not members:
             continue
         ends = []
@@ -918,7 +1280,7 @@ def summary_table(data: TrajectoryData,
             end_step = _arm_end(data, s.label)
             end_v = _at(c, end_step)
             ends.append(end_v)
-            rows.append(_row(s.label, s.condition + _stop_note(s), c, r, end_step, end_v, 1))
+            rows.append(_row(display(s.label), display_condition(s) + _stop_note(s), c, r, end_step, end_v, 1))
             if with_controls:
                 ctl = curves[curves["arm"] == control_of.get(s.label)]
                 rows[-1][OVER_CONTROL_COL] = (_over_control(c, ctl) if s.kind != "control"
@@ -935,17 +1297,13 @@ def summary_table(data: TrajectoryData,
 
 
 # ----------------------------------------------------------------------------------------------
-# figures
+# figures (per-checkpoint arms, control-subtracted)
 # ----------------------------------------------------------------------------------------------
-GROUP_COLORS = {
-    "Pythia same-model": "#D55E00", "Pythia cross-seed": "#0072B2",
-    "Pythia cross-size/arch.": "#009E73", "OLMo same-model": "#D55E00",
-    "OLMo cross-seed": "#0072B2", "OLMo cross-corpus": "#CC79A7",
-    "OLMo cross-arch.": "#009E73",
-}
+DELTA_YLABEL = "median Δp(trait) / receiver prior"
 
 
 def _log_axes(ax, ylabel: str = "test p_target / receiver prior") -> None:
+    """Log-log step axes (625 ... 25,000); used by `trajectory_asymmetry`."""
     from subliminal_learning.analysis import plots as aplots
 
     ax.set_xscale("log")
@@ -957,155 +1315,80 @@ def _log_axes(ax, ylabel: str = "test p_target / receiver prior") -> None:
     ax.set_xlabel("optimizer step (absolute, log)")
     ax.set_ylabel(ylabel)
 
+_STOP_TICKS = [625, 5000, 10000, 15000, 20000, 25000]
+_STOP_COLORS = dict(zip(STOP_DISPLAY_GROUPS,
+                        ("#D55E00", "#0072B2", "#009E73", "#CC79A7", "#E69F00")))
 
-def plot_arm_curves(curves: pd.DataFrame, *, fontsize: int = 10):
-    """Small multiples, one panel per condition line, one thin line per arm (named in the
-    panel's right-margin legend); the dashed line is the receiver prior (×1)."""
+
+def _stop_axes(ax, ylabel: str = DELTA_YLABEL) -> None:
+    ax.set_xlim(0, 26000)
+    ax.set_xticks(_STOP_TICKS)
+    ax.set_xticklabels([f"{t:,}" for t in _STOP_TICKS])
+    ax.axhline(0, color="k", lw=0.8)
+    ax.set_xlabel("student step")
+    ax.set_ylabel(ylabel)
+
+
+def plot_stop_arm_curves(curves: pd.DataFrame, *, fontsize: int = 10):
+    """Per-checkpoint arms, control-subtracted (`control_subtracted_curves` table, columns
+    `CURVE_COLUMNS`): one panel per (display group, animal), one line per arm (named in the
+    right-margin legend); the horizontal line at 0 is the matched control."""
     import matplotlib.pyplot as plt
 
     from subliminal_learning.analysis import plots as aplots
 
-    groups = [g for g, _ in GROUPS if g in set(curves["group"])]
-    fig, axes = plt.subplots(len(groups), 1, figsize=(12, 4.6 * len(groups)),
-                             constrained_layout=True)
-    axes = np.atleast_1d(axes)
-    for ax, group in zip(axes, groups):
-        sub = curves[curves["group"] == group]
-        arms = list(dict.fromkeys(sub["arm"]))
-        pal = aplots.palette(arms, cmap="tab20" if len(arms) > 10 else "tab10")
-        for arm in arms:
-            c = sub[sub["arm"] == arm].sort_values("step")
-            ax.plot(c["step"], c["median"], lw=1.2, color=pal[arm], label=arm)
-        ax.axhline(1, color="k", ls="--", lw=0.8)
-        _log_axes(ax)
-        ax.set_title(f"{group}: per-arm median over alive runs ({len(arms)} arms)")
-        ax.axvline(12500, color="0.6", lw=0.6, ls=":")
-        ax.axvline(25000, color="0.6", lw=0.6, ls=":")
-        aplots.right_legend(ax, fontsize=fontsize, ncol=2 if len(arms) > 14 else 1)
+    animals = list(dict.fromkeys(curves["animal"]))
+    have = set(zip(curves["group"], curves["animal"]))
+    panels = [(g, a) for g in STOP_DISPLAY_GROUPS for a in animals if (g, a) in have]
+    fig, axes = plt.subplots(len(panels), 1, figsize=(12, 4.8 * len(panels)),
+                             constrained_layout=True, squeeze=False)
+    for ax, (group, animal) in zip(axes[:, 0], panels):
+        sel = (curves["group"] == group) & (curves["animal"] == animal)
+        labels = list(dict.fromkeys(curves.loc[sel, "arm"]))
+        pal = aplots.palette(labels, cmap="tab20" if len(labels) > 10 else "tab10")
+        for arm in labels:
+            c = curves[curves["arm"] == arm].sort_values("step")
+            ax.plot(c["step"], c["median"], lw=1.6, color=pal[arm], label=arm)
+        _stop_axes(ax)
+        ax.set_title(f"{group} · {animal}: per-arm median over alive runs ({len(labels)} arms)")
+        aplots.right_legend(ax, fontsize=fontsize, ncol=2 if len(labels) > 14 else 1)
     return fig
 
 
-def plot_pooled(pooled: pd.DataFrame, *, fontsize: int = 11):
-    """The headline: every condition line on one axes (left, ×prior) and normalised to its own
-    peak (right). Pythia solid, OLMo dashed; band = IQR over arms; marker = line peak; dotted
-    verticals = run ends (12,500 OLMo, 25,000 Pythia)."""
+def plot_stop_pooled(pooled: pd.DataFrame, curves: pd.DataFrame, *, fontsize: int = 11):
+    """Per-checkpoint headline, control-subtracted: every display line (median of per-arm
+    medians, band = IQR over arms) on one axes (left) and each normalised to its own peak
+    (right); ● = interior peak; 0 = the matched controls. `pooled` has `POOLED_COLUMNS`;
+    `curves` is unused (kept for the call signature)."""
     import matplotlib.pyplot as plt
 
     from subliminal_learning.analysis import plots as aplots
 
-    fam = dict(GROUPS)
     fig, axes = plt.subplots(1, 2, figsize=(17, 6.2), constrained_layout=True)
+    drawn = False
     for k, ax in enumerate(axes):
-        for group, _ in GROUPS:
+        for group in STOP_DISPLAY_GROUPS:
             c = pooled[pooled["group"] == group].sort_values("step")
             if c.empty:
                 continue
-            ls = "-" if fam[group] == "Pythia" else "--"
+            drawn = True
+            col = _STOP_COLORS[group]
             scale = 1.0 if k == 0 else float(c["median"].max())
-            col = GROUP_COLORS[group]
-            ax.plot(c["step"], c["median"] / scale, ls=ls, lw=2.2, color=col,
+            ax.plot(c["step"], c["median"] / scale, lw=2.2, color=col,
                     label=f"{group} ({int(c['n_arms'].max())} arms)")
             ax.fill_between(c["step"], c["q25"] / scale, c["q75"] / scale, color=col,
                             alpha=0.12, lw=0)
             pk = c.loc[c["median"].idxmax()]
             if pk["step"] > c["step"].min():        # ● only for an interior peak
-                    ax.plot([pk["step"]], [pk["median"] / scale], marker="o", ms=9, color=col,
-                        mec="k", zorder=5)
-        for end in (12500, 25000):
-            ax.axvline(end, color="0.4", lw=1, ls=":")
-        if k == 0:
-            ax.axhline(1, color="k", lw=0.8, ls="-.")
-            _log_axes(ax)
-            ax.set_title("Transfer vs step (median of per-arm medians; band = IQR over arms)")
-        else:
-            _log_axes(ax, "×prior / line's own peak")
-            ax.set_title("Same lines, each normalised to its own peak (peak = 1)")
-    aplots.right_legend(axes[1], fontsize=fontsize,
-                        title="line (solid Pythia receivers, dashed OLMo receivers;\n● interior peak)")
-    return fig
-
-
-_STOP_TICKS = [625, 1250, 2500, 5000, 12500, 25000]
-
-
-def _stop_axes(ax, ylabel: str = "test p_target / receiver prior") -> None:
-    _log_axes(ax, ylabel)
-    ax.set_xlim(560, 28000)
-    ax.set_xticks(_STOP_TICKS)
-    ax.set_xticklabels([f"{t:,}" for t in _STOP_TICKS])
-
-
-def plot_stop_arm_curves(curves: pd.DataFrame, arms: Sequence[ArmSpec], *, fontsize: int = 10):
-    """Per-checkpoint arms: one panel per (treatment group, animal), one solid line per
-    treatment arm and its matched control as a thin dashed line of the same colour (every line
-    named in the right-margin legend); the dash-dot line is the receiver prior (×1)."""
-    import matplotlib.pyplot as plt
-
-    from subliminal_learning.analysis import plots as aplots
-
-    have = set(curves["arm"])
-    ctl = {s.control_of: s.label for s in arms if s.kind == "control"}
-    panels = [(g, a) for g in _STOP_TREAT_GROUPS
-              for a in dict.fromkeys(s.animal for s in arms if s.kind != "control")
-              if any(s.group == g and s.animal == a for s in arms)]
-    fig, axes = plt.subplots(len(panels), 1, figsize=(12, 4.8 * len(panels)),
-                             constrained_layout=True)
-    for ax, (group, animal) in zip(np.atleast_1d(axes), panels):
-        treat = [s.label for s in arms
-                 if s.group == group and s.animal == animal and s.kind != "control"]
-        pal = aplots.palette(treat, cmap="tab10")
-        for arm in treat:
-            for lab, kw in ((arm, {"lw": 1.6, "ls": "-"}),
-                            (ctl.get(arm), {"lw": 0.9, "ls": "--"})):
-                if lab not in have:
-                    continue
-                c = curves[curves["arm"] == lab].sort_values("step")
-                ax.plot(c["step"], c["median"], color=pal[arm], label=lab, **kw)
-        ax.axhline(1, color="k", ls="-.", lw=0.8)
-        _stop_axes(ax)
-        ax.set_title(f"{group} · {animal}: per-arm median over alive runs (solid = treatment, "
-                     "dashed = its base-numbers control)")
-        if ax.get_legend_handles_labels()[0]:
-            aplots.right_legend(ax, fontsize=fontsize)
-    return fig
-
-
-def plot_stop_pooled(pooled: pd.DataFrame, curves: pd.DataFrame, *, fontsize: int = 11):
-    """Per-checkpoint headline: every per-checkpoint condition line (median of per-arm medians,
-    band = IQR over arms) and its pooled control line (dotted, same colour), on one axes (left,
-    ×prior) and each normalised to its own peak (right); ● = interior peak. `curves` is
-    unused (kept for the call signature)."""
-    import matplotlib.pyplot as plt
-
-    from subliminal_learning.analysis import plots as aplots
-
-    lines = []
-    cols = dict(zip(_STOP_TREAT_GROUPS, ("#D55E00", "#CC79A7", "#009E73", "#0072B2")))
-    for group in _STOP_TREAT_GROUPS:
-        for g, ls in ((group, "-"), (group + CONTROLS_SUFFIX, ":")):
-            c = pooled[pooled["group"] == g].sort_values("step")
-            if not c.empty:
-                lines.append((f"{g} ({int(c['n_arms'].max())} arms)", c, cols[group], ls, True))
-    fig, axes = plt.subplots(1, 2, figsize=(17, 6.2), constrained_layout=True)
-    for k, ax in enumerate(axes):
-        for label, c, col, ls, band in lines:
-            scale = 1.0 if k == 0 else float(c["median"].max())
-            ax.plot(c["step"], c["median"] / scale, ls=ls, lw=2.2, color=col, label=label)
-            if band:
-                ax.fill_between(c["step"], c["q25"] / scale, c["q75"] / scale, color=col,
-                                alpha=0.12, lw=0)
-            pk = c.loc[c["median"].idxmax()]
-            if pk["step"] > c["step"].min():        # ● only for an interior peak
                 ax.plot([pk["step"]], [pk["median"] / scale], marker="o", ms=9, color=col,
                         mec="k", zorder=5)
         if k == 0:
-            ax.axhline(1, color="k", lw=0.8, ls="-.")
             _stop_axes(ax)
-            ax.set_title("Per-checkpoint arms vs step (band = IQR over a line's arms)")
+            ax.set_title("Median of per-arm medians (band = IQR over a line's arms)")
         else:
-            _stop_axes(ax, "×prior / line's own peak")
+            _stop_axes(ax, DELTA_YLABEL + " ÷ line's own peak")
             ax.set_title("Same lines, each normalised to its own peak (peak = 1)")
-    if lines:
+    if drawn:
         aplots.right_legend(axes[1], fontsize=fontsize, title="line (● interior peak)")
     return fig
 
@@ -1155,22 +1438,39 @@ def endpoint_twin_points(spec: ArmSpec, root: Path, *, ftseed: int = 1,
 
 
 def with_ep20_endpoints(data: TrajectoryData, *, ftseed: int = 1,
-                        by_group: bool = True) -> TrajectoryData:
+                        by_group: bool = True,
+                        refresh_cache: bool | None = None) -> TrajectoryData:
     """`data` (per-checkpoint arms of ``_stop{N}`` cells) with each alive run's ep20 endpoint
     appended as its last point: the same (teacher, cell) run's endpoint ×prior
     (`endpoint_twin_points`, same alive rule) at its final step, which also becomes the run's
     ``end_step``. Runs without a readable endpoint keep their saved steps only. A condition
     line (``group``) whose arms would then end at different steps is left unextended, so its
     arms still pool on one endpoint. With ``by_group=False`` that rule is skipped: every arm
-    (controls included) gets every endpoint its twins have, for per-arm / paired readouts."""
+    (controls included) gets every endpoint its twins have, for per-arm / paired readouts.
+
+    When `data` came from a cached `load_arms` (``data.arm_keys``), each arm's
+    `endpoint_twin_points` is served from `result_cache` too (unit ``{label} · ep20 twins``, keyed
+    on the arm's load key -- which already covers the endpoint files -- and `ftseed`), and the
+    returned ``arm_keys`` are re-derived (with the group members' keys under `by_group`)."""
     root = Path(data.root)
     alive = data.runs[data.runs["state"] == "alive"][["arm", "teacher", "cell"]]
     runs, extra, tws, twnotes, notes = data.runs.copy(), [], {}, {}, []
+    keys = data.arm_keys if data.arm_keys is not None and not result_cache._disabled() else None
+    refresh = _refresh_flag(refresh_cache)
     for spec in data.arms:
-        twnotes[spec.label] = []
-        tw = endpoint_twin_points(spec, root, ftseed=ftseed,
-                                  notes=twnotes[spec.label]).assign(arm=spec.label)
-        tws[spec.label] = tw.merge(alive, on=["arm", "teacher", "cell"])
+        def compute(spec=spec):
+            local: list[str] = []
+            return endpoint_twin_points(spec, root, ftseed=ftseed, notes=local), local
+
+        if keys is not None and spec.label in keys:
+            key = result_cache.fingerprint([], code=[], params={
+                "what": "ep20_twins", "arm_key": keys[spec.label], "ftseed": ftseed})
+            tw, twnotes[spec.label] = result_cache.cached(
+                CACHE_NAMESPACE, f"{spec.label} · ep20 twins", key, root, compute,
+                refresh=refresh)
+        else:
+            tw, twnotes[spec.label] = compute()
+        tws[spec.label] = tw.assign(arm=spec.label).merge(alive, on=["arm", "teacher", "cell"])
     for group in dict.fromkeys(s.group for s in data.arms):
         members = [s.label for s in data.arms if s.group == group]
         n_end = data.runs[data.runs["end_step"].notna()].groupby("arm").size()
@@ -1192,7 +1492,16 @@ def with_ep20_endpoints(data: TrajectoryData, *, ftseed: int = 1,
         points = pd.concat([data.points, new], ignore_index=True)
     else:
         points = data.points
-    return TrajectoryData(data.arms, runs, points, data.priors, data.notes + notes, data.root)
+    new_keys = None
+    if keys is not None:
+        groups = {s.label: s.group for s in data.arms}
+        new_keys = {lab: result_cache.fingerprint([], code=[], params={
+            "what": "with_ep20_endpoints", "ftseed": ftseed, "by_group": by_group, "arm_key": k,
+            "group_keys": (sorted(keys.get(o, "") for o, g in groups.items()
+                                  if g == groups.get(lab)) if by_group else None)})
+            for lab, k in keys.items()}
+    return TrajectoryData(data.arms, runs, points, data.priors, data.notes + notes, data.root,
+                          new_keys)
 
 
 def _two_sided_p(d: np.ndarray) -> tuple[float, float]:

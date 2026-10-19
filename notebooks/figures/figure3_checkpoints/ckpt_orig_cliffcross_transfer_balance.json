@@ -1,6 +1,6 @@
 {
-  "input_path": "/home/angela/EleutherAI_subliminal_learning/notebooks/figures/figure3_checkpoints/ckpt_takeoff_9models_and_orig_cliffcross_cells.csv",
-  "input_sha256": "0d442158b612e16abb9fd9cbc686a6c6296781a46f052216fc32af33f3e8632e",
+  "input_path": "/home/angela/EleutherAI_subliminal_learning/notebooks/figures/figure3_checkpoints/figure3_cells.csv",
+  "input_sha256": "08cec5b880722994e2ff3a0e9b8e50846b1503ae4c5145c79de581285db87972",
   "steps": [
     75000,
     80000,
@@ -18,9 +18,10 @@
   ],
   "formula": "(sum_j!=i M[i,j] - sum_j!=i M[j,i]) / (len(STEPS)-1)",
   "plotted_metric": "mean_difference",
+  "cell_quantity": "delta_p (\u0394p(dog) = five-recipe mean minus matched base-numbers control)",
   "normalization_divisor": 12,
   "orientation": "teacher=row, student=column",
   "diagonal": "omitted; cancels exactly",
-  "aggregation": "Inherited verified seed then teacher-recipe averages from checkpoint export",
+  "aggregation": "Inherited verified seed then teacher-recipe averages from checkpoint export, minus matched control",
   "sum_difference": -1.1102230246251565e-16
 }

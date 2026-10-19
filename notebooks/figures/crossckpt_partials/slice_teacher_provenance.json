@@ -1,0 +1,49 @@
+{
+  "source": {
+    "outputs_root": "/mnt/cold-1/soar-subliminal/angela/outputs",
+    "table_sha256": {
+      "notebooks/figures/crossckpt_partials/slice_teacher_recipes.csv": "a06515d07fb495c2355a2f64932d85e3d2527ac6722e320399524e1bfa10759b",
+      "notebooks/figures/crossckpt_partials/slice_teacher_source_cells.csv": "77387657c7144928cff806bc9ee3ed1515183c129b03648ef908b9776326a313"
+    },
+    "pool_cache": "/home/angela/EleutherAI_subliminal_learning/docs/results/data/checkpoint_entropy_transfer_all_teachers_20260921_pools.json.gz",
+    "run_status_counts": {
+      "verified": 2940
+    },
+    "incomplete_cells": [],
+    "missing_control_cells": [],
+    "control_source": "{root}/students/controls/base/ckpt/{base}@step{S}/teacher-{base}@step{T}/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1; for orig (pythia-160m) at T=143000 the teacher level is the unrevisioned teacher-pythia-160m (final weights are tensor-identical to step143000)",
+    "control_seed": 1,
+    "student_recipe": "ep10_lr1e-4_r8a32"
+  },
+  "checkpoint_sets": [
+    [
+      50000,
+      75000,
+      80000,
+      85000,
+      90000
+    ],
+    [
+      110000,
+      115000,
+      120000,
+      125000
+    ],
+    [
+      50000,
+      75000,
+      80000,
+      85000,
+      90000
+    ],
+    [
+      110000,
+      115000,
+      120000,
+      125000
+    ]
+  ],
+  "quantity": "delta_p = teacher-recipe seed-mean p(dog) minus the matched base-numbers control p(dog) (ep10_lr1e-4_r8a32, control ftseed 1)",
+  "aggregation": "original 14x14 cells collected from leaves; per recipe delta = student-seed mean p(dog) - cell control; curve = equal mean of five recipe deltas. Cells without a control are gaps (not drawn).",
+  "error_bars": "Shading: \u00b11 SD across five teacher-recipe deltas (ddof=1), after student-seed averaging"
+}

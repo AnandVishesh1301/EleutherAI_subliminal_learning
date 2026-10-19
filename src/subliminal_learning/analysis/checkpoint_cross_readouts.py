@@ -42,6 +42,9 @@ from subliminal_learning.analysis.checkpoint_grid_factorization import (
 RESAMPLING_STEPS: list[int] = [75000, 85000, 95000, 100000, 105000, 115000, 125000, 143000]
 #: The final Pythia checkpoint: its base dirs carry no ``@step`` in some layouts.
 FINAL_STEP: int = 143000
+#: The 10-05 fill's extra five dog recipes (beyond `CKPT_TEACHER_TAGS`), run same-checkpoint at 115k.
+EXTRA_TEACHER_TAGS: list[str] = ["ep5_lr2e-4_r64a64", "ep10_lr2e-4_r16a16", "ep3_lr1e-3_r8a8",
+                                 "ep7_lr1e-4_r64a64", "ep5_lr5e-4_r8a8"]
 
 
 # --------------------------------------------------------------------------------------
@@ -366,14 +369,21 @@ def pool_mean_length(output_root: Path, animal: str, step: int, tag: str, *,
 
 
 def length_share_frame(output_root: Path, animal: str = "dog", *,
-                       steps: list[int] = RESAMPLING_STEPS) -> pd.DataFrame:
-    """One row per (step, teacher) having both R and S_all same-step leaves (every teacher on disk).
+                       steps: list[int] = RESAMPLING_STEPS,
+                       step_tags: dict[int, list[str]] | None = None) -> pd.DataFrame:
+    """One row per (step, teacher) having both R and S_all same-step leaves (every teacher on disk,
+    or ``step_tags[step]`` for the steps it names).
 
     Columns: ``step, tag, n_R, n_S`` (seeds present), ``R, S_all`` (seed means), ``C`` (seed-mean
     control at the step), ``R_ex = R - C``, ``S_ex = S_all - C``, ``share = 100 * S_ex / R_ex``,
     ``length`` (`pool_mean_length`).
     """
-    rows = load_same_step_arms(output_root, animal, steps=steps, tags=None, arms=("R", "S_all", "C"))
+    step_tags = step_tags or {}
+    parts = [load_same_step_arms(output_root, animal, steps=[st], tags=step_tags.get(st),
+                                 arms=("R", "S_all", "C")) for st in steps]
+    for d in parts:
+        d.attrs = {}  # concat compares attrs; the coverage frames are not comparable
+    rows = pd.concat(parts, ignore_index=True)
     c = rows[rows.arm == "C"].groupby("step").p.mean()
     g = rows[rows.arm != "C"].groupby(["step", "tag", "arm"]).p.agg(["mean", "size"]).unstack("arm")
     g = g.dropna()
@@ -384,6 +394,67 @@ def length_share_frame(output_root: Path, animal: str = "dog", *,
     out["share"] = 100 * out.S_ex / out.R_ex
     out["length"] = [pool_mean_length(output_root, animal, s, t) for s, t in zip(out.step, out.tag)]
     return out
+
+
+def teacher_set_table(output_root: Path, sets: dict[tuple[int, str], list[str]], animal: str = "dog",
+                      *, n_boot: int = 2000, seed: int = 0) -> pd.DataFrame:
+    """S_all retention of named teacher sets, one row per ``(step, set)`` key of ``sets``.
+
+    Each set's same-step R / S_all / C rows go through `arm_retention` (ratio of means, paired
+    teacher-bootstrap CI, median of per-teacher ratios). Columns: ``retention, ci_low, ci_high,
+    median_of_ratios, n_teachers, R_ex`` (mean_T R - C), ``S_ex`` (mean_T S_all - C), ``length``
+    (mean over T of `pool_mean_length`).
+    """
+    out = {}
+    for (step, name), tags in sets.items():
+        rows = load_same_step_arms(output_root, animal, steps=[step], tags=list(tags),
+                                   arms=("R", "S_all", "C"))
+        t = arm_retention(rows, arms=["R", "S_all"], n_boot=n_boot, seed=seed)
+        s = t.loc["S_all"]
+        used = sorted(set(rows[rows.arm == "S_all"].tag) & set(rows[rows.arm == "R"].tag))
+        out[(step, name)] = {"retention": s.retention, "ci_low": s.ci_low, "ci_high": s.ci_high,
+                             "median_of_ratios": s.median_of_ratios, "n_teachers": int(s.n_teachers),
+                             "R_ex": t.loc["R", "excess"], "S_ex": s.excess,
+                             "length": float(np.mean([pool_mean_length(output_root, animal, step, x)
+                                                      for x in used]))}
+    f = pd.DataFrame(out).T.rename_axis(["step", "set"])
+    f["n_teachers"] = f.n_teachers.astype(int)
+    return f.astype({c: float for c in f.columns if c != "n_teachers"})
+
+
+def teacher_set_arm_table(output_root: Path, sets: dict[tuple[int, str], list[str]], animal: str = "dog",
+                          *, arms: tuple[str, ...] = ("S_all", "S_pool"),
+                          seed_scopes: dict[str, tuple[int, ...]] | None = None,
+                          n_boot: int = 2000, seed: int = 0) -> pd.DataFrame:
+    """Retention of each synthetic arm in ``arms`` for named teacher sets, one row per
+    ``(step, set, seed scope, arm)``.
+
+    ``seed_scopes`` maps a label (default ``"seeds 1–3"`` -> (1, 2, 3), ``"seed 1"`` -> (1,)) to the
+    student ftseeds read for the synthetic arm and its paired R (whichever of them exist; seed-mean
+    p per teacher); C is always the seed-mean control of the step over seeds 1–3. Unlike `arm_retention`, S_pool is never filled
+    from S_all: an arm missing for any teacher of the set gives an all-NaN row (``n_teachers`` =
+    teachers found), so no set is averaged over a subset. Columns: ``retention, ci_low, ci_high,
+    median_of_ratios, n_teachers, seeds_per_teacher, raw_p, excess`` as in `arm_retention`.
+    """
+    scopes = seed_scopes or {"seeds 1–3": (1, 2, 3), "seed 1": (1,)}
+    stats_cols = ["retention", "ci_low", "ci_high", "median_of_ratios", "raw_p", "excess"]
+    out = {}
+    for (step, name), tags in sets.items():
+        rows = load_same_step_arms(output_root, animal, steps=[step], tags=list(tags),
+                                   arms=("R", *arms, "C"))
+        for scope, seeds in scopes.items():
+            for arm in arms:
+                sub = rows[(rows.arm == "C") | (rows.arm.isin(["R", arm]) & rows.seed.isin(seeds))]
+                n = sub[sub.arm == arm].tag.nunique()
+                rec = {k: np.nan for k in stats_cols} | {"n_teachers": n, "seeds_per_teacher": ""}
+                if n == len(set(tags)):
+                    t = arm_retention(sub, arms=["R", arm], n_boot=n_boot, seed=seed).loc[arm]
+                    rec = {k: t[k] for k in stats_cols} | {"n_teachers": n,
+                                                          "seeds_per_teacher": t.seeds_per_teacher}
+                out[(step, name, scope, arm)] = rec
+    f = pd.DataFrame(out).T.rename_axis(["step", "set", "seeds", "arm"])
+    f["n_teachers"] = f.n_teachers.astype(int)
+    return f.astype({c: float for c in stats_cols})
 
 
 def length_share_summary(frame: pd.DataFrame) -> pd.DataFrame:
@@ -877,7 +948,7 @@ def same_step_arms_figure(retention: pd.DataFrame, ex: dict[str, pd.DataFrame], 
                           n_teachers: pd.DataFrame | None = None,
                           arms: tuple[str, ...] = ("S_1", "T_1", "S_3", "T_3", "S_all", "P_all")):
     """Grouped bars of retention % (`same_step_retention`), one group per arm and one bar
-    per checkpoint carrying it (`CHECKPOINT_COLORS`), asymmetric error bars from ``ci = (ci_low, ci_high)`` when given; with
+    per checkpoint carrying it (`CHECKPOINT_COLORS`), asymmetric error bars from ``ci = (ci_low, ci_high)`` when given (95% paired teacher-bootstrap CIs of the ratio of teacher means); teacher = student checkpoint throughout; y = % of R - C; with
     ``n_teachers`` the S_pool label carries its per-checkpoint teacher counts. ``ex`` is accepted for call compatibility and unused
     (the S_all cross grid is `resampling_cross_figure`). Returns the figure; saves nothing."""
     import matplotlib.pyplot as plt
@@ -910,9 +981,9 @@ def same_step_arms_figure(retention: pd.DataFrame, ex: dict[str, pd.DataFrame], 
         return f"{_arm_tex(arm)}\n(n={','.join(map(str, n))})"
 
     axl.set_xticks(centers, [group_label(a) for a in arms], fontsize=13)
-    axl.set_xlabel("synthetic arm (bars = checkpoint, teacher = student)", fontsize=11)
-    axl.set_ylabel("transfer retained (% of real-number excess)", fontsize=11)
-    axl.set_title("same-checkpoint retention (ratio of teacher means; error bars = 95% paired teacher-bootstrap CI)", fontsize=12)
+    axl.set_xlabel("synthetic arm", fontsize=11)
+    axl.set_ylabel("transfer retained (% of $R - C$)", fontsize=11)
+    axl.set_title("same-checkpoint retention", fontsize=12)
     axl.grid(axis="y", alpha=0.3)
     axl.spines[["top", "right"]].set_visible(False)
     h_, l_ = axl.get_legend_handles_labels()
@@ -948,8 +1019,6 @@ def length_share_figure(frame: pd.DataFrame):
     axl.set_title("Share of R recovered by $S_{\\mathrm{all}}$", fontsize=12, loc="left")
     axl.set_ylabel("$(S_{\\mathrm{all}} - C) / (R - C)$  (%)", fontsize=11)
     axr.set_title("$S_{\\mathrm{all}}$ transfer over control", fontsize=12, loc="left")
-    axr.set_ylabel("$S_{\\mathrm{all}}$ student test p(dog) − control", fontsize=11)
+    axr.set_ylabel("$S_{\\mathrm{all}}$ student Δp(dog)", fontsize=11)
     axl.legend(title="checkpoint", fontsize=9, frameon=False)
-    fig.suptitle("dog, Pythia-160M original, same-checkpoint teacher → student, control-subtracted",
-                 fontsize=13)
     return fig

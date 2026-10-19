@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -27,6 +28,7 @@ from typing import Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from subliminal_learning.analysis import transfer_family_registry_io as tfr
 from subliminal_learning.analysis import transfer_significance_io as tio
 from subliminal_learning.config import resolve_output_root
 from subliminal_learning.stats import transfer_significance_tests as tt
@@ -42,6 +44,11 @@ __all__ = [
     "diverged_note",
     "family_headline_arms",
     "registry_headline_arms",
+    "XWIDTH_KEYS",
+    "xwidth_arms",
+    "xwidth_label",
+    "xwidth_matched_pairs",
+    "restrict_teachers",
     "headline_families",
     "xarch_seed_families",
     "headline_table",
@@ -288,17 +295,107 @@ def registry_headline_arms(arms_json: str | Path, names: Sequence[str], *,
     return out
 
 
-#: Cross-width (160m ↔ 410m, dog, core30) xarch registry arms by ``(data order, direction)``;
-#: ``up`` = small → large (160m sender), ``down`` = large → small. Pools never mix data orders.
-XWIDTH_ARMS: dict[tuple[str, str], tuple[str, ...]] = {
-    ("same", "up"): ("160m → 410m (dog)",),
-    ("same", "down"): ("410m → 160m (dog)", "410m-seed2 → 160m-seed2 (dog)"),
-    ("different", "up"): ("160m → 410m-seed1 (dog)", "160m-seed1 → 410m (dog)",
-                          "160m-seed2 → 410m (dog)"),
-    ("different", "down"): ("410m-seed1 → 160m (dog)", "410m-seed2 → 160m (dog)",
-                            "410m-seed2 → 160m-seed1 (dog)", "410m-seed3 → 160m (dog)",
-                            "410m-seed3 → 160m-seed1 (dog)"),
-}
+#: The ``(data order, direction)`` keys of `xwidth_arms`; ``up`` = small → large (160m sender).
+XWIDTH_KEYS = (("same", "up"), ("same", "down"), ("different", "up"), ("different", "down"))
+
+#: Name suffix of a nested teacher-subset arm (`xwidth_arms`'s nested-subset rule).
+TOP5_SUFFIX = ", top5"
+
+
+def _registry(arms_json: str | Path | Mapping) -> dict:
+    return dict(arms_json) if isinstance(arms_json, Mapping) else json.loads(
+        Path(arms_json).read_text())
+
+
+def _finished_check(arms_json: str | Path, output_root: Path | None,
+                    diverged: str = "drop") -> Callable[[str], bool]:
+    """``name -> is the registry arm finished on disk`` (`registry_headline_arms`), cached."""
+    seen: dict[str, bool] = {}
+
+    def finished(name: str) -> bool:
+        if name not in seen:
+            arm, = registry_headline_arms(arms_json, [name], output_root=output_root,
+                                          diverged=diverged)
+            seen[name] = arm.matrix is not None
+        return seen[name]
+    return finished
+
+
+def xwidth_arms(arms_json: str | Path | Mapping, *,
+                finished: Callable[[str], bool] | None = None,
+                output_root: Path | None = None) -> dict[tuple[str, str], tuple[str, ...]]:
+    """Every dog cross-width (160m ↔ 410m) arm of the xarch registry by ``(data order,
+    direction)`` (`XWIDTH_KEYS`), classified with `tfr.pythia_width_relation` (seed-label rule),
+    in registry order. Pools never mix data orders.
+
+    Nested-subset rule: an arm named ``…, top5`` is left out when a registered arm with the same
+    sender, receiver and animal lists a strict teacher superset AND that arm is finished;
+    otherwise it stays. Unfinished arms are kept (the loaders turn them into coverage rows).
+
+    Args:
+        arms_json: The xarch registry (path, or the parsed dict).
+        finished: ``name -> finished on disk``; defaults to a `registry_headline_arms` read
+            (only asked for a superset arm of a ``top5`` arm).
+        output_root: Output tree root of the default `finished` check.
+    """
+    reg = _registry(arms_json)
+    if finished is None:
+        finished = _finished_check(arms_json, output_root)
+    dog = [a for a in reg["arms"] if a["animal"] == "dog"]
+    out: dict[tuple[str, str], list[str]] = {k: [] for k in XWIDTH_KEYS}
+    for a in dog:
+        key = tfr.pythia_width_relation(tio.base_name(a["sender"]), tio.base_name(a["receiver"]))
+        if key is None:
+            continue
+        if a["name"].endswith(TOP5_SUFFIX) and any(
+                b["name"] != a["name"] and (b["sender"], b["receiver"]) == (a["sender"],
+                                                                         a["receiver"])
+                and set(a["teachers"]) < set(b["teachers"]) and finished(b["name"])
+                for b in dog):
+            continue
+        out[key].append(a["name"])
+    return {k: tuple(v) for k, v in out.items()}
+
+
+def xwidth_label(names: Sequence[str]) -> str:
+    """The `HeadlineFamily.arms_label` of a cross-width arm set: ``"160m→410m, … (N)"``."""
+    short = [n.replace(" (dog)", "").replace(" → ", "→").replace(TOP5_SUFFIX, " top5")
+             for n in names]
+    return f"{', '.join(short)} ({len(names)})"
+
+
+def xwidth_matched_pairs(arms_json: str | Path | Mapping, up: Sequence[str],
+                         down: Sequence[str]) -> list[tuple[str, str]]:
+    """``(S → R arm, R → S arm)`` model pairs of the `up` / `down` arm names, in `up` order:
+    a pair enters when the reverse of an up arm is among `down` (first such arm)."""
+    arms = {a["name"]: a for a in _registry(arms_json)["arms"]}
+
+    def ends(n):
+        return tuple(tio.base_name(arms[n][k]) for k in ("sender", "receiver"))
+
+    out = []
+    for u in up:
+        s, r = ends(u)
+        rev = next((d for d in down if ends(d) == (r, s)), None)
+        if rev is not None:
+            out.append((u, rev))
+    return out
+
+
+def restrict_teachers(matrix: tio.CellMatrix, teachers: Sequence[str]) -> tio.CellMatrix:
+    """`matrix` on the listed `teachers` only (plus its control column).
+
+    Raises:
+        ValueError: If a teacher is not in the matrix.
+    """
+    treat = [t for j, t in enumerate(matrix.pools) if j != matrix.control_col]
+    lacking = [t for t in teachers if t not in treat]
+    if lacking:
+        raise ValueError(f"teachers not in the arm: {', '.join(lacking)}")
+    keep = [matrix.pools.index(t) for t in teachers] + [matrix.control_col]
+    return tio.CellMatrix(frame=matrix.frame, values=matrix.values[:, keep],
+                          cells=list(matrix.cells), pools=[matrix.pools[j] for j in keep],
+                          control_col=len(keep) - 1, missing=list(matrix.missing))
 
 
 def headline_families(repo: Path, teachers_by_animal: Mapping[str, Sequence[str]], *,
@@ -326,6 +423,12 @@ def headline_families(repo: Path, teachers_by_animal: Mapping[str, Sequence[str]
     def reg(path, names):
         return registry_headline_arms(path, names, output_root=output_root)
 
+    w = xwidth_arms(xarch, output_root=output_root)
+
+    def xwidth(family, key):
+        return HeadlineFamily(family, xwidth_label(w[key]), "core30", "dog",
+                              reg(xarch, list(w[key])))
+
     return [
         HeadlineFamily("same-model", "orig, fs1–3 → self (4)", "focus20", "dog",
                        fam(tio.same_model_arms(["orig", "fs1", "fs2", "fs3"]), pythia, focus20),
@@ -340,17 +443,10 @@ def headline_families(repo: Path, teachers_by_animal: Mapping[str, Sequence[str]
         HeadlineFamily("different init, different data order (full seeds)",
                        "orig↔fs1–3, fs_i↔fs_j (12)", "core56", "dog",
                        fam(tio.family_arm_set("cross-seed"), pythia, core56)),
-        HeadlineFamily("cross width, small→large, same data order", "160m→410m (1)",
-                       "core30", "dog", reg(xarch, list(XWIDTH_ARMS["same", "up"]))),
-        HeadlineFamily("cross width, large→small, same data order",
-                       "410m→160m, 410m-seed2→160m-seed2 (2)", "core30", "dog",
-                       reg(xarch, list(XWIDTH_ARMS["same", "down"]))),
-        HeadlineFamily("cross width, small→large, different data order",
-                       "160m→410m-seed1, 160m-seed1/-seed2→410m (3)", "core30", "dog",
-                       reg(xarch, list(XWIDTH_ARMS["different", "up"]))),
-        HeadlineFamily("cross width, large→small, different data order",
-                       "410m-seed1/-seed2/-seed3→160m, 410m-seed2/-seed3→160m-seed1 (5)",
-                       "core30", "dog", reg(xarch, list(XWIDTH_ARMS["different", "down"]))),
+        xwidth("cross width, small→large, same data order", ("same", "up")),
+        xwidth("cross width, large→small, same data order", ("same", "down")),
+        xwidth("cross width, small→large, different data order", ("different", "up")),
+        xwidth("cross width, large→small, different data order", ("different", "down")),
         HeadlineFamily("same init, different corpus (OLMo dolma, dclm, c4 recipes)",
                        "dolma↔dclm, dclm↔c4, dolma↔c4 (6)", "core35",
                        "elephant",
@@ -417,9 +513,10 @@ def xarch_seed_families(repo: Path, *, output_root: Path | None = None) -> list[
 
 
 def matched_arm_effects(matrix: tio.CellMatrix, prior: float) -> dict:
-    """Per-arm scale-free summaries against the arm's OWN matched controls: ``exceed. frac`` =
-    share of finite treatment runs above the matched control of the same cell; ``rel. effect``
-    = mean over runs of ``(treatment - matched control) / prior`` (NaN when `prior` is NaN)."""
+    """Per-arm summaries against the arm's OWN matched controls: ``exceed. frac`` = share of
+    finite treatment runs above the matched control of the same cell; ``mean gap`` = mean over
+    runs of ``treatment - matched control``; ``rel. effect`` = ``mean gap / prior`` (NaN when
+    `prior` is NaN)."""
     ctrl = matrix.values[:, matrix.control_col]
     treat = np.delete(matrix.values, matrix.control_col, axis=1)
     ok = np.isfinite(treat) & np.isfinite(ctrl)[:, None]
@@ -427,7 +524,7 @@ def matched_arm_effects(matrix: tio.CellMatrix, prior: float) -> dict:
     n = int(ok.sum())
     rel = float(gap.mean() / prior) if n and np.isfinite(prior) and prior != 0 else float("nan")
     return {"n": n, "exceed. frac": float((gap > 0).mean()) if n else float("nan"),
-            "rel. effect": rel}
+            "mean gap": float(gap.mean()) if n else float("nan"), "rel. effect": rel}
 
 
 #: Direction A (Pythia → OLMo) / B (OLMo → Pythia) arm names of `xarch_direction_test`, paired
@@ -441,19 +538,23 @@ XARCH_DIRECTION_ARMS = tuple(zip(*[
 
 
 def arm_family_test(arms_json: str | Path, names_a: Sequence[str], names_b: Sequence[str], *,
-                    paired: bool = False, output_root: Path | None = None) -> dict:
+                    paired: bool = False, teachers: Mapping[str, Sequence[str]] | None = None,
+                    output_root: Path | None = None) -> dict:
     """Is transfer stronger in registry arm family A or B? Arms of different designs share no
     cells, so each arm is summarised against its own matched controls (`matched_arm_effects`)
     and the arm sets are compared: Test 1 `tt.arm_set_permutation` (exact over all
     C(n_A + n_B, n_A) labelings when enumerable), Test 2 -- only when ``paired`` -- the exact
     `tt.paired_sign_flip_exact` on the per-index differences A[k] − B[k] (arms pair by index).
-    Both on ``exceed. frac``, and on ``rel. effect`` once every receiver's test prior exists
+    Both on ``exceed. frac`` and ``mean gap``, and on ``rel. effect`` once every receiver's test prior exists
     (else ``None``). Diverged runs: `DIVERGED_EXCLUDE`.
 
     Args:
         arms_json: The registry both families are read from.
         names_a, names_b: Registry arm names of family A / B.
         paired: Run the sign-flip test (needs ``len(names_a) == len(names_b)``).
+        teachers: ``{arm name: teacher tags}`` -- the named arms are summarised on those
+            teachers only (`restrict_teachers`; e.g. a shared teacher subset that makes one
+            side's arms exchangeable); unnamed arms keep their registered teachers.
         output_root: Output tree root; defaults to the paths YAML's.
 
     Returns:
@@ -463,7 +564,8 @@ def arm_family_test(arms_json: str | Path, names_a: Sequence[str], names_b: Sequ
         "n_labelings": C(n_A + n_B, n_A)}``.
 
     Raises:
-        ValueError: If any arm is unfinished, or ``paired`` with unequal family sizes.
+        ValueError: If any arm is unfinished, lacks a requested teacher, or ``paired`` with
+            unequal family sizes.
     """
     if paired and len(names_a) != len(names_b):
         raise ValueError(f"paired test needs equal families, got {len(names_a)} vs "
@@ -474,12 +576,15 @@ def arm_family_test(arms_json: str | Path, names_a: Sequence[str], names_b: Sequ
                                           diverged=DIVERGED_EXCLUDE):
             if arm.matrix is None:
                 raise ValueError(f"arm {arm.label} unfinished: {arm.dropped}")
+            m = arm.matrix
+            if teachers and arm.label in teachers:
+                m = restrict_teachers(m, teachers[arm.label])
             rows.append({"direction": direction, "arm": arm.label, "animal": arm.animal,
-                         "teachers": len(arm.matrix.pools) - 1, "cells": len(arm.matrix.cells),
-                         "prior": arm.prior, **matched_arm_effects(arm.matrix, arm.prior)})
+                         "teachers": len(m.pools) - 1, "cells": len(m.cells),
+                         "prior": arm.prior, **matched_arm_effects(m, arm.prior)})
     df = pd.DataFrame(rows)
     test1, test2 = {}, {}
-    for stat in ("exceed. frac", "rel. effect"):
+    for stat in ("exceed. frac", "mean gap", "rel. effect"):
         if not np.isfinite(df[stat]).all():
             test1[stat] = None  # pending prior
             if paired:

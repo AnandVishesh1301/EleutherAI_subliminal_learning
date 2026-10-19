@@ -216,41 +216,98 @@ def render_slices(cells, out, source):
     )
 
 
-def read_recipe_stats(path, cells):
+def collect_multi_slices(root, out, cache_path=None):
+    """Collect the original 14x14 (STEPS incl. 50k) cells from saved leaves.
+
+    Reuses plot_checkpoint_takeoff's pool discovery, run join, recipe/cell
+    aggregation and matched base-numbers controls; reads evals only. Writes
+    <out>_recipes.csv and <out>_source_cells.csv and returns their provenance."""
+    import gzip
+    import hashlib
+    from collections import Counter
+
+    from scripts import plot_checkpoint_entropy_transfer as shared
+    from scripts import plot_checkpoint_takeoff as takeoff
+
+    cache_path = cache_path or (
+        takeoff.PROJECT
+        / "docs/results/data/checkpoint_entropy_transfer_all_teachers_20260921_pools.json.gz"
+    )
+    cache = {}
+    if cache_path.is_file():
+        with gzip.open(cache_path, "rt") as stream:
+            cache = {r["pool_path"]: r for r in json.load(stream) if r["pool_status"] == "verified"}
+    runs = []
+    for raw in takeoff.discover_selected_pools(root):
+        if raw["lineage"] != "orig" or raw["step"] not in STEPS:
+            continue
+        pool = shared.measure_pool(raw, cache.get(raw["pool_path"]))
+        for step in STEPS:
+            runs.extend(takeoff.collect_pair(root, pool, step))
+    recipes = takeoff.aggregate_recipes(runs)
+    cells = takeoff.aggregate_cells(recipes, {("orig", t, u) for t in STEPS for u in STEPS})
+    takeoff.attach_controls(root, recipes)
+    takeoff.attach_controls(root, cells)
+    paths = {}
+    for name, rows in (("recipes", recipes), ("source_cells", cells)):
+        path = out.with_name(out.name + f"_{name}.csv")
+        shared.write_csv(path, rows)
+        paths[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+    incomplete = [
+        dict(teacher_step=c["teacher_step"], student_step=c["student_step"],
+             missing_recipes=c["missing_recipes"], seeds_by_recipe=c["seeds_by_recipe"])
+        for c in cells
+        if not c["complete_five_recipes"]
+        or any(sorted(v) != [1, 2, 3] for v in c["seeds_by_recipe"].values())
+    ]
+    for row in incomplete:
+        print(f"INCOMPLETE on disk: {row}", flush=True)
+    source = dict(
+        outputs_root=str(root), table_sha256=paths,
+        pool_cache=str(cache_path), run_status_counts=dict(Counter(r["join_status"] for r in runs)),
+        incomplete_cells=incomplete,
+        missing_control_cells=sorted([c["teacher_step"], c["student_step"]]
+                                     for c in cells if c["p_control"] is None),
+        control_source=takeoff.CONTROL_SOURCE, control_seed=takeoff.CONTROL_SEED,
+        student_recipe=takeoff.STUDENT_RECIPE,
+    )
+    return cells, recipes, source
+
+
+def recipe_stats(recipes, cells):
+    """Per cell: (mean, SD ddof=1) across five recipe deltas; NaN when no control."""
+    keys = {(int(c["teacher_step"]), int(c["student_step"])) for c in cells}
     groups = {}
-    with path.open(newline="") as f:
-        for r in csv.DictReader(f):
-            if r["lineage"] != "orig":
-                continue
-            key = (int(r["teacher_step"]), int(r["student_step"]))
-            if key not in {
-                (int(c["teacher_step"]), int(c["student_step"])) for c in cells
-            }:
-                continue
+    for r in recipes:
+        key = (int(r["teacher_step"]), int(r["student_step"]))
+        if r.get("lineage", "orig") == "orig" and key in keys:
             groups.setdefault(key, []).append(r)
     stats = {}
     for key, rows in groups.items():
-        recipes = {r["teacher_recipe"]: float(r["p_target"]) for r in rows}
+        values = {r["teacher_recipe"]: float(r["p_target"]) for r in rows}
         if (
             len(rows) != 5
-            or set(recipes) != CANONICAL_RECIPES
-            or any(not np.isfinite(v) or not 0 <= v <= 1 for v in recipes.values())
+            or set(values) != CANONICAL_RECIPES
+            or any(not np.isfinite(v) or not 0 <= v <= 1 for v in values.values())
         ):
             raise ValueError("missing or duplicate teacher recipes")
-        mean = float(np.mean(list(recipes.values())))
         cell = next(
             c for c in cells if (int(c["teacher_step"]), int(c["student_step"])) == key
         )
-        if abs(mean - float(cell["p_target"])) > 1e-10:
+        if abs(float(np.mean(list(values.values()))) - float(cell["p_target"])) > 1e-10:
             raise ValueError("recipe mean mismatch")
-        stats[key] = (mean, float(np.std(list(recipes.values()), ddof=1)))
-    if set(stats) != {(int(c["teacher_step"]), int(c["student_step"])) for c in cells}:
+        if cell.get("p_control") is None:
+            stats[key] = (np.nan, np.nan)
+            continue
+        deltas = [v - float(cell["p_control"]) for v in values.values()]
+        stats[key] = (float(np.mean(deltas)), float(np.std(deltas, ddof=1)))
+    if set(stats) != keys:
         raise ValueError("incomplete recipe coverage")
     return stats
 
 
 def render_multi_slices(cells, out, source, recipes):
-    stats = read_recipe_stats(recipes, cells)
+    stats = recipe_stats(recipes, cells)
     by_key = {(int(r["teacher_step"]), int(r["student_step"])): r for r in cells}
     groups = [
         ("a  Teachers fixed at 50k and 75k–90k", "teacher", (50000, 75000, 80000, 85000, 90000)),
@@ -266,11 +323,11 @@ def render_multi_slices(cells, out, source, recipes):
             color, marker = colors[fixed], markers[fixed]
             if fixedside == "teacher":
                 xs = STEPS
-                ys = [float(by_key[(fixed, v)]["p_target"]) for v in STEPS]
+                ys = [stats[(fixed, v)][0] for v in STEPS]
                 label = f"{fixed // 1000}k"
             else:
                 xs = STEPS
-                ys = [float(by_key[(v, fixed)]["p_target"]) for v in STEPS]
+                ys = [stats[(v, fixed)][0] for v in STEPS]
                 label = f"{fixed // 1000}k"
             x = np.array(xs) / 1000
             sd = (
@@ -291,7 +348,7 @@ def render_multi_slices(cells, out, source, recipes):
         ax.set_xticks([50, 75, 85, 95, 105, 115, 125, 143])
         ax.tick_params(axis="x", labelbottom=True)
         ax.set_ylim(0, 1)
-        ax.set_ylabel("p(dog), held-out test")
+        ax.set_ylabel("Mean Δp(dog), held-out test")
         ax.set_xlabel(
             "Student checkpoint (k steps)"
             if fixedside == "teacher"
@@ -325,14 +382,17 @@ def render_multi_slices(cells, out, source, recipes):
                         "varied_checkpoint": varied,
                         "teacher_checkpoint": t,
                         "student_checkpoint": u,
+                        "delta_p": stats[(t, u)][0],
                         "p_dog": float(r["p_target"]),
+                        "p_control": r.get("p_control"),
+                        "control_status": r.get("control_status"),
                         "n_teacher_recipes": int(r["n_teacher_recipes"]),
                         "n_student_runs": int(r["n_student_runs"]),
                         "teacher_sd": stats[(t, u)][1],
                     }
                 )
     out.with_name(out.name + "_cells.csv").write_text(
-        "panel,fixed_side,fixed_checkpoint,varied_checkpoint,teacher_checkpoint,student_checkpoint,p_dog,n_teacher_recipes,n_student_runs,teacher_sd\n"
+        "panel,fixed_side,fixed_checkpoint,varied_checkpoint,teacher_checkpoint,student_checkpoint,delta_p,p_dog,p_control,control_status,n_teacher_recipes,n_student_runs,teacher_sd\n"
         + "\n".join(
             ",".join(
                 str(r[k])
@@ -343,7 +403,10 @@ def render_multi_slices(cells, out, source, recipes):
                     "varied_checkpoint",
                     "teacher_checkpoint",
                     "student_checkpoint",
+                    "delta_p",
                     "p_dog",
+                    "p_control",
+                    "control_status",
                     "n_teacher_recipes",
                     "n_student_runs",
                     "teacher_sd",
@@ -353,25 +416,27 @@ def render_multi_slices(cells, out, source, recipes):
         )
         + "\n"
     )
-    import hashlib
-
     out.with_name(out.name + "_provenance.json").write_text(
         json.dumps(
             {
-                "source_cells": str(source),
-                "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "source": source,
                 "checkpoint_sets": [g[2] for g in groups],
-                "aggregation": "existing verified original 14x14 cells; equal mean of five teacher recipes after averaging student seeds within recipe",
-                "error_bars": "Shading: ±1 SD across five teacher recipes (ddof=1), after student-seed averaging",
-                "recipe_source": str(recipes),
-                "recipe_source_sha256": hashlib.sha256(
-                    recipes.read_bytes()
-                ).hexdigest(),
+                "quantity": "delta_p = teacher-recipe seed-mean p(dog) minus the matched base-numbers control p(dog) (ep10_lr1e-4_r8a32, control ftseed 1)",
+                "aggregation": "original 14x14 cells collected from leaves; per recipe delta = student-seed mean p(dog) - cell control; curve = equal mean of five recipe deltas. Cells without a control are gaps (not drawn).",
+                "error_bars": "Shading: ±1 SD across five teacher-recipe deltas (ddof=1), after student-seed averaging",
             },
             indent=2,
         )
         + "\n"
     )
+
+
+def output_root():
+    import yaml
+
+    project = Path(__file__).resolve().parents[3]
+    config = yaml.safe_load((project / "configs/paths/paths_local.yaml").read_text())
+    return Path(config["output_root"])
 
 
 def main():
@@ -394,12 +459,13 @@ def main():
             "notebooks/figures/figure3_checkpoints/figure3_recipes.csv"
         ),
     )
+    ap.add_argument("--outputs", type=Path, help="output_root (default: paths_local.yaml)")
     a = ap.parse_args()
     if a.output is None:
         name = (
             "crossckpt_partials/slices_cell_means"
             if a.view == "slices"
-            else "crossckpt_partials/slices_pooled_over_teacher_recipes"
+            else "crossckpt_partials/slice_teacher"
             if a.view == "multi-slices"
             else "crossckpt_partials/heatmap_2x2_75k125k"
         )
@@ -408,7 +474,8 @@ def main():
     if a.view == "slices":
         render_slices(read_slice_cells(a.cells), a.output, a.cells)
     elif a.view == "multi-slices":
-        render_multi_slices(read_slice_cells(a.cells), a.output, a.cells, a.recipes)
+        cells, recipes, source = collect_multi_slices(a.outputs or output_root(), a.output)
+        render_multi_slices(cells, a.output, source, recipes)
     else:
         render(read_cells(a.cells), a.output, a.cells)
 

@@ -1,0 +1,34 @@
+{
+  "n": 102,
+  "student_seeds_per_teacher": 1,
+  "teacher_student_pearson_logit": 0.8472450755697762,
+  "teacher_student_spearman": 0.8588755506047463,
+  "partial_spearman": {
+    "r": -0.0997825556972492,
+    "p_nominal": 0.3208071873217698,
+    "n": 102,
+    "controls": 1,
+    "df": 99,
+    "approx_fisher_ci95": [
+      -0.28957469845873424,
+      0.09755925238551517
+    ]
+  },
+  "raw_steer_logit_outcome_and_control": {
+    "r": 0.20187191523545578,
+    "p_nominal": 0.04292615958802968,
+    "n": 102,
+    "controls": 1,
+    "df": 99,
+    "approx_fisher_ci95": [
+      0.0066968682217811,
+      0.3822307612997989
+    ]
+  },
+  "student_recipe": "ep20_lr1e-4_r8a32",
+  "student_cells_csv": "notebooks/figures/predictors/recipe_cells_102.csv",
+  "teacher_split": "validation",
+  "student_split": "test",
+  "source_csv": "notebooks/figures/teacher_dce_vs_transfer_102.csv",
+  "source_sha256": "645d18c5aa4ebd7b62574fd7367e1606723e48ec8325dedbe9fb76c4f051b5da"
+}

@@ -20,7 +20,7 @@ from scripts import plot_wc2_entropy_comparison as styles
 PROJECT = Path(__file__).resolve().parents[1]
 SOURCE = PROJECT / "docs/results/data/checkpoint_entropy_transfer_all_teachers_20260921.csv"
 OUT = PROJECT / "docs/results/data/checkpoint_teacher_entropy_143k_20260922"
-FIG = PROJECT / "notebooks/figures/checkpoint_teacher_entropy_143k_20260922"
+FIG = PROJECT / "notebooks/figures/checkpoint_entropy_transfer/teacher_entropy_143k"
 STUDENT_RECIPE = "ep10_lr1e-4_r8a32"
 CANONICAL = {"orig", "ds1", "ds2", "ds3", "fs1", "fs2", "fs3", "wc1", "wc2"}
 ALL_LINEAGES = ("orig", "ds1", "ds2", "ds3", "dclm1", "dclm1234", "fs1", "fs2", "fs3", "pr3", "pr1234", "wc1", "wc2", "ws1")

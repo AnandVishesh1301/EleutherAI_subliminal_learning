@@ -3,9 +3,20 @@
 The A -> B versus B -> A transfer contrast of `analysis.transfer_asymmetry`, read at every saved
 checkpoint step instead of only the endpoint (Pythia-160m families first, OLMo last), including
 the cross pairs with per-step controls. All computation lives in `analysis.trajectory_asymmetry`;
-reads the outputs tree only; exports six PNGs under ``notebooks/figures/``.
+reads the outputs tree only; exports two PNGs, one PDF and two CSVs under ``notebooks/figures/asymmetry/trajectory/ab_ba/``.
 
-    uv run python scripts/build_transfer_trajectory_asymmetry_nb.py
+    uv run python scripts/build_transfer_trajectory_asymmetry_nb.py [--no-stats] [--refresh-cache]
+
+``--no-stats`` skips every permutation test of the trajectory module (p columns NaN, no
+significance markers, the per-step / sign-change / ordering tables replaced by one line);
+contrasts, bootstrap bands, CSVs and figures are otherwise unchanged. The last cell also writes
+``asymmetry_trajectory_contrast.csv`` (the dog Δp contrast table) and
+``asymmetry_trajectory_steps.csv`` (``RES.steps``, prior units); the figure is redrawn from the
+first CSV alone by ``notebooks/figures/asymmetry/trajectory/ab_ba/asymmetry_trajectory.py``.
+
+`tg.analyze` reuses every pair whose record files, code and parameters are unchanged
+(`analysis.result_cache`, under ``{outputs}/analysis/result_cache/trajectory_asymmetry/``);
+``--refresh-cache`` recomputes and overwrites every entry (``SL_RESULT_CACHE=0`` disables it).
 """
 from __future__ import annotations
 
@@ -20,6 +31,8 @@ REPO = Path(__file__).absolute().parents[1]
 OUT = REPO / "notebooks/transfer_trajectory_asymmetry.ipynb"
 
 CELLS: list[tuple[str, str]] = []
+STATS = "--no-stats" not in sys.argv[1:]
+REFRESH_CACHE = "--refresh-cache" in sys.argv[1:]
 
 
 def md(source: str) -> None:
@@ -27,18 +40,24 @@ def md(source: str) -> None:
 
 
 def code(source: str) -> None:
-    CELLS.append(("code", source.strip("\n")))
+    CELLS.append(("code", source.strip("\n").replace("__STATS__", str(STATS))
+                  .replace("__REFRESH_CACHE__", str(REFRESH_CACHE))))
 
 
 md(r"""
 # Is transfer asymmetry present throughout student training, or only at the endpoint?
+
+""" + ("**Statistics were run in this build** (permutation tests, Holm, ordering Spearman)."
+       if STATS else "**Statistics were NOT run in this build** (`STATS = False`: no permutation "
+       "tests, no significance markers; contrasts and bootstrap bands only).") + r"""
 
 **Question.** `analysis.transfer_asymmetry` finds that, for some pairs of pretraining siblings,
 A → B transfer differs from B → A at the END of student training. Does that contrast hold along
 the whole trajectory, when does it appear, and does it ever flip sign? The pairs, base order
 (A = the base listed first, so a positive contrast means A sends more), designs and exclusions are
 exactly the endpoint module's; each pair is read at the largest design both directions finish.
-Steps are absolute optimizer steps; values and contrasts are in receiver prior units.
+Steps are absolute optimizer steps; values and contrasts are in receiver prior units, except the last
+figure (Δp, not prior-scaled).
 
 **Value.** value(t) = (p_test(t) − control(cell)) / receiver prior, per (teacher, cell) run at
 saved step t (`eval/pref_traj.json`). In the ep20 designs the control is the endpoint module's
@@ -71,15 +90,18 @@ The permutation p is authoritative; the band is a visual guide to where a contra
 
 code(r'''
 import time
+import matplotlib.pyplot as plt
 import pandas as pd
 from IPython.display import display
 from subliminal_learning.analysis import trajectory_asymmetry as tg
 import subliminal_learning.analysis.trajectory_conditions as tcond
 from subliminal_learning.analysis.setup import bootstrap, set_plot_style
-REPO, OUTPUT_ROOT = bootstrap(); FIG_DIR = REPO / "notebooks" / "figures"; set_plot_style()
+REPO, OUTPUT_ROOT = bootstrap(); FIG_DIR = REPO / "notebooks" / "figures" / "asymmetry" / "trajectory" / "ab_ba"; set_plot_style()
 FIG_DIR.mkdir(parents=True, exist_ok=True)
+STATS = __STATS__
 t0 = time.time()
-RES = tg.analyze(tg.FAMILY_ORDER, repo=REPO, output_root=OUTPUT_ROOT, prelim=False)
+RES = tg.analyze(tg.FAMILY_ORDER, repo=REPO, output_root=OUTPUT_ROOT, prelim=False, stats=STATS,
+                  refresh_cache=__REFRESH_CACHE__)
 print(f"{len(RES.summary)} pairs with a tested step, {len(RES.excluded)} excluded "
       f"{time.time() - t0:.0f}s")
 ''')
@@ -95,7 +117,7 @@ The per-arm tables are `RES.inventory` and `RES.excluded`.
 
 code(r'''
 fig = tg.plot_coverage(RES)
-fig.savefig(FIG_DIR / "transfer_trajectory_asymmetry_coverage.png", dpi=110, bbox_inches="tight")
+plt.show()
 ''')
 
 md(r"""
@@ -115,7 +137,7 @@ print("cross-check (last-step contrast == endpoint contrast within 1e-6):",
       "ok for all pairs" if bad.empty else f"{len(bad)} disagreements: " + ", ".join(
           tcond.display(f"{tg.family_display(r.family)} {r.animal} {r.A}/{r.B}") for r in bad.itertuples()))
 fig = tg.plot_summary_dumbbell(RES)
-fig.savefig(FIG_DIR / "transfer_trajectory_asymmetry_summary.png", dpi=110, bbox_inches="tight")
+fig.savefig(FIG_DIR / "asym_traj_summary.png", dpi=110, bbox_inches="tight")
 D = tg.summary_display(RES)
 fmt = lambda c, p: "—" if pd.isna(c) else f"{c:+.3f} (p={p:.2g})"
 display(pd.DataFrame({
@@ -139,18 +161,24 @@ md(r"""
 **Per-step contrast, per-step-control pairs** (A→B − B→A, receiver prior units; paired teacher-cluster permutation per step; `*` raw p < .05, `**` p < .05 after Holm within the pair across its tested steps; blank = untested; endpoint = last tested step).
 """)
 
-code(_named("tg.per_step_table(RES)") + r'''
-with pd.option_context("display.max_rows", None, "display.max_columns", None, "display.width", 250):
-    print(_t.set_index(["family", "animal", "A", "B"]).to_string())
+code(r'''
+if not STATS:
+    print("statistics skipped (STATS=False)")
+else:
+    ''' + _named("tg.per_step_table(RES)").replace("\n", "\n    ") + r'''with pd.option_context("display.max_rows", None, "display.max_columns", None, "display.width", 250):
+        print(_t.set_index(["family", "animal", "A", "B"]).to_string())
 ''')
 
 md(r"""
 **Sign change along training** (receiver prior units; s_opp = most extreme tested step with sign opposite to the endpoint s_end; p(Δ) = paired teacher-cluster permutation on per-slot value(s_end) − value(s_opp); class uses p < .05).
 """)
 
-code(_named("tg.sign_change_table(RES)") + r'''
-with pd.option_context("display.max_rows", None, "display.max_columns", None, "display.width", 250):
-    print(_t.set_index(["family", "animal", "A", "B"]).to_string(float_format=lambda v: f"{v:.3g}"))
+code(r'''
+if not STATS:
+    print("statistics skipped (STATS=False)")
+else:
+    ''' + _named("tg.sign_change_table(RES)").replace("\n", "\n    ") + r'''with pd.option_context("display.max_rows", None, "display.max_columns", None, "display.width", 250):
+        print(_t.set_index(["family", "animal", "A", "B"]).to_string(float_format=lambda v: f"{v:.3g}"))
 ''')
 
 md(r"""
@@ -158,8 +186,11 @@ md(r"""
 """)
 
 code(r'''
-with pd.option_context("display.max_rows", None, "display.max_columns", None, "display.width", 250):
-    print(tg.ordering_stability(RES).to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+if not STATS:
+    print("statistics skipped (STATS=False)")
+else:
+    with pd.option_context("display.max_rows", None, "display.max_columns", None, "display.width", 250):
+        print(tg.ordering_stability(RES).to_string(index=False, float_format=lambda v: f"{v:.3f}"))
 ''')
 
 md(r"""
@@ -176,31 +207,43 @@ DIR, LAND = tg.direction_table(tcond.earlystop_arms(REPO), output_root=OUTPUT_RO
 cross = LAND[LAND["group"] != tcond.STOP_SAME_GROUP]
 print("; ".join(f"{s}: {(cross['status'] == s).sum()} cross arms" for s in ("complete", "partial", "not started")))
 fig = tg.plot_dog_directions(tg.trajectory_directions(DIR, RES))
-fig.savefig(FIG_DIR / "transfer_trajectory_asymmetry_dog_directions.png", dpi=110, bbox_inches="tight")
+plt.show()
 ''')
 
 md(r"""
 ## Per-step curves of every tested pair
 
-Direction curves (solid A→B, dashed B→A) and contrast curves (A→B − B→A, one panel per family ×
-animal, dotted = per-step-control design), both with 95% teacher-cluster bootstrap bands; contrast
-markers are the per-step permutation test. Each pair is drawn once, in its per-step-control
-design when it has one, else its ep20 design (the summary table above lists both), and a
-direction's curve is drawn only at steps where it carries ≥ 90% of its run universe. For ep20 pairs the early-step LEVEL is mostly control
-drift (caveat above). The full per-step table (coverage, means, contrast, p, bands) is
-`RES.steps`.
+Direction curves (solid A→B, dashed B→A, receiver prior units) with 95% teacher-cluster
+bootstrap bands, each pair drawn once, in its per-step-control design when it has one, else its
+ep20 design; a direction's curve is drawn only at steps where it carries ≥ 90% of its run
+universe. For ep20 pairs the early-step LEVEL is mostly control drift (caveat above). The full
+per-step table (coverage, means, contrast, p, bands) is `RES.steps`.
+
+The contrast figure shows the 18 dog per-step-control pairs in four blocks: diff init, diff data
+order (orig, fs1–fs3); same init, diff data order (orig, ds1–ds3); diff init, same data order
+(Rerun1234, wc1, wc2); Pythia-160M re-pretrain (orig, Modern1234, Rerun1234). Its unit is Δp(trait):
+per (teacher, cell) run, p_student − p_control at the same step, NOT divided by the receiver
+prior, so the curve reads as A→B − B→A in raw preference probability. The step axis is linear.
+The curve is the mean contrast over paired (teacher, cell) slots; the band is a 95%
+teacher-cluster bootstrap of that mean (1,000 draws) and the markers are the paired
+teacher-cluster permutation test on the mean per tested step (filled = p < .05).
 """)
 
 code(r'''
 fig = tg.plot_direction_curves(RES)
-fig.savefig(FIG_DIR / "transfer_trajectory_asymmetry_directions.png", dpi=110, bbox_inches="tight")
+plt.show()
 ''')
 
 code(r'''
-fig = tg.plot_contrast_curves(RES)
-fig.savefig(FIG_DIR / "transfer_trajectory_asymmetry_contrasts.png", dpi=120, bbox_inches="tight")
-fig = tg.plot_contrast_curves_dog(RES)
-fig.savefig(FIG_DIR / "transfer_trajectory_asymmetry_contrasts_dog.png", dpi=150, bbox_inches="tight")
+t1 = time.time()
+DP = tg.dp_contrast_table(RES, stats=STATS)
+print(f"Δp contrasts: {DP[['A', 'B']].drop_duplicates().shape[0]} dog pairs, {time.time() - t1:.0f}s")
+DP.to_csv(FIG_DIR / "asymmetry_trajectory_contrast.csv", index=False)
+tg.steps_csv_table(RES).to_csv(FIG_DIR / "asymmetry_trajectory_steps.csv", index=False)
+fig = tg.plot_contrast_curves_dog(DP)
+fig.savefig(FIG_DIR / "asymmetry_trajectory.png", dpi=150, bbox_inches="tight")
+fig.savefig(FIG_DIR / "asymmetry_trajectory.pdf", bbox_inches="tight")
+plt.show()
 print(f"total {time.time() - t0:.0f}s")
 ''')
 
@@ -216,8 +259,16 @@ def build_notebook() -> nbf.NotebookNode:
 
 if __name__ == "__main__":
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    nbf.write(build_notebook(), OUT)
-    print(f"wrote {OUT} ({len(CELLS)} cells); executing")
+    # build beside OUT and swap in only on success: OUT is never left output-less
+    tmp = OUT.with_name(OUT.stem + ".building.ipynb")
+    nbf.write(build_notebook(), tmp)
+    print(f"wrote {tmp} ({len(CELLS)} cells); executing")
     env = {**os.environ, "OMP_NUM_THREADS": "8", "MKL_NUM_THREADS": "8", "OPENBLAS_NUM_THREADS": "8"}
-    subprocess.run([sys.executable, "-m", "jupyter", "nbconvert", "--to", "notebook", "--execute",
-                    "--inplace", "--ExecutePreprocessor.timeout=-1", str(OUT)], check=True, env=env)
+    rc = subprocess.run([sys.executable, "-m", "jupyter", "nbconvert", "--to", "notebook",
+                         "--execute", "--inplace", "--ExecutePreprocessor.timeout=-1", str(tmp)],
+                        env=env).returncode
+    if rc != 0:
+        print(f"execution failed (exit {rc}); {OUT} left untouched, partial build at {tmp}")
+        sys.exit(rc)
+    os.replace(tmp, OUT)
+    print(f"executed -> {OUT}")

@@ -36,17 +36,29 @@ uncovered at it. Per (teacher, cell) slot the backfilled points and the same ep2
 value (its last step, matched control endpoint) form the trajectory, labelled
 ``{cell set} · per-step control`` and added as an EXTRA design row of the family. The internal
 backfill-only design (``{cell set}`` + `BACKFILL_TAG` + ``N``) is marked ``design status`` and not displayed.
+
+Δp contrast figure and CSVs. `dp_contrast_table` re-tests the dog per-step-control pairs on
+p_student − p_control (same step), NOT prior-scaled; the notebook writes it to
+``notebooks/figures/asymmetry/trajectory/ab_ba/asymmetry_trajectory_contrast.csv`` beside
+``asymmetry_trajectory_steps.csv`` (`steps_csv_table`, prior units), and
+`plot_contrast_curves_dog` draws the figure from that table alone, so
+``notebooks/figures/asymmetry/trajectory/ab_ba/asymmetry_trajectory.py`` redraws it from the CSV.
+``stats=False`` (`analyze`, `dp_contrast_table`) skips this module's permutation tests.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import os
+import sys
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from subliminal_learning.analysis import result_cache
+from subliminal_learning.analysis import trajectories as traj_io
 from subliminal_learning.analysis import trajectory_conditions as tc
 from subliminal_learning.analysis import transfer_asymmetry as ta
 from subliminal_learning.analysis import transfer_significance_io as tio
@@ -210,6 +222,18 @@ def _run_trajectories(spec: tc.ArmSpec, teacher: str, root: Path, ftseed: int) -
     return tc.run_points(spec, teacher, root, ftseed=ftseed, refresh=False)[0]
 
 
+def _sibling_only_end(lineage: Path, cell: str, ftseed: int) -> int | None:
+    """The final step of a plain-cell run whose saved points come only from its
+    ``{cell}_stop12500`` sibling (the plain leaf has no pref_traj), else None: the plain leaf's
+    declared end (`trajectory_conditions._end_step`), `EP20_LAST_STEP` when unreadable."""
+    run = lineage / cell / f"ftseed{ftseed}"
+    if (run / "eval" / "pref_traj.json").exists() or not (
+            lineage / (cell + tc.STOP_SIBLING)).is_dir():
+        return None
+    last = tc._end_step(run)
+    return int(last) if np.isfinite(last) else EP20_LAST_STEP
+
+
 def _direction_points(family: ta.Family, animal: str, sender: str, receiver: str, design: str,
                       cells: Sequence[str], arm: ta.ArmLoad, root: Path) -> tuple[pd.DataFrame,
                                                                                   dict]:
@@ -220,19 +244,28 @@ def _direction_points(family: ta.Family, animal: str, sender: str, receiver: str
     ctrl = dict(zip(m.cells, m.values[:, m.control_col])) if m.cells else {}
     spec = _spec(family, animal, sender, receiver, design, cells, arm.teachers)
     universe = arm.frame[["teacher", "cell"]]
+    ends = {(t, c): v for t, c, v in arm.frame[["teacher", "cell", "value"]].itertuples(
+        index=False)}
     parts, n_traj = [], 0
     for teacher, sub in universe.groupby("teacher", sort=False):
         tr = _run_trajectories(spec, teacher, root, family.ftseed)
         by_cell = {c: g for c, g in tr.groupby("tag")}
+        lineage = spec.lineage_dir(root, teacher)
         for cell in sub["cell"]:
             g = by_cell.get(cell)
             if g is None or g["step"].nunique() <= 1:
                 continue
             n_traj += 1
-            parts.append(pd.DataFrame({
-                "sender": sender, "teacher": teacher, "cell": cell,
-                "step": g["step"].to_numpy(float).astype(int),
-                "value": (g["p_test"].to_numpy(float) - ctrl[cell]) / arm.prior}))
+            step = g["step"].to_numpy(float).astype(int)
+            value = (g["p_test"].to_numpy(float) - ctrl[cell]) / arm.prior
+            last = _sibling_only_end(lineage, cell, family.ftseed)
+            if last is not None:
+                # points only from the _stop12500 sibling: the run's endpoint is its last step
+                keep = step < last
+                step = np.append(step[keep], last)
+                value = np.append(value[keep], ends[(teacher, cell)])
+            parts.append(pd.DataFrame({"sender": sender, "teacher": teacher, "cell": cell,
+                                       "step": step, "value": value}))
     pts = (pd.concat(parts, ignore_index=True) if parts
            else pd.DataFrame(columns=["sender", "teacher", "cell", "step", "value"]))
     cvals = np.array([ctrl[c] for c in m.cells], float) if m.cells else np.array([])
@@ -272,8 +305,35 @@ def _band(boot: np.ndarray | None) -> tuple[float, float]:
     return float(lo), float(hi)
 
 
+def _contrast(frame: pd.DataFrame, *, paired: bool, n_perm: int, seed: int,
+               stats: bool = True) -> dict:
+    """`transfer_asymmetry.contrast_row`; with `stats` off only the observed statistics (the
+    same mean contrast and win probability, one Monte-Carlo draw, no enumeration) and NaN p."""
+    if stats:
+        return ta.contrast_row(frame, ta.CONDITION_A, ta.CONDITION_B, paired=paired,
+                               n_perm=n_perm, seed=seed)
+    from subliminal_learning.stats import transfer_significance_tests as tt
+
+    def obs(statistic: str) -> float:
+        if paired:
+            return float(tt.paired_cluster_relabel_permutation(
+                frame, cond_a=ta.CONDITION_A, cond_b=ta.CONDITION_B, statistic=statistic,
+                condition_col="condition", cluster_col="teacher", stratum_col="stratum",
+                value_col="value", max_exact=0, n_perm=1, seed=seed).observed)
+        return float(tt.arm_relabel_cell_permutation(
+            frame, family_a=ta.CONDITION_A, family_b=ta.CONDITION_B, statistic=statistic,
+            family_col="condition", arm_col="arm", stratum_col="stratum", value_col="value",
+            max_exact=0, n_perm=1, seed=seed).observed)
+
+    return {"contrast": obs("mean_contrast"), "p_two_sided": np.nan,
+            "win prob": obs("win_probability"),
+            "matched share": (ta._matched_share(frame, ta.CONDITION_A, ta.CONDITION_B)
+                              if paired else np.nan)}
+
+
 def _step_rows(base: dict, ab: pd.DataFrame, ba: pd.DataFrame, n_ab: int, n_ba: int, *,
-               paired: bool, n_perm: int, seed: int, prelim: bool = False) -> list[dict]:
+               paired: bool, n_perm: int, seed: int, prelim: bool = False,
+               stats: bool = True) -> list[dict]:
     """One `STEP_COLUMNS` row per step present in either direction; with `prelim`, a step
     below `MIN_COVERAGE` with >= `PRELIM_MIN_MATCHED` runs on both sides is tested too."""
     rows = []
@@ -297,8 +357,7 @@ def _step_rows(base: dict, ab: pd.DataFrame, ba: pd.DataFrame, n_ab: int, n_ba: 
         if tested:
             frame = ta._condition_frame(a.assign(stratum=a["cell"]), b.assign(stratum=b["cell"]),
                                         ta.CONDITION_A, ta.CONDITION_B)
-            r = ta.contrast_row(frame, ta.CONDITION_A, ta.CONDITION_B, paired=paired,
-                                n_perm=n_perm, seed=seed)
+            r = _contrast(frame, paired=paired, n_perm=n_perm, seed=seed, stats=stats)
             row.update({k: r[k] for k in ("contrast", "p_two_sided", "win prob",
                                           "matched share")})
             ba_, bb_ = boot_a.get(int(step)), boot_b.get(int(step))
@@ -359,7 +418,24 @@ def _stop_label(family: ta.Family, spec: tc.ArmSpec, repo: Path) -> str:
     stops = sorted({int(c.rsplit("_stop", 1)[1]) for c in spec.cells if "_stop" in c})
     names = [lab for lab, cells in ta.family_designs(family, repo) if set(cells) == base]
     return ((names[0] if names else spec.cell_set) + BACKFILL_TAG
-            + "/".join(f"{n:,}" for n in stops))
+            + ("/".join(f"{n:,}" for n in stops) if stops else "end"))
+
+
+#: `trajectory_conditions.default_arms` family whose arms save per-checkpoint evals on their
+#: own (plain) cells, with matched per-step controls (`ArmSpec.control_of`).
+OLMO_ARM_FAMILY = "OLMo"
+
+
+def olmo_stop_arms(repo: Path, family: str = "olmo-recipe") -> list[tc.ArmSpec]:
+    """The OLMo per-checkpoint arms (treatments + matched controls) of
+    `trajectory_conditions.default_arms` whose sender AND receiver are distinct bases of `family`
+    (dolma / dclm / c4 at the default seed). The seed-2 ``-aux2`` receivers run one direction
+    only, so they never form a pair and are left out. Fed to `_stop_pairs` as extra stop arms:
+    their cells carry no ``_stop{N}``, so the saved steps (625 ... 12,500) end at the run's own
+    endpoint and the design is ``core35 · per-step control``."""
+    bases = {tio.base_name(b) for b in ta.FAMILIES[family].bases}
+    return [s for s in tc.default_arms(repo) if s.family == OLMO_ARM_FAMILY
+            and s.sender in bases and s.receiver in bases and s.sender != s.receiver]
 
 
 def _stop_points(spec: tc.ArmSpec, control: tc.ArmSpec | None, prior: float, root: Path,
@@ -429,7 +505,8 @@ def _stitched_points(stop_pts: pd.DataFrame, spec: tc.ArmSpec, arm: ta.ArmLoad,
 
 def _stop_pairs(family: ta.Family, repo: Path, root: Path, stop_arms: Sequence[tc.ArmSpec],
                 endpoint: pd.DataFrame, priors: dict, *, n_perm: int, seed: int,
-                prelim: bool = False, points: list | None = None) -> tuple[list, list, list]:
+                prelim: bool = False, points: list | None = None,
+                stats: bool = True, refresh_cache: bool = False) -> tuple[list, list, list]:
     """``(step rows, summary rows, inventory rows)`` of every backfilled cross pair whose two
     directions are both bases of `family` (A/B order = the family's base order).
 
@@ -437,9 +514,9 @@ def _stop_pairs(family: ta.Family, repo: Path, root: Path, stop_arms: Sequence[t
     ``<stop design> + ep20 endpoint`` design (`_stitched_points`, at the ep20 design `endpoint`
     used for the pair); the stop-only design is then marked ``superseded by`` the stitched one
     (``design status``) and kept for cross-checking only. `points`, when given, collects each
-    design's tested-step slot values (`_tested_points`)."""
+    design's tested-step slot values (`_tested_points`). Each pair is one `result_cache` unit
+    (`_stop_pair`, keyed by `_stop_pair_records`)."""
     designs = dict(ta.family_designs(family, repo))
-    order = {tio.base_name(b): b for b in family.bases}
     treat = {(s.animal, s.sender, s.receiver): s for s in stop_arms
              if s.kind == "treatment" and s.sender != s.receiver}
     controls = {s.control_of: s for s in stop_arms if s.kind == "control"}
@@ -451,120 +528,348 @@ def _stop_pairs(family: ta.Family, repo: Path, root: Path, stop_arms: Sequence[t
                 ab, ba = treat.get((animal, da, db)), treat.get((animal, db, da))
                 if ab is None or ba is None:
                     continue
-                design = _stop_label(family, ab, repo)
-                prefix = design.split(BACKFILL_TAG, 1)[0]
-                stitched = _CELLSET_NAMES.get(prefix, prefix) + TRAJECTORY_SUFFIX
                 ep = endpoint[(endpoint["animal"] == animal) & (endpoint["A"] == a)
                               & (endpoint["B"] == b)]
-                if not len(ep):     # no endpoint test: the saved steps ARE the trajectory
-                    design = stitched
-                pts, infos = {}, {}
-                for s, spec in ((a, ab), (b, ba)):
+                cab, cba = controls.get(ab.label), controls.get(ba.label)
+                for spec in (ab, ba):
                     key = (animal, tio.base_name(spec.receiver))
                     if key not in priors:
                         priors[key] = tio.student_tree_prior(animal, spec.receiver,
                                                              output_root=root)
-                    pts[s], infos[s] = _stop_points(spec, controls.get(spec.label), priors[key],
-                                                    root, family.ftseed)
-                    pts[s] = pts[s].assign(sender=s)
-                    reason = ("no prior" if not np.isfinite(priors[key]) else
-                              "" if infos[s]["runs with trajectory"] else NO_TRAJECTORY)
-                    inventory.append({"family": family.name, "animal": animal, "sender": s,
-                                      "receiver": order[spec.receiver] if spec.receiver in order
-                                      else spec.receiver, "design": design, **infos[s],
-                                      "reason": reason, "notes": ""})
-                if any(r["reason"] for r in inventory[-2:]):
-                    continue
-                base = {"family": family.name, "animal": animal, "A": a, "B": b,
-                        "design": design}
-                paired = set(ab.teachers) == set(ba.teachers)
-                test = ta.TEST_PAIRED if paired else ta.TEST_UNPAIRED
-                rows = _step_rows(base, pts[a], pts[b], infos[a]["runs (endpoint)"],
-                                  infos[b]["runs (endpoint)"], paired=paired, n_perm=n_perm,
-                                  seed=seed, prelim=prelim)
-                steps.extend(rows)
+
+                def compute(animal=animal, a=a, b=b, ab=ab, ba=ba, ep=ep, cab=cab, cba=cba):
+                    return _stop_pair(family, repo, root, designs, animal, a, b, ab, ba,
+                                      cab, cba, ep, priors, n_perm=n_perm, seed=seed,
+                                      prelim=prelim, stats=stats)
+
+                def records(animal=animal, a=a, b=b, ab=ab, ba=ba, ep=ep, cab=cab, cba=cba):
+                    return _stop_pair_records(family, repo, root, designs, animal, a, b,
+                                              ab, ba, cab, cba, ep)
+
+                params = {**_cache_params(family, n_perm=n_perm, seed=seed, prelim=prelim,
+                                          stats=stats),
+                          "unit": "stop", "animal": animal, "A": a, "B": b,
+                          "specs": [repr(x) for x in (ab, ba, cab, cba)],
+                          "endpoint": ep.to_dict("records"),
+                          "ep design cells": (designs[ep["design"].iloc[0]] if len(ep)
+                                              else None),
+                          "priors": [priors[(animal, tio.base_name(x.receiver))]
+                                     for x in (ab, ba)]}
+                out = _cached_unit(root, f"{family.name}|{animal}|{a}|{b}|stop", records,
+                                   params, compute, refresh_cache)
+                steps.extend(out["steps"])
+                summary.extend(out["summary"])
+                inventory.extend(out["inventory"])
                 if points is not None:
-                    points.append(_tested_points(base, pts[a], pts[b], rows))
-                frame = pd.DataFrame(rows)
-                stop_row = None
-                if frame["tested"].any():
-                    nan = pd.Series({"contrast": np.nan, "p_two_sided": np.nan})
-                    stop_row = _summary_row(base, test, nan, frame, sign_ref=float(
-                        frame[frame["tested"]].sort_values("step")["contrast"].iloc[-1]))
-                    stop_row["ep20 endpoint contrast"] = (float(ep["contrast"].iloc[0])
-                                                          if len(ep) else np.nan)
-                    summary.append(stop_row)
-                if not len(ep):
-                    continue
-                # stitched: the stop points + the same (teacher, cell) ep20 run's endpoint
-                ep_design = ep["design"].iloc[0]
-                spts, sinfo, ends = {}, {}, {}
-                for s, r, spec in ((a, b, ab), (b, a, ba)):
-                    arm = ta.load_arm(family, animal, s, r, ep_design, designs[ep_design],
-                                      repo=repo, output_root=root, priors=priors)
-                    ep_spec = _spec(family, animal, s, r, ep_design, designs[ep_design],
-                                    arm.teachers)
-                    traj = {}
-                    for t in spec.teachers:
-                        tr = _run_trajectories(ep_spec, t, root, family.ftseed)
-                        traj[t] = {c: int(g["step"].max()) for c, g in tr.groupby("tag")
-                                   if g["step"].nunique() > 1}
-                    p, missing, source = _stitched_points(pts[s], spec, arm, traj)
-                    spts[s] = p.assign(sender=s)
-                    ends[s] = (arm, missing)
-                    st_ = sorted(spts[s]["step"].unique())
-                    last = int(spts[s]["step"].max())
-                    sinfo[s] = {**infos[s], "control": CONTROL_PER_STEP,
-                                "runs with trajectory": int(spts[s][["teacher", "cell"]]
-                                                            .drop_duplicates().shape[0]),
-                                "saved steps": len(st_), "last step": last}
-                    note = (f"last step from {ep_design} ({source})"
-                            + (f"; {len(missing)} slot(s) without a last-step row: "
-                               + ", ".join(missing) if missing else ""))
-                    inventory.append({"family": family.name, "animal": animal, "sender": s,
-                                      "receiver": r, "design": stitched, **sinfo[s],
-                                      "reason": "", "notes": note})
-                if stop_row is not None:
-                    stop_row["design status"] = SUPERSEDED_BY + stitched
-                for inv_row in inventory[-4:-2]:
-                    inv_row["design status"] = SUPERSEDED_BY + stitched
-                sbase = {**base, "design": stitched}
-                srows = _step_rows(sbase, spts[a], spts[b], infos[a]["runs (endpoint)"],
-                                   infos[b]["runs (endpoint)"], paired=paired, n_perm=n_perm,
-                                   seed=seed, prelim=prelim)
-                steps.extend(srows)
-                if points is not None:
-                    points.append(_tested_points(sbase, spts[a], spts[b], srows))
-                sframe = pd.DataFrame(srows)
-                if not sframe["tested"].any():
-                    continue
-                # slots-matched endpoint: the endpoint frames restricted to the stop slots,
-                # tested independently of the step table (must equal the last step exactly)
-                sides = []
-                for s in (a, b):
-                    arm, _ = ends[s]
-                    keys = set(map(tuple, spts[s][["teacher", "cell"]].to_numpy()))
-                    f = arm.frame[[k in keys for k in zip(arm.frame["teacher"],
-                                                          arm.frame["cell"])]]
-                    sides.append(f.assign(stratum=f["cell"]))
-                cr = ta.contrast_row(ta._condition_frame(sides[0], sides[1], ta.CONDITION_A,
-                                                         ta.CONDITION_B),
-                                     ta.CONDITION_A, ta.CONDITION_B, paired=paired,
-                                     n_perm=n_perm, seed=seed)
-                row = _summary_row(sbase, test, pd.Series(cr), sframe)
-                row["slots endpoint contrast"] = row["endpoint contrast"]
-                row["slots endpoint p"] = row["endpoint p"]
-                row["endpoint contrast"] = float(ep["contrast"].iloc[0])
-                row["endpoint p"] = float(ep["p_two_sided"].iloc[0])
-                row["ep20 endpoint contrast"] = float(ep["contrast"].iloc[0])
-                summary.append(row)
+                    points.extend(out["points"])
     return steps, summary, inventory
+
+
+def _stop_pair(family: ta.Family, repo: Path, root: Path, designs: dict, animal: str, a: str,
+               b: str, ab: tc.ArmSpec, ba: tc.ArmSpec, cab: tc.ArmSpec | None,
+               cba: tc.ArmSpec | None, ep: pd.DataFrame, priors: dict, *, n_perm: int,
+               seed: int, prelim: bool, stats: bool) -> dict:
+    """One backfilled pair of `_stop_pairs`: ``{"steps", "summary", "inventory", "points"}``
+    lists of rows (points: frames)."""
+    order = {tio.base_name(x): x for x in family.bases}
+    controls = {ab.label: cab, ba.label: cba}
+    steps, summary, inventory, points = [], [], [], []
+    out = {"steps": steps, "summary": summary, "inventory": inventory, "points": points}
+    design = _stop_label(family, ab, repo)
+    prefix = design.split(BACKFILL_TAG, 1)[0]
+    stitched = _CELLSET_NAMES.get(prefix, prefix) + TRAJECTORY_SUFFIX
+    if not len(ep):     # no endpoint test: the saved steps ARE the trajectory
+        design = stitched
+    pts, infos = {}, {}
+    for s, spec in ((a, ab), (b, ba)):
+        key = (animal, tio.base_name(spec.receiver))
+        if key not in priors:
+            priors[key] = tio.student_tree_prior(animal, spec.receiver, output_root=root)
+        pts[s], infos[s] = _stop_points(spec, controls.get(spec.label), priors[key],
+                                        root, family.ftseed)
+        pts[s] = pts[s].assign(sender=s)
+        reason = ("no prior" if not np.isfinite(priors[key]) else
+                  "" if infos[s]["runs with trajectory"] else NO_TRAJECTORY)
+        inventory.append({"family": family.name, "animal": animal, "sender": s,
+                          "receiver": order[spec.receiver] if spec.receiver in order
+                          else spec.receiver, "design": design, **infos[s],
+                          "reason": reason, "notes": ""})
+    if any(r["reason"] for r in inventory[-2:]):
+        return out
+    base = {"family": family.name, "animal": animal, "A": a, "B": b, "design": design}
+    paired = set(ab.teachers) == set(ba.teachers)
+    test = ta.TEST_PAIRED if paired else ta.TEST_UNPAIRED
+    rows = _step_rows(base, pts[a], pts[b], infos[a]["runs (endpoint)"],
+                      infos[b]["runs (endpoint)"], paired=paired, n_perm=n_perm,
+                      seed=seed, prelim=prelim, stats=stats)
+    steps.extend(rows)
+    points.append(_tested_points(base, pts[a], pts[b], rows))
+    frame = pd.DataFrame(rows)
+    stop_row = None
+    if frame["tested"].any():
+        nan = pd.Series({"contrast": np.nan, "p_two_sided": np.nan})
+        stop_row = _summary_row(base, test, nan, frame, sign_ref=float(
+            frame[frame["tested"]].sort_values("step")["contrast"].iloc[-1]))
+        stop_row["ep20 endpoint contrast"] = (float(ep["contrast"].iloc[0])
+                                              if len(ep) else np.nan)
+        summary.append(stop_row)
+    if not len(ep):
+        return out
+    # stitched: the stop points + the same (teacher, cell) ep20 run's endpoint
+    ep_design = ep["design"].iloc[0]
+    spts, sinfo, ends = {}, {}, {}
+    for s, r, spec in ((a, b, ab), (b, a, ba)):
+        arm = ta.load_arm(family, animal, s, r, ep_design, designs[ep_design],
+                          repo=repo, output_root=root, priors=priors)
+        ep_spec = _spec(family, animal, s, r, ep_design, designs[ep_design], arm.teachers)
+        traj = {}
+        for t in spec.teachers:
+            tr = _run_trajectories(ep_spec, t, root, family.ftseed)
+            lin = ep_spec.lineage_dir(root, t)
+            traj[t] = {c: _sibling_only_end(lin, c, family.ftseed)
+                       or int(g["step"].max()) for c, g in tr.groupby("tag")
+                       if g["step"].nunique() > 1}
+        p, missing, source = _stitched_points(pts[s], spec, arm, traj)
+        spts[s] = p.assign(sender=s)
+        ends[s] = (arm, missing)
+        st_ = sorted(spts[s]["step"].unique())
+        last = int(spts[s]["step"].max())
+        sinfo[s] = {**infos[s], "control": CONTROL_PER_STEP,
+                    "runs with trajectory": int(spts[s][["teacher", "cell"]]
+                                                .drop_duplicates().shape[0]),
+                    "saved steps": len(st_), "last step": last}
+        note = (f"last step from {ep_design} ({source})"
+                + (f"; {len(missing)} slot(s) without a last-step row: "
+                   + ", ".join(missing) if missing else ""))
+        inventory.append({"family": family.name, "animal": animal, "sender": s,
+                          "receiver": r, "design": stitched, **sinfo[s],
+                          "reason": "", "notes": note})
+    if stop_row is not None:
+        stop_row["design status"] = SUPERSEDED_BY + stitched
+    for inv_row in inventory[-4:-2]:
+        inv_row["design status"] = SUPERSEDED_BY + stitched
+    sbase = {**base, "design": stitched}
+    srows = _step_rows(sbase, spts[a], spts[b], infos[a]["runs (endpoint)"],
+                       infos[b]["runs (endpoint)"], paired=paired, n_perm=n_perm,
+                       seed=seed, prelim=prelim, stats=stats)
+    steps.extend(srows)
+    points.append(_tested_points(sbase, spts[a], spts[b], srows))
+    sframe = pd.DataFrame(srows)
+    if not sframe["tested"].any():
+        return out
+    # slots-matched endpoint: the endpoint frames restricted to the stop slots,
+    # tested independently of the step table (must equal the last step exactly)
+    sides = []
+    for s in (a, b):
+        arm, _ = ends[s]
+        keys = set(map(tuple, spts[s][["teacher", "cell"]].to_numpy()))
+        f = arm.frame[[k in keys for k in zip(arm.frame["teacher"], arm.frame["cell"])]]
+        sides.append(f.assign(stratum=f["cell"]))
+    cr = _contrast(ta._condition_frame(sides[0], sides[1], ta.CONDITION_A, ta.CONDITION_B),
+                   paired=paired, n_perm=n_perm, seed=seed, stats=stats)
+    row = _summary_row(sbase, test, pd.Series(cr), sframe)
+    row["slots endpoint contrast"] = row["endpoint contrast"]
+    row["slots endpoint p"] = row["endpoint p"]
+    row["endpoint contrast"] = float(ep["contrast"].iloc[0])
+    row["endpoint p"] = float(ep["p_two_sided"].iloc[0])
+    row["ep20 endpoint contrast"] = float(ep["contrast"].iloc[0])
+    summary.append(row)
+    return out
+
+
+# ----------------------------------------------------------------------------------------------
+# result cache (`analysis.result_cache`): one unit per (family, animal, pair, design) plus one
+# per family for the endpoint module; keys over the unit's record files + code + parameters
+# ----------------------------------------------------------------------------------------------
+#: `result_cache` namespace of this module's units.
+CACHE_NAMESPACE = "trajectory_asymmetry"
+
+
+def _cache_code() -> list:
+    return [sys.modules[__name__], tc, ta, tio, traj_io]
+
+
+_CODE_HASHES: list[str] = []
+
+
+def _code_hashes() -> list[str]:
+    """Source hashes of `_cache_code`, taken ONCE per process: an edit to a module file while a
+    build runs must not change the keys of that build (the loaded code is still the old one)."""
+    if not _CODE_HASHES:
+        _CODE_HASHES.extend(result_cache._code_hash(c) for c in _cache_code())
+    return _CODE_HASHES
+
+
+def _cache_disabled() -> bool:
+    return result_cache.RESULT_CACHE_DISABLED or os.environ.get("SL_RESULT_CACHE", "1") == "0"
+
+
+def _cache_params(family: ta.Family, *, n_perm: int, seed: int, prelim: bool,
+                  stats: bool) -> dict:
+    """Parameters every unit of `family` depends on (module constants included)."""
+    return {"family": repr(family), "n_perm": n_perm, "seed": seed, "prelim": prelim,
+            "stats": stats, "n_boot": N_BOOT, "boot_seed": BOOT_SEED, "alpha": ALPHA,
+            "min_coverage": MIN_COVERAGE, "prelim_min_matched": PRELIM_MIN_MATCHED,
+            "ep20_last_step": EP20_LAST_STEP}
+
+
+def _cached_unit(root: Path, unit: str, records: Callable[[], list], params: dict,
+                 compute: Callable[[], object], refresh: bool) -> object:
+    """`result_cache.cached` of one unit; `records` (its ``(rel path, mtime_ns, size)``
+    triples) is only built when the cache is enabled."""
+    if _cache_disabled():
+        return compute()
+    recs = records()
+    key = result_cache.fingerprint(recs, params={**params, "code": _code_hashes()}, code=[])
+    return result_cache.cached(CACHE_NAMESPACE, unit, key, root, compute, refresh=refresh,
+                               n_input_records=len(recs))
+
+
+def _pref_traj_records(spec: tc.ArmSpec, teachers: Sequence[str], root: Path,
+                       ftseed: int) -> list[tuple[str, int, int]]:
+    """``(rel path, mtime_ns, size)`` of every ``eval/pref_traj.json`` `run_points` reads for
+    `teachers` of `spec` (each cell and its `sibling_leaf`), from the trajectory record cache's
+    post-sweep rows (no stat; `tc._prefetch` must have swept them in this process). A run
+    without a record contributes ``(path, -1, -1)``."""
+    from subliminal_learning.analysis.record_cache import load_record_cache
+
+    fname = traj_io._KINDS["pref"][0]
+    rels = [str(spec.lineage_dir(root, t).relative_to(root) / c / f"ftseed{ftseed}")
+            for t in teachers
+            for c in dict.fromkeys([*spec.cells, *map(tc.sibling_leaf, spec.cells)])]
+    got = load_record_cache(root, "json_blob", rels, refresh=False, verbose=False,
+                            rel_record=f"eval/{fname}",
+                            cache_rel=Path("analysis") / "record_cache_traj_pref.csv")
+    facts = {rp: (int(round(float(mt) * 1e9)), int(sz)) for rp, mt, sz in
+             got[["run_path", "record_mtime", "record_size"]].itertuples(index=False)}
+    return [(f"{rp}/eval/{fname}", *facts.get(rp, (-1, -1))) for rp in dict.fromkeys(rels)]
+
+
+def _endpoint_records(family: ta.Family, animal: str, sender: str, receiver: str,
+                      cells: Sequence[str], repo: Path, root: Path) -> list[tuple[str, int, int]]:
+    """``(rel path, mtime_ns, size)`` of the endpoint value files `ta.load_arm` reads for one
+    arm: exactly the leaves `tio.load_cell_matrix` signs (`tio._leaf_signature`, whose
+    in-process memo makes the matching `load_cell_matrix` call stat-free)."""
+    teachers = ta.family_teachers(family, animal, sender, repo)
+    receiver_dir, sender_dir = tio.base_name(receiver), f"teacher-{tio.base_name(sender)}"
+    control_tree = tio.dataset_dir(root, None, base=receiver_dir,
+                                   dataset_tag=tio.DEFAULT_DATASET_TAG,
+                                   source=family.control_source,
+                                   numbers_base=tio.base_name(sender))
+    seed_part = f"ftseed{family.ftseed}"
+    value_leaf = tio._VALUE_LEAVES[0]
+    sender_tree = (root / "students" / animal
+                   / Path(*tio.model_dir_parts_from_name(receiver_dir)) / sender_dir)
+    leaves: list[Path] = []
+    for cell in tio.resolve_cells(list(cells)):
+        leaves += tio._run_leaves(control_tree / cell / seed_part, (value_leaf,), animal)
+        leaves += [sender_tree / f"{tag}_tseed{family.tseed}" / tio.DEFAULT_DATASET_TAG / cell
+                   / seed_part / value_leaf for tag in teachers]
+    return [(r[0], -1, -1) if r[1] is None else (r[0], int(r[2]), int(r[1]))
+            for r in tio._leaf_signature(root, leaves)]
+
+
+def _ep20_pair_records(family: ta.Family, animal: str, a: str, b: str, design: str,
+                       cells: Sequence[str], repo: Path, root: Path) -> list:
+    """Every record file one ep20 pair unit reads: both directions' endpoint values and
+    matched controls (`_endpoint_records`) and their designed runs' trajectories."""
+    out = []
+    for s, r in ((a, b), (b, a)):
+        teachers = ta.family_teachers(family, animal, s, repo)
+        out += _endpoint_records(family, animal, s, r, cells, repo, root)
+        out += _pref_traj_records(_spec(family, animal, s, r, design, cells, teachers),
+                                  teachers, root, family.ftseed)
+    return out
+
+
+def _stop_pair_records(family: ta.Family, repo: Path, root: Path, designs: dict, animal: str,
+                       a: str, b: str, ab: tc.ArmSpec, ba: tc.ArmSpec, cab: tc.ArmSpec | None,
+                       cba: tc.ArmSpec | None, ep: pd.DataFrame) -> list:
+    """Every record file one backfilled pair unit reads: both stop arms' and their matched
+    controls' trajectories and, with an endpoint test, the ep20 design's endpoint records and
+    trajectories (`_ep20_pair_records`)."""
+    out = []
+    for spec, ctrl in ((ab, cab), (ba, cba)):
+        out += _pref_traj_records(spec, spec.teachers, root, family.ftseed)
+        if ctrl is not None:
+            out += _pref_traj_records(ctrl, [tc.CONTROL_TEACHER], root, family.ftseed)
+    if len(ep):
+        d = ep["design"].iloc[0]
+        out += _ep20_pair_records(family, animal, a, b, d, designs[d], repo, root)
+    return out
+
+
+def _ep20_pair(family: ta.Family, pr: pd.Series, cells: Sequence[str], repo: Path, root: Path,
+               priors: dict, *, n_perm: int, seed: int, stats: bool) -> dict:
+    """One endpoint-tested pair of `analyze_family` at its ep20 design: ``{"steps",
+    "summary", "inventory", "excluded", "points"}`` lists of rows (points: frames)."""
+    animal, a, b, design = pr["animal"], pr["A"], pr["B"], pr["design"]
+    base = {"family": family.name, "animal": animal, "A": a, "B": b, "design": design}
+    out = {"steps": [], "summary": [], "inventory": [], "excluded": [], "points": []}
+    loads, pts, infos = {}, {}, {}
+    for s, r in ((a, b), (b, a)):
+        arm = ta.load_arm(family, animal, s, r, design, cells, repo=repo, output_root=root,
+                          priors=priors)
+        loads[s] = arm
+        pts[s], infos[s] = _direction_points(family, animal, s, r, design, cells, arm, root)
+    notes = ""
+    if infos[a]["runs with trajectory"] and infos[b]["runs with trajectory"] \
+            and infos[a]["last step"] != infos[b]["last step"]:
+        notes = (f"within-pair last-step mismatch: {a}->{b} {infos[a]['last step']}, "
+                 f"{b}->{a} {infos[b]['last step']}")
+    reasons = {s: (f"{NO_TRAJECTORY} (0/{infos[s]['runs (endpoint)']} runs)"
+                   if not infos[s]["runs with trajectory"] else "") for s in (a, b)}
+    for s, r in ((a, b), (b, a)):
+        out["inventory"].append({"family": family.name, "animal": animal, "sender": s,
+                                 "receiver": r, "design": design, **infos[s],
+                                 "reason": reasons[s], "notes": notes})
+    if reasons[a] or reasons[b]:
+        out["excluded"].append({**{k: base[k] for k in ("family", "animal", "A", "B")},
+                                "reason A->B": reasons[a] or "has trajectory",
+                                "reason B->A": reasons[b] or "has trajectory"})
+        return out
+    paired = set(loads[a].teachers) == set(loads[b].teachers)
+    rows = _step_rows(base, pts[a], pts[b], infos[a]["runs (endpoint)"],
+                      infos[b]["runs (endpoint)"], paired=paired, n_perm=n_perm, seed=seed,
+                      stats=stats)
+    out["steps"].extend(rows)
+    out["points"].append(_tested_points(base, pts[a], pts[b], rows))
+    frame = pd.DataFrame(rows)
+    if not frame["tested"].any():
+        out["excluded"].append({**{k: base[k] for k in ("family", "animal", "A", "B")},
+                                "reason A->B": NO_COVERED_STEP, "reason B->A": NO_COVERED_STEP})
+        return out
+    out["summary"].append(_summary_row(base, pr["test"], pr, frame))
+    return out
+
+
+def _endpoint_family(family: ta.Family, repo: Path, root: Path, *, n_perm: int, seed: int,
+                     refresh_cache: bool) -> ta.AsymmetryResult:
+    """`transfer_asymmetry.analyze_family`, one `result_cache` unit per family keyed by every
+    arm's endpoint records at every design."""
+    designs = ta.family_designs(family, repo)
+
+    def records() -> list:
+        return [rec for animal in family.animals for _, cells in designs
+                for s in family.bases for r in family.bases if s != r
+                for rec in _endpoint_records(family, animal, s, r, cells, repo, root)]
+
+    priors = sorted({(animal, tio.base_name(r)): tio.student_tree_prior(
+        animal, r, output_root=root) for animal in family.animals for r in family.bases}.items())
+    params = {"unit": "endpoint", "family": repr(family), "n_perm": n_perm, "seed": seed,
+              "designs": designs, "priors": priors,
+              "teachers": [ta.family_teachers(family, animal, s, repo)
+                           for animal in family.animals for s in family.bases]}
+    return _cached_unit(root, f"{family.name}|endpoint", records, params,
+                        lambda: ta.analyze_family(family, repo=repo, output_root=root,
+                                                  n_perm=n_perm, seed=seed), refresh_cache)
 
 
 def analyze_family(family: ta.Family, *, repo: Path, output_root: Path | None = None,
                    n_perm: int = 20000, seed: int = 0,
                    stop_arms: Sequence[tc.ArmSpec] = (),
-                   prelim: bool = False, prefetched: bool = False) -> TrajectoryAsymmetry:
+                   prelim: bool = False, prefetched: bool = False,
+                   stats: bool = True, refresh_cache: bool = False) -> TrajectoryAsymmetry:
     """The per-step, summary, inventory and exclusion tables of one family.
 
     The pair universe, designs and exclusions come from `transfer_asymmetry.analyze_family`
@@ -576,12 +881,23 @@ def analyze_family(family: ta.Family, *, repo: Path, output_root: Path | None = 
 
     Trajectories are read from the record cache without per-lineage refreshes, so the family's
     arms (+ `stop_arms`) are prefetched in one sweep first unless `prefetched` says the caller
-    already did so in this process over a superset of them (`analyze`).
+    already did so in this process over a superset of them (`analyze`). With `stats` off the
+    trajectory module runs no permutation test (p columns NaN; contrasts and bootstrap bands
+    unchanged); the endpoint module's own tests (`transfer_asymmetry.analyze_family`) still run.
+
+    Result cache. Each endpoint-tested pair (`_ep20_pair`), each backfilled pair (`_stop_pair`)
+    and the family's endpoint call (`_endpoint_family`) is one `analysis.result_cache` unit
+    (namespace `CACHE_NAMESPACE`) keyed by the ``(path, mtime_ns, size)`` of every record file
+    it reads (trajectories from the post-sweep record cache, endpoint values and matched
+    controls via `tio._leaf_signature`), the source of this module and the modules it reads
+    through, and every parameter. A hit returns the stored rows unchanged; `refresh_cache`
+    recomputes and overwrites; ``SL_RESULT_CACHE=0`` restores the uncached path.
     """
     root = resolve_output_root(output_root)
     if not prefetched:
         tc._prefetch(_family_specs(family, repo) + list(stop_arms), root, family.ftseed)
-    end = ta.analyze_family(family, repo=repo, output_root=root, n_perm=n_perm, seed=seed)
+    end = _endpoint_family(family, repo, root, n_perm=n_perm, seed=seed,
+                           refresh_cache=refresh_cache)
     designs = dict(ta.family_designs(family, repo))
     priors: dict = {}
     steps, summary, inventory, excluded, points = [], [], [], [], []
@@ -591,46 +907,29 @@ def analyze_family(family: ta.Family, *, repo: Path, output_root: Path | None = 
                                ((ex["B"], ex["A"]), ex["reason B->A"])):
             inventory.append({"family": family.name, "animal": ex["animal"], "sender": s,
                               "receiver": r, "design": "", "reason": f"endpoint: {reason}"})
+    common = _cache_params(family, n_perm=n_perm, seed=seed, prelim=prelim, stats=stats)
     for _, pr in end.pairs.iterrows():
         animal, a, b, design = pr["animal"], pr["A"], pr["B"], pr["design"]
         cells = designs[design]
-        base = {"family": family.name, "animal": animal, "A": a, "B": b, "design": design}
-        loads, pts, infos = {}, {}, {}
-        for s, r in ((a, b), (b, a)):
-            arm = ta.load_arm(family, animal, s, r, design, cells, repo=repo, output_root=root,
-                              priors=priors)
-            loads[s] = arm
-            pts[s], infos[s] = _direction_points(family, animal, s, r, design, cells, arm, root)
-        notes = ""
-        if infos[a]["runs with trajectory"] and infos[b]["runs with trajectory"] \
-                and infos[a]["last step"] != infos[b]["last step"]:
-            notes = (f"within-pair last-step mismatch: {a}->{b} {infos[a]['last step']}, "
-                     f"{b}->{a} {infos[b]['last step']}")
-        reasons = {s: (f"{NO_TRAJECTORY} (0/{infos[s]['runs (endpoint)']} runs)"
-                       if not infos[s]["runs with trajectory"] else "") for s in (a, b)}
-        for s, r in ((a, b), (b, a)):
-            inventory.append({"family": family.name, "animal": animal, "sender": s,
-                              "receiver": r, "design": design, **infos[s],
-                              "reason": reasons[s], "notes": notes})
-        if reasons[a] or reasons[b]:
-            excluded.append({**{k: base[k] for k in ("family", "animal", "A", "B")},
-                             "reason A->B": reasons[a] or "has trajectory",
-                             "reason B->A": reasons[b] or "has trajectory"})
-            continue
-        paired = set(loads[a].teachers) == set(loads[b].teachers)
-        rows = _step_rows(base, pts[a], pts[b], infos[a]["runs (endpoint)"],
-                          infos[b]["runs (endpoint)"], paired=paired, n_perm=n_perm, seed=seed)
-        steps.extend(rows)
-        points.append(_tested_points(base, pts[a], pts[b], rows))
-        frame = pd.DataFrame(rows)
-        if not frame["tested"].any():
-            excluded.append({**{k: base[k] for k in ("family", "animal", "A", "B")},
-                             "reason A->B": NO_COVERED_STEP, "reason B->A": NO_COVERED_STEP})
-            continue
-        summary.append(_summary_row(base, pr["test"], pr, frame))
+        params = {**common, "unit": "ep20", "pair": pr.to_dict(), "cells": cells,
+                  "priors": [tio.student_tree_prior(animal, x, output_root=root) for x in (a, b)]}
+        out = _cached_unit(
+            root, f"{family.name}|{animal}|{a}|{b}|{design}",
+            lambda animal=animal, a=a, b=b, design=design, cells=cells: _ep20_pair_records(
+                family, animal, a, b, design, cells, repo, root),
+            params,
+            lambda pr=pr, cells=cells: _ep20_pair(family, pr, cells, repo, root, priors,
+                                                  n_perm=n_perm, seed=seed, stats=stats),
+            refresh_cache)
+        steps.extend(out["steps"])
+        summary.extend(out["summary"])
+        inventory.extend(out["inventory"])
+        excluded.extend(out["excluded"])
+        points.extend(out["points"])
     if stop_arms:
         st, su, inv = _stop_pairs(family, repo, root, stop_arms, end.pairs, priors,
-                                  n_perm=n_perm, seed=seed, prelim=prelim, points=points)
+                                  n_perm=n_perm, seed=seed, prelim=prelim, points=points,
+                                  stats=stats, refresh_cache=refresh_cache)
         steps.extend(st)
         summary.extend(su)
         inventory.extend(inv)
@@ -666,20 +965,24 @@ def _family_specs(fam: ta.Family, repo: Path) -> list[tc.ArmSpec]:
 
 def analyze(names: Sequence[str] = FAMILY_ORDER, *, repo: Path,
             output_root: Path | None = None, n_perm: int = 20000, seed: int = 0,
-            early_stop: bool = True, prelim: bool = False) -> TrajectoryAsymmetry:
+            early_stop: bool = True, prelim: bool = False,
+            stats: bool = True, refresh_cache: bool = False) -> TrajectoryAsymmetry:
     """`analyze_family` over the named `transfer_asymmetry.FAMILIES`, tables concatenated.
 
     The shared trajectory record caches are refreshed once up front
     (`trajectory_conditions._prefetch`) over every ordered arm at every design. `early_stop`
-    adds the `trajectory_conditions.earlystop_arms` cross pairs (see `analyze_family`).
+    adds the `trajectory_conditions.earlystop_arms` cross pairs (see `analyze_family`). That
+    sweep is also what supplies the record mtimes the result-cache keys use; `refresh_cache`
+    bypasses the result cache (see `analyze_family`).
     """
     root = resolve_output_root(output_root)
     specs = [sp for n in names for sp in _family_specs(ta.FAMILIES[n], repo)]
-    stop = tc.earlystop_arms(repo) if early_stop else []
+    stop = tc.earlystop_arms(repo) + olmo_stop_arms(repo) if early_stop else []
     tc._prefetch(specs + list(stop), root, 1)
     parts = [analyze_family(ta.FAMILIES[n], repo=repo, output_root=root, n_perm=n_perm,
                             seed=seed, stop_arms=stop, prelim=prelim,
-                            prefetched=ta.FAMILIES[n].ftseed == 1)
+                            prefetched=ta.FAMILIES[n].ftseed == 1, stats=stats,
+                            refresh_cache=refresh_cache)
              for n in names]
 
     def cat(attr: str, columns: list[str] | None) -> pd.DataFrame:
@@ -896,41 +1199,138 @@ def plot_contrast_curves(res: TrajectoryAsymmetry, *, ncols: int = 3, fontsize: 
     return fig
 
 
-#: The dog panels of `plot_contrast_curves_dog`, in display order.
-DOG_CONTRAST_PANELS = ("cross-seed", "cross-data-order", "re-pretrain")
+#: The dog blocks of `plot_contrast_curves_dog`, in display order (the
+#: `trajectory_ab_vs_aa.BASE_GROUPS` order): (title, member bases as `pair_label` names). A pair
+#: belongs to a block when BOTH its bases are members; the re-pretrain family splits into the
+#: last two.
+DOG_CONTRAST_BLOCKS = (
+    ("diff init, diff data order: orig, fs1–fs3", ("orig", "fs1", "fs2", "fs3")),
+    ("same init, diff data order: orig, ds1–ds3", ("orig", "ds1", "ds2", "ds3")),
+    ("diff init, same data order: Rerun1234, wc1, wc2", ("Rerun1234", "wc1", "wc2")),
+    ("Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",
+     ("orig", "Modern1234", "Rerun1234")),
+)
+DP_YLABEL = "mean A→B − B→A, Δp(trait)"
+#: `dp_contrast_table` / ``asymmetry_trajectory_contrast.csv``: A, B in display form.
+DP_COLUMNS = ["animal", "A", "B", "block", "design", "step", "n paired slots", "contrast",
+              "contrast lo", "contrast hi", "p_two_sided", "tested"]
+#: `steps_csv_table` / ``asymmetry_trajectory_steps.csv`` (receiver prior units).
+STEPS_CSV_COLUMNS = ["family", "animal", "A", "B", "design", "step", "tested", "mean A->B",
+                     "mean B->A", "contrast", "contrast lo", "contrast hi", "p_two_sided"]
 
 
-def plot_contrast_curves_dog(res: TrajectoryAsymmetry, *, fontsize: int = 9):
-    """`plot_contrast_curves` restricted to the dog panels of `DOG_CONTRAST_PANELS`, in one row:
-    same curves, bands and markers; legend inside each axes, labelled just ``A→B``; no
-    suptitle."""
+def contrast_block(a: str, b: str) -> str | None:
+    """The `DOG_CONTRAST_BLOCKS` title holding both bases of pair (a, b), else None."""
+    sa, sb = pair_label(a, b).split("⇄")
+    return next((t for t, m in DOG_CONTRAST_BLOCKS if sa in m and sb in m), None)
+
+
+def dp_contrast_table(res: TrajectoryAsymmetry, *, animal: str = "dog", n_perm: int = 20000,
+                      seed: int = 0, stats: bool = True) -> pd.DataFrame:
+    """`DP_COLUMNS` per tested step of every per-step-control `curve_pairs` pair of `animal` in a
+    `DOG_CONTRAST_BLOCKS` block, in Δp: each retained slot value (`res.points`, (p_student −
+    p_control at the same step) / prior) times its direction's receiver prior (`res.inventory`),
+    then the same paired/unpaired `contrast_row` and teacher-cluster bootstrap band as
+    `_step_rows`. ``n paired slots`` = (teacher, cell) slots present in both directions. Not a rescaling of the prior-unit contrast: the two receivers' priors
+    differ."""
+    summ = curve_pairs(res.summary)
+    summ = summ[(summ["animal"] == animal) & ~summ["design"].map(_is_ep20)]
+    inv = res.inventory
+    rows = []
+    for _, pr in summ.iterrows():
+        block = contrast_block(pr["A"], pr["B"])
+        if block is None:
+            continue
+        key = {k: pr[k] for k in ("family", "animal", "A", "B", "design")}
+        da, db = pair_label(pr["A"], pr["B"]).split("⇄")
+        pts = res.points
+        pts = pts[np.logical_and.reduce([pts[k] == v for k, v in key.items()])]
+        sides = {}
+        for d, s, r in (("A->B", pr["A"], pr["B"]), ("B->A", pr["B"], pr["A"])):
+            iv = inv[(inv["family"] == pr["family"]) & (inv["animal"] == animal)
+                     & (inv["sender"] == s) & (inv["receiver"] == r)
+                     & (inv["design"] == pr["design"])]
+            prior = float(iv["prior"].iloc[0])
+            p = pts[pts["direction"] == d]
+            sides[d] = p.assign(value=prior * p["value"].astype(float), sender=s)
+        ab, ba = sides["A->B"], sides["B->A"]
+        teachers = sorted(set(ab["teacher"]) | set(ba["teacher"]))
+        paired = (pr["test"] == ta.TEST_PAIRED if isinstance(pr.get("test"), str)
+                  else set(ab["teacher"]) == set(ba["teacher"]))
+        w = _boot_weights(len(teachers))
+        boot_a, boot_b = _boot_means(ab, teachers, w), _boot_means(ba, teachers, w)
+        for step in sorted(set(ab["step"]) & set(ba["step"])):
+            a, b = ab[ab["step"] == step], ba[ba["step"] == step]
+            frame = ta._condition_frame(a.assign(stratum=a["cell"]), b.assign(stratum=b["cell"]),
+                                        ta.CONDITION_A, ta.CONDITION_B)
+            r = _contrast(frame, paired=paired, n_perm=n_perm, seed=seed, stats=stats)
+            lo, hi = _band(boot_a[int(step)] - boot_b[int(step)])
+            n = len(set(zip(a["teacher"], a["cell"])) & set(zip(b["teacher"], b["cell"])))
+            rows.append({"animal": animal, "A": da, "B": db, "block": block,
+                         "design": pr["design"], "step": int(step), "n paired slots": n,
+                         "contrast": r["contrast"], "contrast lo": lo, "contrast hi": hi,
+                         "p_two_sided": r["p_two_sided"], "tested": True})
+    return pd.DataFrame(rows, columns=DP_COLUMNS)
+
+
+def steps_csv_table(res: TrajectoryAsymmetry) -> pd.DataFrame:
+    """`res.steps` in `STEPS_CSV_COLUMNS` (receiver prior units), family and bases in display
+    form."""
+    st = res.steps.reindex(columns=STEPS_CSV_COLUMNS).copy()
+    ab = [pair_label(a, b).split("⇄") for a, b in zip(st["A"], st["B"])]
+    st["A"], st["B"] = [x[0] for x in ab], [x[1] for x in ab]
+    st["family"] = st["family"].map(family_display)
+    return st
+
+
+def _linear_step_axes(ax, ylabel: str) -> None:
+    """Linear student-step x axis, ticks every 5,000 with thousands separators; zero line."""
+    from matplotlib.ticker import FuncFormatter, MultipleLocator
+
+    ax.xaxis.set_major_locator(MultipleLocator(5000))
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.0f}"))
+    ax.set_xlim(left=0)
+    ax.set_xlabel("student step")
+    ax.set_ylabel(ylabel)
+    ax.axhline(0, color="0.5", lw=0.8)
+
+
+#: Every panel of `plot_contrast_curves_dog` shows at least this range on both sides of zero.
+DP_YFLOOR = 0.05
+
+
+def plot_contrast_curves_dog(dp: pd.DataFrame, *, fontsize: int = 9):
+    """2×2 dog figure, one panel per `DOG_CONTRAST_BLOCKS` block: the per-step-control A→B − B→A
+    contrast in Δp, from a `dp_contrast_table` frame or its CSV (`DP_COLUMNS`, display-form
+    bases), one solid line per pair labelled ``A→B``, 95% bootstrap band, filled marker p < `ALPHA`, hollow otherwise;
+    linear step axis; legend inside the axes; no suptitle."""
     import matplotlib.pyplot as plt
 
-    summ = curve_pairs(res.summary)
-    summ = summ[summ["animal"] == "dog"]
-    fams = [f for f in DOG_CONTRAST_PANELS if (summ["family"] == f).any()]
-    fig, axes = plt.subplots(1, max(1, len(fams)), figsize=(4.6 * max(1, len(fams)), 4.0),
-                             squeeze=False, layout="constrained")
+    stats = bool(dp["p_two_sided"].notna().any())
+    fig, axes = plt.subplots(2, 2, figsize=(10.0, 7.6), squeeze=False, layout="constrained")
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-    for ax, fam in zip(axes.flat, fams):
-        pairs = summ[summ["family"] == fam]
-        for k, (_, pr) in enumerate(pairs.iterrows()):
-            st = res.steps[(res.steps["family"] == fam) & (res.steps["animal"] == "dog")
-                           & (res.steps["A"] == pr["A"]) & (res.steps["B"] == pr["B"])
-                           & (res.steps["design"] == pr["design"])
-                           & res.steps["tested"]].sort_values("step")
+    for ax, (title, _) in zip(axes.flat, DOG_CONTRAST_BLOCKS):
+        blk = dp[dp["block"] == title]
+        for k, ((a, b), st) in enumerate(blk.groupby(["A", "B"], sort=False)):
+            st = st.sort_values("step")
             c = colors[k % len(colors)]
-            ax.plot(st["step"], st["contrast"], ":" if not _is_ep20(pr["design"]) else "-",
-                    color=c, lw=1.2, label=pair_label(pr["A"], pr["B"]).replace("⇄", "→"))
-            sig = st["p_two_sided"] < ALPHA
+            ax.plot(st["step"], st["contrast"], "-", color=c, lw=1.2,
+                    label=f"{a}→{b}")
             ax.fill_between(st["step"], st["contrast lo"], st["contrast hi"], color=c,
                             alpha=0.2, lw=0)
+            if not stats:
+                ax.scatter(st["step"], st["contrast"], color=c, s=10, zorder=3)
+                continue
+            sig = st["p_two_sided"] < ALPHA
             ax.scatter(st["step"][sig], st["contrast"][sig], color=c, s=18, zorder=3)
             ax.scatter(st["step"][~sig], st["contrast"][~sig], facecolors="none",
                        edgecolors=c, s=18, zorder=3)
-        _step_axes(ax, "A→B − B→A (receiver prior units)")
-        ax.set_title(f"{family_display(fam)} · dog", fontsize=fontsize + 1)
-        ax.legend(fontsize=fontsize - 2, loc="best", framealpha=0.6)
+        _linear_step_axes(ax, DP_YLABEL)
+        lo, hi = ax.get_ylim()
+        ax.set_ylim(min(lo, -DP_YFLOOR), max(hi, DP_YFLOOR))
+        ax.set_title(f"dog · {title}", fontsize=fontsize + 1)
+        if len(blk):
+            ax.legend(fontsize=fontsize - 2, loc="best", framealpha=0.6)
         ax.tick_params(labelsize=fontsize - 1)
     return fig
 
@@ -1109,6 +1509,7 @@ def plot_summary_dumbbell(res: TrajectoryAsymmetry, *, fontsize: int = 9):
     import matplotlib.pyplot as plt
 
     d = _ordered(summary_display(res))
+    stats = bool(d["last-step p"].notna().any()) if len(d) else True  # NaN = stats off
     fams = list(dict.fromkeys(d["family"]))
     sizes = [int((d["family"] == f).sum()) for f in fams]
     fig, axes = plt.subplots(len(fams), 1, figsize=(9, 0.32 * sum(sizes) + 1.2 * len(fams)),
@@ -1125,7 +1526,7 @@ def plot_summary_dumbbell(res: TrajectoryAsymmetry, *, fontsize: int = 9):
                                           24)):
                 if not np.isfinite(r[col]):
                     continue
-                sig = r[pcol] < ALPHA
+                sig = r[pcol] < ALPHA or not stats
                 ax.scatter(r[col], yi, marker=mk, s=sz, zorder=3, edgecolors=c,
                            facecolors=c if sig else "white", linewidths=1.3)
         lab = [f"{r['animal']} · {pair_label(r['A'], r['B'])}"
@@ -1137,6 +1538,12 @@ def plot_summary_dumbbell(res: TrajectoryAsymmetry, *, fontsize: int = 9):
         ax.axvline(0, color="0.5", lw=0.8)
         early = [f"{int(v):,}" if np.isfinite(v) else "none"
                  for v in sub["earliest p<.05 step"].astype(float)]
+        if not stats:
+            ax.set_title(family_display(fam), fontsize=fontsize + 1, loc="left")
+            ax.set_yticks(y)
+            ax.set_yticklabels(lab, fontsize=fontsize - 1)
+            ax.tick_params(axis="x", labelsize=fontsize - 1)
+            continue
         sec = ax.secondary_yaxis("right")
         sec.set_yticks(y)
         sec.set_yticklabels(early, fontsize=fontsize - 1)
@@ -1154,17 +1561,20 @@ def plot_summary_dumbbell(res: TrajectoryAsymmetry, *, fontsize: int = 9):
                Line2D([], [], marker="o", ls="", markerfacecolor="white",
                       markeredgecolor="0.3", label=f"hollow = p ≥ {ALPHA}"),
                Line2D([], [], ls="", label=f"grey right labels = {EP20_EARLY_NOTE}")]
+    if not stats:
+        handles = handles[:2]
     fig.legend(handles=handles, loc="lower center", ncol=2, frameon=False, fontsize=fontsize - 1,
                bbox_to_anchor=(0.5, 1.0))
-    fig.suptitle("Endpoint vs last-tested-step contrast per pair (filled = p < .05, "
-                 "endpoint-module / per-step permutation test)", fontsize=fontsize + 1, y=1.09)
+    fig.suptitle("Endpoint vs last-tested-step contrast per pair" + (
+        " (filled = p < .05, endpoint-module / per-step permutation test)" if stats else ""),
+        fontsize=fontsize + 1, y=1.09)
     fig.tight_layout()
     return fig
 
 
 #: Coverage-chart design columns, in display order (designs absent from the data are dropped).
 COVERAGE_DESIGNS = ("core56", "core30", "core35", "core30 stride-3" + TRAJECTORY_SUFFIX,
-                    "core30" + TRAJECTORY_SUFFIX)
+                    "core30" + TRAJECTORY_SUFFIX, "core35" + TRAJECTORY_SUFFIX)
 
 
 def _legible_reason(reason: str) -> str:

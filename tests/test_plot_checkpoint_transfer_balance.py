@@ -19,25 +19,25 @@ def test_balance_uses_teacher_rows_and_student_columns():
 
 def test_load_matrix_rejects_missing(tmp_path):
     path = tmp_path / "cells.csv"
-    path.write_text("lineage,teacher_step,student_step,complete_five_recipes,p_target\norig,75000,75000,true,0.1\n")
+    path.write_text("lineage,teacher_step,student_step,complete_five_recipes,delta_p\norig,75000,75000,true,0.1\n")
     with pytest.raises(ValueError, match="complete"):
         load_matrix(path)
 
 
 def write_matrix(path, *, duplicate=False, incomplete=False, nonfinite=False):
     import csv
-    fields = ["lineage", "teacher_step", "student_step", "complete_five_recipes", "p_target"]
+    fields = ["lineage", "teacher_step", "student_step", "complete_five_recipes", "delta_p"]
     rows = [{"lineage": "orig", "teacher_step": t, "student_step": u,
-             "complete_five_recipes": "true", "p_target": str(i * 100 + j)}
+             "complete_five_recipes": "true", "delta_p": str(i * 100 + j)}
             for i, t in enumerate(STEPS) for j, u in enumerate(STEPS)]
     rows += [{"lineage": "ds1", "teacher_step": 25000, "student_step": 25000,
-              "complete_five_recipes": "true", "p_target": "0.1"},
+              "complete_five_recipes": "true", "delta_p": "0.1"},
              {"lineage": "orig", "teacher_step": 25000, "student_step": 25000,
-              "complete_five_recipes": "true", "p_target": "0.1"}]
+              "complete_five_recipes": "true", "delta_p": "0.1"}]
     if incomplete:
         rows[0]["complete_five_recipes"] = "false"
     if nonfinite:
-        rows[0]["p_target"] = "nan"
+        rows[0]["delta_p"] = "nan"
     if duplicate:
         rows.append(rows[0].copy())
     with path.open("w", newline="") as stream:

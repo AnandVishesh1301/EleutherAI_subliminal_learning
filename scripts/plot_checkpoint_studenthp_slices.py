@@ -17,7 +17,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import yaml
 
+from scripts import plot_checkpoint_takeoff as takeoff
 from scripts.plot_checkpoint_entropy_transfer import select_eval
 
 STEPS = (50000,) + tuple(range(75000, 130001, 5000)) + (143000,)
@@ -56,8 +58,8 @@ SEEDS23 = (2, 3)
 # campaign was cut to this teacher (other teachers need seed 1 only).
 SEED_TEACHERS = ("ep10_lr1e-4_r64a64",)
 FIG_DIR = Path("notebooks/figures/crossckpt_partials")
-CLEAN_OUT = FIG_DIR / "slices_pooled_over_student_recipes"
-DEFAULT_OUT = FIG_DIR / "slices_pooled_over_student_recipes_legend"
+CLEAN_OUT = FIG_DIR / "slice_student"
+DEFAULT_OUT = FIG_DIR / "slice_student_legend"
 BY_HP_OUT = FIG_DIR / "slices_per_student_recipe"
 BY_TEACHER_OUT = FIG_DIR / "slices_per_teacher_recipe_sd_over_student_recipes"
 TEACHER_COLORS = ("#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e")
@@ -326,8 +328,38 @@ def collect(
     return list(rows.values()), sources
 
 
+def output_root():
+    project = Path(__file__).resolve().parents[1]
+    config = yaml.safe_load((project / "configs/paths/paths_local.yaml").read_text())
+    return Path(config["output_root"])
+
+
+def attach_controls(rows, root):
+    """Subtract the matched base-numbers control (ftseed 1, same student recipe) per run.
+
+    One control per (teacher_step, student_step, student_tag); runs without one keep
+    delta_p = None and contribute nothing downstream."""
+    cache = {}
+    for row in rows:
+        cell = (row["teacher_step"], row["student_step"], row["student_tag"])
+        if cell not in cache:
+            leaf = takeoff.control_leaf(root, "pythia-160m", cell[0], cell[1],
+                                        student_recipe=cell[2])
+            evaluation, status = select_eval(leaf, "dog")
+            evaluation = evaluation or {}
+            cache[cell] = dict(
+                p_control=evaluation.get("p_target"), control_leaf=str(leaf),
+                control_eval_path=evaluation.get("eval_path"),
+                control_eval_sha256=evaluation.get("eval_sha256"), control_status=status)
+        control = cache[cell]
+        row.update(control, delta_p=None if control["p_control"] is None
+                   else row["p_dog"] - control["p_control"])
+    return rows
+
+
 def aggregate(rows, *, fixed, varying="student"):
-    """Seed-mean per HP, equal HP mean per teacher, then mean/SD across teachers."""
+    """Seed-mean of delta_p per HP, equal HP mean per teacher, then mean/SD across
+    teachers. Runs without a control are skipped; a setting with none is NaN."""
     if varying not in ("student", "teacher"):
         raise ValueError(f"invalid varying side: {varying}")
     lookup = {}
@@ -337,7 +369,7 @@ def aggregate(rows, *, fixed, varying="student"):
             raise ValueError(f"duplicate student seed: {key}")
         if not math.isfinite(row["p_dog"]) or not 0 <= row["p_dog"] <= 1:
             raise ValueError(f"invalid probability: {key}")
-        lookup[key] = row["p_dog"]
+        lookup[key] = row["delta_p"]
     out = []
     for step in STEPS:
         t, s = (fixed, step) if varying == "student" else (step, fixed)
@@ -357,24 +389,24 @@ def aggregate(rows, *, fixed, varying="student"):
                     raise ValueError(
                         f"reference coverage: {teacher},{t},{s},{sorted(seeds)}"
                     )
-                data = list(seeds.values())
+                data = [p for p in seeds.values() if p is not None]
                 values.append(
                     {
                         "teacher_tag": teacher,
                         "student_tag": hp,
-                        "mean": float(np.mean(data)),
+                        "mean": float(np.mean(data)) if data else math.nan,
                         "student_sd": float(np.std(data, ddof=1))
                         if len(data) > 1
-                        else None,
+                        else (None if data else math.nan),
                         "n_seeds": len(data),
                         "student_seeds": sorted(seeds),
                     }
                 )
                 if hp == REFERENCE_TAG:
-                    reference_means.append(float(np.mean(data)))
+                    reference_means.append(values[-1]["mean"])
                     reference_seed_sd.append(values[-1]["student_sd"])
                 else:
-                    hpmeans.append(float(np.mean(data)))
+                    hpmeans.append(values[-1]["mean"])
             teacher_means.append(float(np.mean(hpmeans)))
             sd_student_recipes.append(float(np.std(hpmeans, ddof=1)))
         seed_sds = [
@@ -533,7 +565,7 @@ def render(
         )
         ax.set(
             xlabel=f"{varying.capitalize()} checkpoint (k steps)",
-            ylabel="p(dog), held-out test",
+            ylabel="Mean Δp(dog), held-out test",
             ylim=(0, 1),
             xticks=[50, 75, 85, 95, 105, 115, 125, 143],
         )
@@ -639,8 +671,25 @@ def render(
         path = table_prefix.with_name(table_prefix.name + f"_{name}.csv")
         write_csv(path, data)
         table_paths[str(path)] = sha256(path)
+    missing_controls = sorted(
+        {(r["teacher_step"], r["student_step"], r["student_tag"])
+         for r in rows if r.get("p_control") is None}
+    )
     provenance = {
         "created_utc": datetime.now(timezone.utc).isoformat(),
+        "quantity": "delta_p = run p(dog) minus matched base-numbers control p(dog)",
+        "controls": {
+            "source": "{output_root}/students/controls/base/ckpt/pythia-160m@step{S}/"
+            "teacher-pythia-160m@step{T}/ex10-20_prefix_n100k/{student_tag}/ftseed1 "
+            "(teacher-pythia-160m without step at T=143000)",
+            "control_seed": takeoff.CONTROL_SEED,
+            "control_recipe": "same student_tag as the run",
+            "n_runs_with_control": sum(r.get("p_control") is not None for r in rows),
+            "n_runs_missing_control": sum(r.get("p_control") is None for r in rows),
+            "missing_control_cells": [list(c) for c in missing_controls],
+            "missing_policy": "runs without a control contribute nothing; "
+            "points with no controlled run are gaps (NaN, not drawn)",
+        },
         "campaign_sha256": sources or {},
         "table_sha256": table_paths,
         "teachers": list(TEACHERS),
@@ -662,7 +711,7 @@ def render(
             {(r["teacher_step"], r["student_step"]) for r in rows}
         ),
         "aggregation": (
-            "Within each teacher: student-seed mean per HP, then equal mean over five HPs "
+            "All on delta_p. Within each teacher: student-seed mean per HP, then equal mean over five HPs "
             "-> teacher-level value; plotted curve = equal mean over five teacher-level "
             "values. Reference: per-teacher mean over student seeds 1-3, then mean over "
             "five teachers. by_hp lines: each HP's seed mean averaged over five teachers."
@@ -706,6 +755,7 @@ def render(
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path)
+    parser.add_argument("--outputs", type=Path, help="output_root (default: paths_local.yaml)")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--by-hp", action="store_true")
     mode.add_argument(
@@ -746,6 +796,7 @@ def main():
         else DEFAULT_OUT
     )
     rows, sources = collect(student_seeds=student_seeds, seed_teachers=seed_teachers)
+    rows = attach_controls(rows, args.outputs or output_root())
     render(
         rows,
         out,

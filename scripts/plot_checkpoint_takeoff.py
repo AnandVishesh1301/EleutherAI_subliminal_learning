@@ -3,7 +3,8 @@
 CPU only: verify filtered-pool content hashes against their generation manifests
 and each student's training manifest, then read saved exact test probabilities.
 Run ``uv run python -m scripts.plot_checkpoint_takeoff``. Teacher recipes receive
-equal weight after averaging available student seeds within each recipe.
+equal weight after averaging available student seeds within each recipe; the
+matched base-numbers control (ftseed 1) is subtracted from each five-recipe mean.
 """
 from __future__ import annotations
 
@@ -26,6 +27,11 @@ STEPS = tuple(range(75000, 130001, 5000)) + (143000,)
 MATRIX_STEPS = STEPS
 STUDENT_RECIPE = "ep10_lr1e-4_r8a32"
 BASENAME = "figure3"
+CONTROL_SEED = 1
+CONTROL_SOURCE = ("{root}/students/controls/base/ckpt/{base}@step{S}/teacher-{base}@step{T}/"
+                  "ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1; for orig (pythia-160m) "
+                  "at T=143000 the teacher level is the unrevisioned teacher-pythia-160m "
+                  "(final weights are tensor-identical to step143000)")
 
 
 def discover_selected_pools(root):
@@ -162,6 +168,45 @@ def aggregate_cells(recipes, expected_cells):
     return result
 
 
+def control_leaf(root, model, teacher_step, student_step, student_recipe=STUDENT_RECIPE):
+    """Matched base-numbers control leaf; orig at 143k uses the unrevisioned teacher."""
+    teacher = (model if model == "pythia-160m" and teacher_step == 143000
+               else f"{model}@step{teacher_step}")
+    return Path(root) / (f"students/controls/base/ckpt/{model}@step{student_step}/"
+                         f"teacher-{teacher}/ex10-20_prefix_n100k/{student_recipe}/"
+                         f"ftseed{CONTROL_SEED}")
+
+
+def attach_controls(root, cells):
+    """Add p_control/delta_p to each cell in place; return per-cell control provenance."""
+    models = {lineage: base for base, lineage in shared.LABELS.items() if lineage in LINEAGES}
+    controls = []
+    for cell in cells:
+        leaf = control_leaf(root, models[cell["lineage"]], cell["teacher_step"],
+                            cell["student_step"])
+        evaluation, status = shared.select_eval(leaf, "dog")
+        evaluation = evaluation or {}
+        p_control = evaluation.get("p_target")
+        cell.update(
+            p_control=p_control,
+            delta_p=(cell["p_target"] - p_control
+                     if cell["p_target"] is not None and p_control is not None else None),
+            control_status=status, control_eval_path=evaluation.get("eval_path"),
+            control_eval_sha256=evaluation.get("eval_sha256"))
+        controls.append(dict(lineage=cell["lineage"], teacher_step=cell["teacher_step"],
+                             student_step=cell["student_step"], leaf=str(leaf), status=status,
+                             eval_path=cell["control_eval_path"],
+                             eval_sha256=cell["control_eval_sha256"], p_control=p_control))
+    return controls
+
+
+def drawn_diagonal(cells, lineage):
+    """Diagonal points with a complete five-recipe mean and a matched control."""
+    return sorted((r for r in cells if r["lineage"] == lineage and r["is_diagonal"]
+                   and r["complete_five_recipes"] and r.get("delta_p") is not None),
+                  key=lambda r: r["teacher_step"])
+
+
 def student_steps_for_pool(pool):
     """Return student checkpoints collected for one discovered teacher pool."""
     students = (set(MATRIX_STEPS)
@@ -186,13 +231,14 @@ def plot(cells, output):
     names = ("Pythia-160M", "data-seed1", "data-seed2", "data-seed3", "full-seed1",
              "full-seed2", "full-seed3", "weight-seed1 (retrained)", "weight-seed2 (retrained)")
     for i, lineage in enumerate(LINEAGES):
-        data = sorted((r for r in cells if r["lineage"] == lineage and r["is_diagonal"]
-                       and r["complete_five_recipes"]), key=lambda r: r["teacher_step"])
-        left.plot([r["teacher_step"] / 1000 for r in data], [r["p_target"] for r in data],
+        data = drawn_diagonal(cells, lineage)
+        if not data:
+            continue
+        left.plot([r["teacher_step"] / 1000 for r in data], [r["delta_p"] for r in data],
                   label=names[i], color=colors(i if i < 8 else 9), marker=markers[i],
                   ms=5.0, lw=1.8, alpha=0.95, markeredgewidth=0.65, markeredgecolor="white")
     left.set(xlabel="Teacher = student pretraining checkpoint (k steps)",
-             ylabel="p(dog), held-out test", xlim=(22, 146), ylim=(0, 1),
+             ylabel="Mean Δp(dog), held-out test", xlim=(22, 146), ylim=(0, 1),
              xticks=[25, 50, 75, 100, 125, 143], yticks=np.arange(0, 1.01, 0.2))
     left.grid(alpha=0.18, lw=0.7)
     left.legend(loc="upper left", ncol=2, fontsize=8.6, columnspacing=1.0,
@@ -201,8 +247,9 @@ def plot(cells, output):
     index = {s: i for i, s in enumerate(MATRIX_STEPS)}
     for r in cells:
         if (r["lineage"] == "orig" and r["teacher_step"] in index
-                and r["student_step"] in index and r["complete_five_recipes"]):
-            matrix[index[r["teacher_step"]], index[r["student_step"]]] = r["p_target"]
+                and r["student_step"] in index and r["complete_five_recipes"]
+                and r.get("delta_p") is not None):
+            matrix[index[r["teacher_step"]], index[r["student_step"]]] = r["delta_p"]
     cmap = plt.get_cmap("Blues").copy()
     cmap.set_bad("#d9d9d9")
     im = right.imshow(matrix, vmin=0, vmax=1, cmap=cmap, aspect="equal")
@@ -221,7 +268,7 @@ def plot(cells, output):
               ylabel="Teacher pretraining checkpoint (k steps)")
     right.tick_params(labelsize=9, length=0)
     bar = fig.colorbar(im, ax=right, fraction=0.046, pad=0.035, ticks=np.arange(0, 1.01, 0.2))
-    bar.set_label("p(dog), held-out test", fontsize=10)
+    bar.set_label("Mean Δp(dog), held-out test", fontsize=10)
     fig.subplots_adjust(left=0.062, right=0.945, bottom=0.12, top=0.87, wspace=-0.02)
     for extension in ("png", "pdf"):
         fig.savefig(output.with_suffix(f".{extension}"), dpi=240, facecolor="white",
@@ -256,13 +303,17 @@ def main():
     expected.update(("orig", t, s) for t in MATRIX_STEPS for s in MATRIX_STEPS)
     recipes = aggregate_recipes(runs)
     cells = aggregate_cells(recipes, expected)
+    controls = attach_controls(root, cells)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     shared.write_csv(args.output.with_name(args.output.name + "_cells.csv"), cells)
     shared.write_csv(args.output.with_name(args.output.name + "_recipes.csv"), recipes)
     shared.write_gzip_json(args.output.with_name(args.output.name + "_provenance.json.gz"),
-                           dict(pools=pools, runs=runs))
+                           dict(pools=pools, runs=runs, controls=controls))
     plot(cells, args.output)
     counts = dict(Counter(r["join_status"] for r in runs))
+    missing_controls = sorted([r["lineage"], r["teacher_step"], r["student_step"]]
+                              for r in cells if r["p_control"] is None)
+    drawn = [lineage for lineage in LINEAGES if drawn_diagonal(cells, lineage)]
     report = dict(started_utc=started, completed_utc=shared.utc_now(), outputs_root=str(root),
                   input_cache=str(args.cache), input_cache_sha256=(hashlib.sha256(args.cache.read_bytes()).hexdigest()
                                       if args.cache.is_file() else None),
@@ -272,7 +323,15 @@ def main():
                   matrix_steps=list(MATRIX_STEPS), n_source_pools=len(pools), run_status_counts=counts,
                   scoring_counts=dict(Counter(r.get("scoring", "missing") for r in runs)),
                   n_complete_diagonal_points=sum(r["is_diagonal"] and r["complete_five_recipes"] for r in cells),
-                  aggregation="Mean available verified student seeds within teacher recipe; equal mean of exactly five canonical recipes. Missing/incomplete cells stay missing.",
+                  aggregation="Mean available verified student seeds within teacher recipe; equal mean of exactly five canonical recipes; the matched base-numbers control p(dog) is subtracted after the five-recipe mean. Missing/incomplete cells and cells without a control stay missing.",
+                  quantity="delta_p = five-recipe mean p(dog) minus matched base-numbers control p(dog) (student recipe ep10_lr1e-4_r8a32, control ftseed 1)",
+                  control_source=CONTROL_SOURCE, student_control_recipe=STUDENT_RECIPE,
+                  control_seed=CONTROL_SEED,
+                  n_cells_with_control=len(cells) - len(missing_controls),
+                  n_cells_missing_control=len(missing_controls),
+                  missing_control_cells=missing_controls,
+                  n_drawn_diagonal_points=sum(len(drawn_diagonal(cells, x)) for x in LINEAGES),
+                  drawn_lineages=drawn,
                   pool_hash_validation="Source-content SHA agrees with current pool manifest and student train manifest. Cached hash reused only when source bytes and mtime also agree.")
     args.output.with_suffix(".json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2), flush=True)

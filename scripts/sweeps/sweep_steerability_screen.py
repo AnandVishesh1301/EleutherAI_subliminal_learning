@@ -49,6 +49,7 @@ from pipelines.steerability_screen_pipeline import (
     _screen_params,
     _seed_cache_key,
     _seed_file,
+    clear_model_cache,
     run,
 )
 from subliminal_learning.config import load_yaml_extends
@@ -493,6 +494,7 @@ def main(
             n_untrained += st == "untrained"
             n_done += st == "done"
 
+    clear_model_cache()  # release the worker-process model/base-work cache
     logger.info(
         "Screen sweep complete: screened={}, done(existing)={}, not-trained={}, failed={}, "
         "total={}, claim={}",

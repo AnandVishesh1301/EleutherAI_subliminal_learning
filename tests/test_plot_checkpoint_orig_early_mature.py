@@ -1,5 +1,6 @@
 import csv
 from pathlib import Path
+import numpy as np
 import pytest
 from notebooks.figures.crossckpt_partials import plot_checkpoint_orig_early_mature as first
 from notebooks.figures.crossckpt_partials.plot_checkpoint_orig_early_mature import read_cells
@@ -77,7 +78,7 @@ def test_reads_complete_original_14x14_slice(tmp_path):
     [
         ("slices", "crossckpt_partials/slices_cell_means"),
         ("heatmap", "crossckpt_partials/heatmap_2x2_75k125k"),
-        ("multi-slices", "crossckpt_partials/slices_pooled_over_teacher_recipes"),
+        ("multi-slices", "crossckpt_partials/slice_teacher"),
     ],
 )
 def test_views_dispatch_to_distinct_default_outputs(
@@ -89,6 +90,10 @@ def test_views_dispatch_to_distinct_default_outputs(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(first, "read_slice_cells", lambda path: "slice-data")
     monkeypatch.setattr(first, "read_cells", lambda path: "heatmap-data")
+    monkeypatch.setattr(first, "output_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        first, "collect_multi_slices", lambda root, out: ("slice-data", "recipes", "source")
+    )
     monkeypatch.setattr(
         first,
         "render_slices",
@@ -108,34 +113,48 @@ def test_views_dispatch_to_distinct_default_outputs(
     assert calls == [(view, data, Path("notebooks/figures") / basename)]
 
 
-def test_multi_slices_exports_252_rows(tmp_path):
-    from notebooks.figures.crossckpt_partials.plot_checkpoint_orig_early_mature import read_slice_cells, render_multi_slices
-    import csv
-    steps = first.STEPS
-    cells_path, recipes_path = tmp_path / "cells.csv", tmp_path / "recipes.csv"
-    fields = ["lineage", "teacher_step", "student_step", "complete_five_recipes", "p_target", "n_teacher_recipes", "n_student_runs"]
-    recipes = ["ep10_lr1e-4_r64a64", "ep20_lr1e-4_r16a32", "ep20_lr1e-4_r8a16", "ep2_lr5e-4_r32a64", "ep7_lr5e-4_r8a8"]
-    with cells_path.open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
-        w.writeheader()
-        for i,t in enumerate(steps):
-            for j,u in enumerate(steps):
-                w.writerow(dict(lineage="orig", teacher_step=t, student_step=u, complete_five_recipes="True", p_target=str((i+j)/30), n_teacher_recipes=5, n_student_runs=15))
-    with recipes_path.open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["lineage","teacher_step","student_step","teacher_recipe","p_target"])
-        w.writeheader()
-        for i,t in enumerate(steps):
-            for j,u in enumerate(steps):
-                for recipe in recipes:
-                    w.writerow(dict(lineage="orig", teacher_step=t, student_step=u, teacher_recipe=recipe, p_target=str((i+j)/30)))
-    rows = read_slice_cells(cells_path)
-    out = tmp_path / "multi"
-    render_multi_slices(rows, out, cells_path, recipes_path)
+def _slice_inputs(steps, control=lambda t, u: 0.01):
+    recipes = sorted(first.CANONICAL_RECIPES)
+    cells, rows = [], []
+    for i, t in enumerate(steps):
+        for j, u in enumerate(steps):
+            p = (i + j) / 30
+            cells.append(dict(lineage="orig", teacher_step=t, student_step=u,
+                              p_target=p, p_control=control(t, u), control_status="verified",
+                              n_teacher_recipes=5, n_student_runs=15))
+            rows += [dict(lineage="orig", teacher_step=t, student_step=u,
+                          teacher_recipe=r, p_target=p) for r in recipes]
+    return cells, rows
+
+
+def test_multi_slices_exports_252_rows_as_delta_with_control_gaps(tmp_path):
+    import math
+
+    def control(t, u):
+        return None if 50000 in (t, u) and t != u else 0.01
+
+    cells, recipes = _slice_inputs(first.STEPS, control)
+    figs = []
+    real_close = first.plt.close
+    first.plt.close = lambda *a: None
+    try:
+        first.render_multi_slices(cells, tmp_path / "multi", {"src": 1}, recipes)
+        figs.append(first.plt.gcf())
+    finally:
+        first.plt.close = real_close
+    assert {ax.get_ylabel() for ax in figs[0].axes} == {"Mean Δp(dog), held-out test"}
     exported = list(csv.DictReader((tmp_path / "multi_cells.csv").open()))
     assert len(exported) == 252
     assert {r["fixed_checkpoint"] for r in exported if r["panel"] in {"a", "c"}} == {"50000", "75000", "80000", "85000", "90000"}
     assert {r["fixed_checkpoint"] for r in exported if r["panel"] in {"b", "d"}} == {"110000", "115000", "120000", "125000"}
     assert all(r["n_student_runs"] == "15" for r in exported)
+    gaps = {(r["teacher_checkpoint"], r["student_checkpoint"])
+            for r in exported if math.isnan(float(r["delta_p"]))}
+    assert ("50000", "75000") in gaps and ("75000", "50000") in gaps
+    assert all("50000" in g for g in gaps)
+    row = next(r for r in exported if r["teacher_checkpoint"] == "75000"
+               and r["student_checkpoint"] == "80000")
+    assert float(row["delta_p"]) == pytest.approx(float(row["p_dog"]) - 0.01)
 
 
 @pytest.fixture
@@ -154,26 +173,20 @@ def teacher_recipe_fixture():
             sorted(first.CANONICAL_RECIPES), values, [1, 1, 1, 1, 3]
         )
     ]
-    cells = [dict(teacher_step=75000, student_step=125000, p_target=0.3)]
+    cells = [dict(teacher_step=75000, student_step=125000, p_target=0.3, p_control=0.05)]
     return rows, cells
-
-
-def write_recipes(path, rows):
-    with path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 def test_recipe_sd_equally_weights_recipes_after_seed_averaging(
     tmp_path, teacher_recipe_fixture
 ):
     rows, cells = teacher_recipe_fixture
-    path = tmp_path / "recipes.csv"
-    write_recipes(path, rows)
-    mean, sd = first.read_recipe_stats(path, cells)[75000, 125000]
-    assert mean == pytest.approx(0.3)
+    mean, sd = first.recipe_stats(rows, cells)[75000, 125000]
+    assert mean == pytest.approx(0.25)
     assert sd == pytest.approx(0.025**0.5)
+    cells[0]["p_control"] = None
+    mean, sd = first.recipe_stats(rows, cells)[75000, 125000]
+    assert np.isnan(mean) and np.isnan(sd)
 
 
 @pytest.mark.parametrize(
@@ -194,7 +207,5 @@ def test_recipe_stats_reject_invalid_inputs(tmp_path, teacher_recipe_fixture, pr
         rows[0]["p_target"] = float("nan")
     else:
         rows[0]["p_target"] = 1.1
-    path = tmp_path / "recipes.csv"
-    write_recipes(path, rows)
     with pytest.raises(ValueError):
-        first.read_recipe_stats(path, cells)
+        first.recipe_stats(rows, cells)

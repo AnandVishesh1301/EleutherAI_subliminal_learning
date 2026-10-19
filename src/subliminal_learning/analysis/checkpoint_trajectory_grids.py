@@ -32,11 +32,29 @@ STOP_STUDENT_TAG: str = "ep10_lr1e-4_r8a32_stop6250"
 ENDPOINT_STUDENT_TAG: str = "ep10_lr1e-4_r8a32"
 #: Lineage -> student/teacher base directory name (fs2 lives under ``pythia-160m-seed2``).
 LINEAGE_DIRS: dict[str, str] = {"orig": "pythia-160m", "fs2": "pythia-160m-seed2"}
+#: Diagonal-only lineages (same-checkpoint cells only): key -> (base directory name, checkpoints).
+DIAGONAL_LINEAGES: dict[str, tuple[str, list[int]]] = {
+    "pr1234": ("pythia-160m-pilerepro-seed1234",
+               [25000, 50000, 75000, 80000, 85000, 90000, 95000, 100000, 105000, 110000, 115000,
+                120000, 125000, 130000, 143000]),
+}
+#: Lineage key -> display name in figures and tables (keys not listed display as themselves).
+LINEAGE_DISPLAY: dict[str, str] = {"pr1234": "Modern1234"}
 _STEPS_PER_EPOCH = 1250
 
 
+def _lineage_dir(lineage: str) -> str:
+    """Base directory name of a grid (``LINEAGE_DIRS``) or diagonal-only (``DIAGONAL_LINEAGES``) lineage."""
+    return LINEAGE_DIRS[lineage] if lineage in LINEAGE_DIRS else DIAGONAL_LINEAGES[lineage][0]
+
+
+def _lineage_steps(lineage: str) -> list[int]:
+    """Checkpoint axis of a lineage (``CKPT_STEPS`` for grid lineages)."""
+    return list(DIAGONAL_LINEAGES[lineage][1]) if lineage in DIAGONAL_LINEAGES else list(CKPT_STEPS)
+
+
 def _leaf(output_root: Path, animal: str, lineage: str, t: int, s: int, tag: str) -> Path:
-    d = LINEAGE_DIRS[lineage]
+    d = _lineage_dir(lineage)
     return (Path(output_root) / "students" / animal / "ckpt" / f"{d}@step{s}"
             / f"teacher-{d}@step{t}" / f"{tag}_tseed1" / DATASET_DIR)
 
@@ -78,9 +96,9 @@ def load_trajectory_grid_runs(
     Args:
         output_root: Outputs tree root.
         animal: Target animal.
-        lineage: ``orig`` or ``fs2`` (see ``LINEAGE_DIRS``).
+        lineage: ``orig`` or ``fs2`` (see ``LINEAGE_DIRS``) or a ``DIAGONAL_LINEAGES`` key.
         teacher_tags: Teacher recipes (default ``CKPT_TEACHER_TAGS``).
-        steps: Base checkpoint steps (default ``CKPT_STEPS``).
+        steps: Base checkpoint steps (default the lineage's axis, ``CKPT_STEPS`` for grids).
         ftseeds: Student finetuning seeds to read.
 
     Returns:
@@ -89,7 +107,7 @@ def load_trajectory_grid_runs(
         counts of ``coverage``.
     """
     tags = list(teacher_tags or CKPT_TEACHER_TAGS)
-    steps = list(steps or CKPT_STEPS)
+    steps = list(steps or _lineage_steps(lineage))
     rows: list[dict] = []
     expected = found = endpoints = short = 0
     for t in steps:
@@ -298,6 +316,187 @@ def ratio_table(role_by_lineage: dict[str, pd.DataFrame]) -> pd.DataFrame:
                                          sort=False))
 
 
+def diagonal_means(grids: dict[int, np.ndarray], ckpt_steps: list[int] | None = None) -> pd.DataFrame:
+    """Per saved step and checkpoint, the same-checkpoint (diagonal, teacher = student) value.
+
+    Args:
+        grids: ``step_grids`` output.
+        ckpt_steps: Grid axis (default ``CKPT_STEPS``).
+
+    Returns:
+        Long frame ``step, ckpt, p`` (ckpt in k steps; NaN where the diagonal cell is empty).
+    """
+    ck = list(ckpt_steps or CKPT_STEPS)
+    rows = [dict(step=st, ckpt=c // 1000, p=M[k, k]) for st, M in grids.items() for k, c in enumerate(ck)]
+    return pd.DataFrame(rows)
+
+
+def _diag_control_dirs(output_root: Path | str, lineage: str, s: int) -> tuple[list[Path], Path]:
+    """Base-control student directories of the same-checkpoint cell ``s → s`` of one lineage.
+
+    Returns ``([stop-6250 dir, plain dir], endpoint dir)``, each holding ``ftseed{k}``. orig reuses
+    ``control_cell`` / ``_control_traj_fallback_cell`` (143k: points at
+    ``ckpt/pythia-160m@step143000/teacher-pythia-160m``, endpoint at the unrevisioned
+    ``controls/base/pythia-160m``); other lineages use ``controls/base/ckpt/{d}@step{s}/teacher-{d}@step{s}``.
+    """
+    if lineage == "orig":
+        end = control_cell(output_root, s, s, ENDPOINT_STUDENT_TAG)
+        return [control_cell(output_root, s, s, STOP_STUDENT_TAG),
+                _control_traj_fallback_cell(output_root, s, s)], end
+    d = _lineage_dir(lineage)
+    cell = (Path(output_root) / "students/controls/base/ckpt" / f"{d}@step{s}" / f"teacher-{d}@step{s}"
+            / DATASET_DIR)
+    return [cell / STOP_STUDENT_TAG, cell / ENDPOINT_STUDENT_TAG], cell / ENDPOINT_STUDENT_TAG
+
+
+def load_diagonal_controls(
+    output_root: Path | str,
+    lineage: str,
+    *,
+    ckpt_steps: list[int] | None = None,
+    ftseeds: tuple[int, ...] = (1,),
+    animal: str = "dog",
+) -> pd.DataFrame:
+    """Per saved step, test p_target of the base-pool control on each same-checkpoint cell.
+
+    The control distils untuned base@s's numbers into base@s (student ``ep10_lr1e-4_r8a32``).
+    Points 625..6250 come from the stop-6250 leaf's ``pref_traj.json``, else the plain leaf's;
+    the 12,500 endpoint from the plain leaf's ``eval/{animal}/preference_eval.json`` (or
+    ``pref_endpoint10.json``), else its trajectory point 12500.
+
+    Args:
+        output_root: Outputs tree root.
+        lineage: Key of ``LINEAGE_DIRS`` or ``DIAGONAL_LINEAGES``.
+        ckpt_steps: Checkpoints (default the lineage's axis).
+        ftseeds: Control ftseeds, averaged per cell.
+        animal: Target animal.
+
+    Returns:
+        Long frame ``step, ckpt, c`` (ckpt in k steps; NaN when missing), with
+        ``attrs["coverage"] = {"expected", "found"}`` (found = cells with all 7 points).
+    """
+    ck = list(ckpt_steps or _lineage_steps(lineage))
+    rows: list[dict] = []
+    expected = found = 0
+    for s in ck:
+        traj_dirs, end = _diag_control_dirs(output_root, lineage, s)
+        vals: dict[int, list[float]] = {st: [] for st in ALL_SAVED_STEPS}
+        for fs in ftseeds:
+            expected += 1
+            doc = next((d for d in (_read_json(t / f"ftseed{fs}" / "eval" / "pref_traj.json")
+                                    for t in traj_dirs) if d), None)
+            pts = _traj_points(doc, animal) if doc else {}
+            pe = _read_sall_endpoint(end / f"ftseed{fs}", animal)
+            if pe is not None:
+                pts[ENDPOINT_STEP] = pe
+            found += all(st in pts for st in ALL_SAVED_STEPS)
+            for st in ALL_SAVED_STEPS:
+                if st in pts:
+                    vals[st].append(pts[st])
+        for st in ALL_SAVED_STEPS:
+            rows.append(dict(step=st, ckpt=s // 1000,
+                             c=float(np.mean(vals[st])) if vals[st] else np.nan))
+    out = pd.DataFrame(rows, columns=["step", "ckpt", "c"])
+    out.attrs["coverage"] = dict(expected=expected, found=found)
+    return out
+
+
+def subtract_diagonal_controls(diag: pd.DataFrame, controls: pd.DataFrame) -> pd.DataFrame:
+    """Join controls onto ``diagonal_means`` output: ``step, ckpt, p, c, dp`` with dp = p − c.
+
+    Args:
+        diag: ``diagonal_means`` output.
+        controls: ``load_diagonal_controls`` output.
+
+    Returns:
+        The joined frame (dp NaN where either side is missing).
+    """
+    out = diag.merge(controls[["step", "ckpt", "c"]], on=["step", "ckpt"], how="left")
+    out["dp"] = out.p - out.c
+    return out
+
+
+def load_diagonal_lineage(output_root: Path | str, lineage: str, animal: str = "dog") -> pd.DataFrame:
+    """Control-subtracted same-checkpoint readout of one lineage on its own checkpoint axis.
+
+    Args:
+        output_root: Outputs tree root.
+        lineage: Key of ``LINEAGE_DIRS`` or ``DIAGONAL_LINEAGES``.
+        animal: Target animal.
+
+    Returns:
+        ``subtract_diagonal_controls`` frame ``step, ckpt, p, c, dp`` with ``attrs["coverage"]`` =
+        ``{"leaves", "expected", "endpoints", "controls", "controls_expected"}`` (diagonal
+        trajectory leaves found / expected recipes × checkpoints, endpoints found, controls).
+    """
+    ck = _lineage_steps(lineage)
+    tags = list(CKPT_TEACHER_TAGS)
+    runs = load_trajectory_grid_runs(output_root, animal, lineage,
+                                     steps=ck if lineage in DIAGONAL_LINEAGES else None)
+    diag = runs[runs.t == runs.s]
+    ctrl = load_diagonal_controls(output_root, lineage, ckpt_steps=ck, animal=animal)
+    out = subtract_diagonal_controls(diagonal_means(step_grids(diag, ckpt_steps=ck), ck), ctrl)
+    out.attrs["coverage"] = dict(
+        leaves=len(diag[diag.step != ENDPOINT_STEP].groupby(["s", "tag", "ftseed"])),
+        expected=len(ck) * len(tags), endpoints=int((diag.step == ENDPOINT_STEP).sum()),
+        controls=ctrl.attrs["coverage"]["found"], controls_expected=ctrl.attrs["coverage"]["expected"])
+    return out
+
+
+def plot_diagonal_trajectories(diag_by_lineage: dict[str, pd.DataFrame],
+                               value: str | None = None) -> plt.Figure:
+    """Per lineage, same-checkpoint transfer per checkpoint, one line per saved student step.
+
+    Args:
+        diag_by_lineage: ``{lineage: diagonal_means(...)}`` or ``subtract_diagonal_controls(...)``.
+        value: Column to plot (default ``dp`` when present, else ``p``).
+
+    Returns:
+        The figure (one panel per lineage side by side, shared y, x = checkpoint k steps, legend
+        inside the first panel).
+    """
+    lins = list(diag_by_lineage)
+    first = next(iter(diag_by_lineage.values()))
+    value = value or ("dp" if "dp" in first else "p")
+    fig, axes = plt.subplots(1, len(lins), figsize=(6.5 * len(lins), 4.8), sharey=True,
+                             squeeze=False, constrained_layout=True)
+    steps = sorted(first.step.unique())
+    cmap = plt.get_cmap("viridis")
+    cols = {st: cmap(0.05 + 0.85 * i / max(len(steps) - 1, 1)) for i, st in enumerate(steps)}
+    for ax, lin in zip(axes[0], lins):
+        df = diag_by_lineage[lin]
+        cks = sorted(df.ckpt.unique())
+        for st in steps:
+            d = df[df.step == st].sort_values("ckpt")
+            ax.plot(d.ckpt, d[value], "o-", ms=3.5, color=cols[st], lw=2.4 if st == 6250 else 1.5,
+                    label=f"step {st:,}")
+        ax.set_xticks(cks, [str(c) for c in cks], fontsize=8 if len(cks) > 13 else 9)
+        ax.set_title(f"{LINEAGE_DISPLAY.get(lin, lin)} — same checkpoint (teacher = student)",
+                     fontsize=11)
+        ax.set_xlabel("checkpoint (k steps)", fontsize=10)
+        ax.grid(alpha=0.3)
+    axes[0, 0].set_ylabel("Mean Δp(dog)" if value == "dp"
+                          else "test p_dog (recipe mean), same checkpoint", fontsize=10)
+    axes[0, 0].legend(loc="upper left", fontsize=10, title="optimizer step", title_fontsize=10)
+    return fig
+
+
+def diagonal_table(diag_by_lineage: dict[str, pd.DataFrame], value: str | None = None) -> pd.DataFrame:
+    """Diagonal value per (lineage, checkpoint k) × saved step.
+
+    Args:
+        diag_by_lineage: ``{lineage: diagonal_means(...)}`` or ``subtract_diagonal_controls(...)``.
+        value: Column to tabulate (default ``dp`` when present, else ``p``).
+
+    Returns:
+        Wide frame indexed by ``(lineage display name, ckpt)``, columns = saved step.
+    """
+    value = value or ("dp" if "dp" in next(iter(diag_by_lineage.values())) else "p")
+    parts = [df.assign(lineage=LINEAGE_DISPLAY.get(lin, lin)) for lin, df in diag_by_lineage.items()]
+    return pd.concat(parts).pivot_table(index=["lineage", "ckpt"], columns="step", values=value,
+                                        sort=False, dropna=False)
+
+
 # --------------------------------------------------------------------------------------
 # S_all (synthetic-number) trajectories on the 8×8 resampling-cross grid
 # --------------------------------------------------------------------------------------
@@ -373,7 +572,9 @@ def load_sall_trajectory_runs(
                 end = sall_cell(output_root, t, s, tag, ENDPOINT_STUDENT_TAG, animal)
                 for fs in ftseeds:
                     expected += 1
-                    doc = _read_json(stop / f"ftseed{fs}" / "eval" / "pref_traj.json")
+                    doc = (_read_json(stop / f"ftseed{fs}" / "eval" / "pref_traj.json")
+                       or _read_json(_control_traj_fallback_cell(output_root, t, s)
+                                     / f"ftseed{fs}" / "eval" / "pref_traj.json"))
                     pts = _traj_points(doc, animal) if doc else {}
                     found += bool(pts)
                     short += bool(pts) and len(pts) < len(TRAJ_STEPS)
@@ -498,3 +699,117 @@ def plot_role_trajectories(role_by_arm: dict[str, pd.DataFrame]) -> plt.Figure:
     h, lab = axes.flat[0].get_legend_handles_labels()
     fig.legend(h, lab, loc="outside upper center", ncol=len(h), fontsize=11, frameon=False)
     return fig
+
+
+def control_cell(output_root: Path | str, t: int, s: int, student_tag: str,
+                 animal: str = "dog") -> Path:
+    """Base-control student directory (holding ``ftseed{k}``) of one 8×8 cell, via
+    ``resampling_leaf``'s control rule (``teacher-pythia-160m`` for 143k; the 143k diagonal is
+    ``controls/base/pythia-160m/teacher-pythia-160m``)."""
+    from subliminal_learning.analysis.checkpoint_cross_readouts import resampling_leaf
+
+    return resampling_leaf(Path(output_root), "C", animal, t, s, 1).parents[4] / student_tag
+
+
+def _control_traj_fallback_cell(output_root: Path | str, t: int, s: int) -> Path:
+    """Plain ``ENDPOINT_STUDENT_TAG`` control directory at the checkpoint-style path
+    ``controls/base/ckpt/{_base(s)}/{teacher dir}``, also for the 143k diagonal: where the cb13
+    campaign wrote the saves of every control it trained fresh (e.g. 143k→143k)."""
+    from subliminal_learning.analysis.checkpoint_cross_readouts import FINAL_STEP, _base
+
+    tdir = "teacher-pythia-160m" if t == FINAL_STEP else f"teacher-{_base(t)}"
+    return (Path(output_root) / "students/controls/base/ckpt" / _base(s) / tdir / DATASET_DIR
+            / ENDPOINT_STUDENT_TAG)
+
+
+def load_control_trajectory_runs(
+    output_root: Path | str,
+    *,
+    steps: list[int] | None = None,
+    ftseeds: tuple[int, ...] = (1,),
+    animal: str = "dog",
+) -> pd.DataFrame:
+    """Per-saved-step test p_target of the base-pool controls of the 8×8 resampling grid.
+
+    Same layout as ``load_sall_trajectory_runs`` with tag ``base``: stop-6250 trajectory points
+    plus the ep10 endpoint. Trajectory points (625..6250) come from the stop-6250 leaf's
+    ``pref_traj.json`` when present, else from the plain checkpoint-path leaf
+    (``_control_traj_fallback_cell``; the 143k diagonal's points live only there). The 12,500
+    endpoint always comes from ``control_cell(..., ENDPOINT_STUDENT_TAG)`` (for the 143k diagonal
+    the unrevisioned ``controls/base/pythia-160m`` leaf). A missing point is NaN.
+    """
+    from subliminal_learning.analysis.checkpoint_cross_readouts import RESAMPLING_STEPS
+
+    steps = list(steps or RESAMPLING_STEPS)
+    rows: list[dict] = []
+    expected = found = endpoints = short = 0
+    for t in steps:
+        for s in steps:
+            stop = control_cell(output_root, t, s, STOP_STUDENT_TAG, animal)
+            end = control_cell(output_root, t, s, ENDPOINT_STUDENT_TAG, animal)
+            for fs in ftseeds:
+                expected += 1
+                doc = (_read_json(stop / f"ftseed{fs}" / "eval" / "pref_traj.json")
+                       or _read_json(_control_traj_fallback_cell(output_root, t, s)
+                                     / f"ftseed{fs}" / "eval" / "pref_traj.json"))
+                pts = _traj_points(doc, animal) if doc else {}
+                found += bool(pts)
+                short += bool(pts) and len(pts) < len(TRAJ_STEPS)
+                pe = _read_sall_endpoint(end / f"ftseed{fs}", animal)
+                endpoints += pe is not None
+                pts[ENDPOINT_STEP] = np.nan if pe is None else pe
+                for st in ALL_SAVED_STEPS:
+                    rows.append(dict(t=t, s=s, tag="base", ftseed=fs, step=st,
+                                     p=pts.get(st, np.nan), kl=np.nan))
+    runs = pd.DataFrame(rows, columns=["t", "s", "tag", "ftseed", "step", "p", "kl"])
+    runs.attrs["coverage"] = dict(lineage="C", expected=expected, found=found,
+                                  endpoints=endpoints, short=short)
+    return runs
+
+
+def sall_excess_table(sall_runs: pd.DataFrame, r_runs: pd.DataFrame, c_runs: pd.DataFrame,
+                      ckpt_steps: list[int], steps: list[int] | None = None) -> pd.DataFrame:
+    """Per saved step, control-subtracted excess: ``S_all - C(s,s)`` and ``R - C(t->s)``.
+
+    Reports the all-cell and diagonal mean excess per arm, their ratio, and the masked rank-1 R²
+    of each excess grid. Cells whose control is missing at a step are NaN and left out.
+
+    Args:
+        sall_runs: ``load_sall_trajectory_runs`` output (recipe mean of all ftseeds).
+        r_runs: ``load_trajectory_grid_runs`` output (ftseed 1).
+        c_runs: ``load_control_trajectory_runs`` output (ftseed 1).
+        ckpt_steps: Grid axis.
+        steps: Saved steps (default ``ALL_SAVED_STEPS``).
+
+    Returns:
+        Frame indexed by ``step`` with (group, quantity) MultiIndex columns.
+    """
+    from subliminal_learning.analysis.checkpoint_grid_factorization import _masked_r2, fit_rank1
+
+    steps = list(steps or ALL_SAVED_STEPS)
+    gs, gr = step_grids(sall_runs, steps, ckpt_steps), step_grids(r_runs, steps, ckpt_steps)
+    gc = step_grids(c_runs, steps, ckpt_steps)
+    eye = np.eye(len(ckpt_steps), dtype=bool)
+    rows = {}
+    for st in steps:
+        C = gc[st]
+        ex = {"S_all": gs[st] - np.diag(C)[None, :], "R": gr[st] - C}
+        both = ~(np.isnan(ex["S_all"]) | np.isnan(ex["R"]))
+        row = {}
+        for name, m in (("all cells", both), ("diagonal (i = j)", both & eye)):
+            s, r = ex["S_all"][m].mean(), ex["R"][m].mean()
+            row |= {(name, "S_all − C(s,s)"): s, (name, "R − C(t→s)"): r, (name, "S_all÷R"): s / r}
+        row[("all cells", "cells")] = int(both.sum())
+        # masked rank-1 on the rows/columns with data (S_all at a step drops the student column
+        # whose C(s,s) is missing, i.e. 143k before the endpoint)
+        ri, ci = both.any(1), both.any(0)
+        m = both[np.ix_(ri, ci)]
+        for arm, M in ex.items():
+            sub = M[np.ix_(ri, ci)]
+            a, b = fit_rank1(np.where(m, sub, 0.0), mask=m)
+            row[("rank-1 R² of excess", arm)] = _masked_r2(sub, np.outer(a, b), m)
+        rows[st] = row
+    out = pd.DataFrame.from_dict(rows, orient="index")
+    out.columns = pd.MultiIndex.from_tuples(out.columns)
+    out.index.name = "step"
+    return out

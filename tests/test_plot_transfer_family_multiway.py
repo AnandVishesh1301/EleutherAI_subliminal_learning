@@ -1,4 +1,4 @@
-"""Values, uncertainty marks and panel arrangement of the complete-grid figures."""
+"""Values, uncertainty marks and layout of the complete-grid figures."""
 
 from pathlib import Path
 
@@ -57,6 +57,16 @@ def verticals(ax):
     ]
 
 
+TOP_ROW_FIGURES = [
+    f"{stem}.{ext}"
+    for stem in [
+        "figure2",
+        "figure2_olmo",
+    ]
+    for ext in ["png", "pdf", "svg"]
+]
+
+
 def test_generate_correct_values_intervals_layout_and_preservation(
     tmp_path, monkeypatch
 ):
@@ -77,7 +87,7 @@ def test_generate_correct_values_intervals_layout_and_preservation(
         return real(h, **kwargs)
 
     monkeypatch.setattr(tfp, "multiway_bootstrap", tracking)
-    table = plot.generate(frame, ctx, tmp_path, n_bootstrap=25, seed=9)
+    table = plot.generate_top_row(frame, ctx, tmp_path, n_bootstrap=25, seed=9)
     assert len(calls) == 34 and len(table) == 34
     assert (
         table.method.eq("multiway").all()
@@ -85,40 +95,44 @@ def test_generate_correct_values_intervals_layout_and_preservation(
     )
     assert not table.collapse_filter.any() and table.n_bootstrap.eq(25).all()
     assert table.max_lower.isna().all() and table.max_upper.isna().all()
-    assert previous.read_bytes() == b"old" and len(saved) == 9
+    assert previous.read_bytes() == b"old"
+    assert sorted(saved) == sorted(TOP_ROW_FIGURES)
+    assert not any("transfer_family_complete_multiway" in name for name in saved)
+    assert "figure2_statistics.png" not in saved
     valid = table[table.n_pairs.gt(0)]
     np.testing.assert_allclose(valid.win, 0.75)
     np.testing.assert_allclose(valid["median"], 0.45)
     missing = table[table.n_pairs.eq(0)]
     assert len(missing) == 1 and missing[plot.STATS + ["win"]].isna().all().all()
-    fig = saved["transfer_family_complete_multiway_combined.png"]
-    assert len(fig.axes) == 4
-    win, quantile, size, olmo = fig.axes
-    assert [len(a.patches) for a in fig.axes] == [25, 16, 6, 2]
-    assert [len(verticals(a)) for a in fig.axes] == [25, 12, 6, 2]
-    assert [t.get_text() for t in quantile.get_xticklabels()] == plot.STAT_LABELS
-    assert [
-        t.get_text() for t in quantile.get_legend().get_texts()
-    ] == plot.FAMILY_LABELS
+    fig = saved["figure2.png"]
+    win, quantile = fig.axes
+    assert len(win.patches) == 20 and len(verticals(win)) == 20
     assert [t.get_text() for t in win.get_legend().get_texts()] == [
         "pooled",
-        *tfp.DEFAULT_ANIMALS,
+        "cat",
+        "dog",
+        "lion",
+        "pig",
     ]
-    assert any("No complete" in t.get_text() for t in olmo.texts)
-    assert all(s[0, 0] < 2.5 for s in verticals(quantile))
     np.testing.assert_allclose([p.get_height() for p in win.patches], 0.75)
-    assert size.get_position().y0 == olmo.get_position().y0
     assert quantile.get_position().x0 > win.get_position().x0
-    stand = saved["transfer_family_complete_multiway_win.png"]
-    assert len(stand.axes) == 3
-    assert stand.axes[0].get_position().width > stand.axes[1].get_position().width * 1.9
+    assert [
+        t.get_text() for t in quantile.get_legend().get_texts()
+    ] == plot.STAT_LABELS
     assert (tmp_path / "complete_multiway_summary.csv").exists()
+    # Render-only redraws the same two figures from the saved summary.
+    saved.clear()
+    plot.render_top_row(tmp_path)
+    assert sorted(saved) == sorted(TOP_ROW_FIGURES)
+    plot.plt.close("all")
 
 
 @pytest.mark.parametrize("all_arms", [False, True])
 def test_cli_records_complete_cohort_and_uses_new_names(
     tmp_path, monkeypatch, all_arms
 ):
+    import json
+
     from subliminal_learning.analysis import transfer_family_complete as complete
 
     frame, ctx = fixture()
@@ -131,9 +145,11 @@ def test_cli_records_complete_cohort_and_uses_new_names(
         return frame, ctx, records, frame.iloc[:0].assign(exclusion_reason=""), records
 
     monkeypatch.setattr(complete, "load_complete_pairs", load)
-    calls = []
+    saved = []
     monkeypatch.setattr(
-        plot, "generate", lambda *args, **kwargs: calls.append((args, kwargs))
+        matplotlib.figure.Figure,
+        "savefig",
+        lambda f, p, **kw: saved.append(Path(p)),
     )
     other_calls = []
     monkeypatch.setattr(
@@ -141,6 +157,7 @@ def test_cli_records_complete_cohort_and_uses_new_names(
         "generate_all_arms",
         lambda *args, **kwargs: other_calls.append((args, kwargs)),
     )
+    monkeypatch.setattr(plot, "archive_all_arms_originals", lambda *a: None)
     manifest_paths = [
         tmp_path / p for p in complete.GRID_PATHS.values()
     ] + registry._registry_paths(tmp_path)
@@ -151,18 +168,24 @@ def test_cli_records_complete_cohort_and_uses_new_names(
     for path in manifest_paths:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{}")
-    out = plot.DEFAULT_OUT if all_arms else tmp_path / "multiway"
+    out = plot.DEFAULT_OUT if all_arms else tmp_path / "top_row"
     plot.main(out_dir=out, n_bootstrap=7, seed=5, all_arms=all_arms)
-    assert load_calls == (
-        [dict(include_modern_reproduction=True, include_olmo_same_model=True)]
+    assert load_calls == [
+        dict(include_modern_reproduction=True, include_olmo_same_model=True)
         if all_arms
-        else [{}]
-    )
-    selected, unused = (other_calls, calls) if all_arms else (calls, other_calls)
-    assert len(selected) == 1 and selected[0][1] == dict(n_bootstrap=7, seed=5)
+        else dict(include_olmo_same_model=True)
+    ]
+    written = tmp_path / plot.ALL_ARMS_OUT if all_arms else out
     if all_arms:
-        assert selected[0][0][2] == tmp_path / plot.ALL_ARMS_OUT
-    assert not unused
+        assert len(other_calls) == 1
+        assert other_calls[0][1] == dict(n_bootstrap=7, seed=5)
+        assert other_calls[0][0][2] == written and not saved
+    else:
+        assert not other_calls
+        assert sorted(p.name for p in saved) == sorted(TOP_ROW_FIGURES)
+        assert all(p.parent == out for p in saved)
+        summary = pd.read_csv(out / "complete_multiway_summary.csv")
+        assert summary.n_bootstrap.eq(7).all()
     for name in [
         "complete_blocks.csv",
         "complete_cohort_exclusions.csv",
@@ -171,7 +194,13 @@ def test_cli_records_complete_cohort_and_uses_new_names(
         "complete_cohort_counts.csv",
         "complete_snapshot.json",
     ]:
-        assert (out / name).exists()
+        assert (written / name).exists()
+    snapshot = json.loads((written / "complete_snapshot.json").read_text())
+    assert snapshot["include_olmo_same_model"] is True
+    assert snapshot["include_modern_reproduction"] is all_arms
+    assert all(p in snapshot["manifests"] for p in plot.OLMO_SAME_MANIFESTS)
+    assert not any("win" in p.name or "combined" in p.name for p in saved)
+    plot.plt.close("all")
 
 
 def test_all_arms_quantiles_cover_every_relation_and_missing_data(
@@ -185,7 +214,7 @@ def test_all_arms_quantiles_cover_every_relation_and_missing_data(
     )
     frame, ctx = fixture()
     table = plot.generate_all_arms(frame, ctx, tmp_path, n_bootstrap=25, seed=3)
-    overview = saved["transfer_family_multiway_raw_percentiles.png"]
+    overview = saved["raw_percentiles.png"]
     q = plot._all_arms_overview_rows(table, ctx)
     assert list(q.index.get_level_values("relation")) == list(
         plot._overview_context(ctx).relations
@@ -204,29 +233,9 @@ def test_all_arms_quantiles_cover_every_relation_and_missing_data(
         [seg[:, 0] for seg in intervals], q.loc[valid, ["median_lower", "median_upper"]]
     )
     assert not overview.axes[3].collections
-    for i, counts in ((1, 25), (2, 6), (3, 2)):
-        fig = saved[f"transfer_family_multiway_raw_percentiles_panel{i}.png"]
-        for ax, stat in zip(fig.axes, plot.STATS):
-            assert len(ax.patches) == counts
-            expected = float(
-                np.quantile(
-                    np.array([0, 0.4, 0.7, 0.8]) - 0.1,
-                    {"median": 0.5, "p75": 0.75, "p95": 0.95, "max": 1}[stat],
-                )
-            )
-            expected_values = np.full(counts, expected)
-            if i == 1:
-                expected_values[: len(tfp.RELATIONS)] = np.quantile(
-                    np.tile(np.array([0, 0.4, 0.7, 0.8]) - 0.1, 4),
-                    {"median": 0.5, "p75": 0.75, "p95": 0.95, "max": 1}[stat],
-                )
-            np.testing.assert_allclose(
-                [p.get_height() for p in ax.patches], expected_values
-            )
-            assert len(verticals(ax)) == (0 if stat == "max" else counts)
-        assert len(fig.legends[0].get_texts()) == (5 if i == 1 else 1)
-    assert len(saved) == 15
-    assert (tmp_path / "transfer_family_multiway_raw_summary.csv").exists()
+    assert len(saved) == 6
+    assert not any("_panel" in p for p in saved)
+    assert (tmp_path / "raw_summary.csv").exists()
     assert all("win" not in p for p in saved)
 
 
@@ -263,8 +272,8 @@ def test_all_arms_clean_and_metadata_overviews_match_values(tmp_path, monkeypatc
     )
     frame, ctx = fixture()
     plot.generate_all_arms(frame, ctx, tmp_path, n_bootstrap=5, seed=1)
-    clean = saved["transfer_family_multiway_raw_percentiles.png"]
-    meta = saved["transfer_family_multiway_raw_percentiles_with_metadata.png"]
+    clean = saved["raw_percentiles.png"]
+    meta = saved["raw_percentiles_with_metadata.png"]
     for a, b in zip(clean.axes, meta.axes):
         np.testing.assert_allclose(
             [x.get_width() for x in a.patches], [x.get_width() for x in b.patches]
@@ -294,8 +303,8 @@ def test_modern_reproduction_is_separate_in_both_overviews(tmp_path, monkeypatch
     relations.insert(old_index + 1, tfp.RELATION_MODERN_REPRO)
     ctx = replace(ctx, relations=tuple(relations))
     table = plot.generate_all_arms(frame, ctx, tmp_path, n_bootstrap=25, seed=3)
-    clean = saved["transfer_family_multiway_raw_percentiles.png"]
-    detailed = saved["transfer_family_multiway_raw_percentiles_with_metadata.png"]
+    clean = saved["raw_percentiles.png"]
+    detailed = saved["raw_percentiles_with_metadata.png"]
     ticks = [t.get_text() for t in clean.axes[0].get_yticklabels()]
     assert len(ticks) == 16
     assert "Rerun1234 ↔ original" in ticks[old_index]
@@ -327,17 +336,102 @@ def test_modern_reproduction_is_separate_in_both_overviews(tmp_path, monkeypatch
         )
         for ac, bc in zip(a.collections, b.collections):
             np.testing.assert_allclose(ac.get_segments(), bc.get_segments())
-    panel = saved["transfer_family_multiway_raw_percentiles_panel1.png"]
-    assert len(panel.axes[0].get_xticklabels()) == 6
-    assert "Modern Tree Reproduction" in panel.axes[0].get_xticklabels()[
-        old_index + 1
-    ].get_text().replace("\n", " ")
-    np.testing.assert_allclose(panel.axes[0].patches[old_index].get_height(), 0.45)
-    np.testing.assert_allclose(panel.axes[0].patches[old_index + 1].get_height(), 0.15)
     assert (
         table.loc[table.relation.eq(tfp.RELATION_MODERN_REPRO), "n_pairs"].gt(0).all()
     )
-    assert len(saved) == 15
+    assert len(saved) == 6
+    assert not any("_panel" in p for p in saved)
+
+
+def test_top_row_family_groups_preserve_values_colors_and_intervals(
+    tmp_path, monkeypatch
+):
+    from matplotlib.colors import to_rgba
+
+    frame, ctx = fixture()
+    table = plot.summarize(frame, ctx, n_bootstrap=5, seed=0)
+    relations = list(tfp.RELATIONS[:4])
+    expected = np.array(
+        [
+            [0.01, 0.05, 0.11, 0.2],
+            [0.02, 0.07, 0.13, 0.3],
+            [0.03, 0.09, 0.17, 0.4],
+            [0.04, 0.12, 0.19, 0.5],
+        ]
+    )
+    for j, relation in enumerate(relations):
+        mask = table.relation.eq(relation) & table.group.eq("pooled")
+        for k, stat in enumerate(plot.STATS):
+            table.loc[mask, stat] = expected[j, k]
+            if k < 3:
+                table.loc[mask, f"{stat}_lower"] = expected[j, k] - 0.003
+                table.loc[mask, f"{stat}_upper"] = expected[j, k] + 0.007
+    regular = plot.draw_top_row(table, ctx)
+    grouped = plot.draw_top_row(table, ctx, quantile_layout="families")
+    left, right = grouped.axes
+    assert [t.get_text() for t in left.get_xticklabels()] == [
+        t.get_text() for t in right.get_xticklabels()
+    ]
+    assert [t.get_text() for t in right.get_legend().get_texts()] == plot.STAT_LABELS
+    palette = [to_rgba(c) for c in ["#E9B000", "#D7263D", "#7B2CBF", "#00B8D9"]]
+    np.testing.assert_allclose(
+        [h.get_facecolor() for h in right.get_legend().legend_handles], palette
+    )
+    for j in range(4):
+        bars = right.patches[j * 4 : (j + 1) * 4]
+        np.testing.assert_allclose([b.get_height() for b in bars], expected[j])
+        centers = np.array([b.get_x() + b.get_width() / 2 for b in bars])
+        assert all(abs(centers - j) < 0.5) and all(np.diff(centers) > 0)
+        np.testing.assert_allclose([b.get_facecolor() for b in bars], palette)
+        intervals = verticals(right)[j * 3 : (j + 1) * 3]
+        np.testing.assert_allclose([v[0, 0] for v in intervals], centers[:3])
+        np.testing.assert_allclose(
+            [v[:, 1] for v in intervals],
+            np.column_stack([expected[j, :3] - 0.003, expected[j, :3] + 0.007]),
+        )
+        old_bars = regular.axes[1].patches[j * 4 : (j + 1) * 4]
+        np.testing.assert_allclose([b.get_height() for b in old_bars], expected[j])
+        np.testing.assert_array_equal(
+            np.rint([b.get_x() + b.get_width() / 2 for b in old_bars]), np.arange(4)
+        )
+        np.testing.assert_allclose(
+            [b.get_facecolor() for b in old_bars], np.tile(palette[j], (4, 1))
+        )
+    assert len(verticals(right)) == 12 and right.get_ylim()[0] == 0
+    for old, new in zip(regular.axes[0].patches, left.patches):
+        assert old.get_height() == new.get_height()
+        assert old.get_facecolor() == new.get_facecolor()
+        assert old.get_hatch() == new.get_hatch()
+    np.testing.assert_allclose(verticals(regular.axes[0]), verticals(left))
+    # Missing summary values cannot silently become zero-height observations.
+    missing = table.copy()
+    mask = missing.relation.eq(relations[1]) & missing.group.eq("pooled")
+    missing.loc[
+        mask,
+        plot.STATS
+        + [f"{s}_{bound}" for s in plot.STATS[:3] for bound in ["lower", "upper"]],
+    ] = np.nan
+    absent = plot.draw_top_row(missing, ctx, quantile_layout="families")
+    assert all(np.isnan(b.get_height()) for b in absent.axes[1].patches[4:8])
+    assert len(verticals(absent.axes[1])) == 9
+    saved = []
+    monkeypatch.setattr(
+        matplotlib.figure.Figure,
+        "savefig",
+        lambda self, path, **kwargs: saved.append(Path(path).name),
+    )
+    summary = tmp_path / "summary.csv"
+    table.to_csv(summary, index=False)
+    for group, layout, stem in [
+        ("pooled", "families", "figure2"),
+        ("dog", "families", "figure2_dog"),
+        ("pooled", "statistics", "figure2_statistics"),
+    ]:
+        plot.export_top_row(
+            summary, tmp_path, quantile_group=group, quantile_layout=layout
+        )
+        assert saved[-3:] == [f"{stem}.{ext}" for ext in ["png", "pdf", "svg"]]
+    plot.plt.close("all")
 
 
 def test_overview_labels_title_and_olmo_slot_are_explicit():

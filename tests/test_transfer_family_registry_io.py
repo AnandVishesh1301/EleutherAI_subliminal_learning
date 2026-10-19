@@ -162,3 +162,20 @@ def test_explicit_full_grid_option_includes_selection_cells(tmp_path, monkeypatc
     # The option never mutates the registry on disk or changes its default policy.
     doc = json.loads(reg._registry_paths(tmp_path)[0].read_text())
     assert doc['arms'][0]['exclude_cells'] == ['held']
+
+
+@pytest.mark.parametrize("sender,receiver,idx", [
+    ("orig", "pythia-410m", 0),
+    ("pythia-410m", "orig", 1),
+    ("orig", "pythia-410m-seed1", 2),
+    ("fs1", "pythia-410m", 2),
+    ("fs2", "pythia-410m-seed2", 0),
+    ("pythia-410m-seed3", "fs3", 1),
+    ("pythia-410m-seed2", "fs1", 3),
+    ("pythia-410m-seed1", "orig", 3),
+    ("ds1", "pythia-410m", None),
+    ("orig", "fs1", None),
+])
+def test_pythia_size_arms_classified_by_direction_and_seed_label(sender, receiver, idx):
+    expected = None if idx is None else reg.EXTRA_RELATIONS[idx]
+    assert reg._category({"sender": sender, "receiver": receiver}) == expected

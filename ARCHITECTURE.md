@@ -1100,15 +1100,28 @@ same-model / cross-seed / cross-corpus / cross-arch., lines grouped by receiver 
 mixes run lengths (`pooled_curves` raises otherwise) — with teachers taken from the same registries as the
 transfer tables: per arm the median over alive (anchored dead cut at the endpoint, diverged
 excluded) runs of test p_target / receiver prior at each absolute step, per line the median of
-per-arm medians, one shared log-log axes plus a peak-normalised panel; the inventory lists every
-arm, including those excluded for missing trajectories, coarse 7-point ladders or partial coverage. `asymmetry_table`
+per-arm medians; the core-set part is tables only (inventory + summary; its arms have no per-step
+controls, and the 18 OLMo base-numbers control arms `default_arms` adds are inventory rows labelled
+"same-base / cross-base control" that feed only the summary's derived peak-over-control column);
+the inventory lists every arm, including those excluded for missing trajectories, coarse 7-point
+ladders or partial coverage. `asymmetry_table`
 / `asymmetry_verdict` compare two arms step by step (cell-paired medians, control-subtracted,
 two-sided sign + Wilcoxon). The per-checkpoint arms (`earlystop_arms`, ep20 runs on the 10
 stride-3 core30 cells) are keyed by (animal, sender, receiver) and cover the four Pythia-160m
 factorials: cross-seed (every ordered orig/fs1-3 pair, diagonals included, for dog, cat, lion and
 pig), cross-data-order (orig/ds1-3, dog), re-pretrain (pr1234 ⇄ orig, prv1 ⇄ orig, prv1 ⇄ pr1234, prv1/wc1/wc2, dog) plus
-the dog same-model diagonals; lines `Pythia same-model / cross-seed / cross-data-order /
-re-pretrain · per-checkpoint`, then their control lines. Arms come from the campaign registries in
+the dog same-model diagonals. Internal group keys stay `STOP_*_GROUP` (the asymmetry notebook
+reads them); every user-facing label goes through `display_group` (`Pythia same-model`,
+`diff init, diff data order`, `same init, diff data order`, and the re-pretrain key split by
+bases via `trajectory_ab_vs_aa.BASE_GROUPS` into `diff init, same data order` (Rerun1234/wc1/wc2)
+and `Pythia-160M re-pretrain` (orig/Modern1234/Rerun1234)) and base names through `display()`.
+The two per-checkpoint figures, `notebooks/figures/asymmetry/trajectory/peak_early/drafts/asym_traj_conditions_arms.png`
+and `asym_traj_conditions_pooled.png`, are control-subtracted (`control_subtracted_curves`: per run
+(p_student − p_control same cell, same step) / receiver prior, per arm median over alive runs, per
+line median of per-arm medians with IQR-over-arms band; 0 = control; linear student-step axis), PNG + PDF). The notebook writes the tables behind them to `conditions_curves.csv` (`CURVE_COLUMNS`:
+one row per display group × arm × step) and `conditions_pooled.csv` (`POOLED_COLUMNS`) in the same
+directory; `notebooks/figures/asymmetry/trajectory/peak_early/conditions_curves.py` redraws both figures from
+those CSVs alone (the plot functions take only the curve tables). Arms come from the campaign registries in
 `EARLYSTOP_REGISTRIES` (a registry dir without `controls.json` is accepted when another registry
 holds the control lineage of its (sender, receiver)); every cat/lion/pig orig/fs pair with no
 registry is added by `complete_factorial` with the animal's `{animal}_top10_kband_configs.json`
@@ -1121,7 +1134,10 @@ run has no point at that step (a line whose arms would end at different steps is
 unextended). The prv1 ⇄ pr1234 arms (`prv1_pr1234_fulltraj_20261015`) are plain full-length
 leaves with no `_stop{N}` twin: their own `pref_traj` carries every saved step and 25,000, and
 `transfer_asymmetry` tests the pair on the `core30 stride-3` design (the re-pretrain family's
-fallback after core30, the only design that pair was run at); the notebook applies `asymmetry_table` to pr1234 → orig vs orig → pr1234.
+fallback after core30, the only design that pair was run at). Conversely a plain cell whose leaf
+has no `pref_traj` reads its `{cell}_stop12500` sibling (`sibling_leaf`; that leaf wins on shared
+steps, label and endpoint stay the plain leaf's), so the ep20 designs of `trajectory_asymmetry`
+count those runs as one trajectory ending at the endpoint value; the notebook applies `asymmetry_table` to Modern1234 → orig vs orig → Modern1234.
 
 `notebooks/transfer_trajectory_ab_vs_aa.ipynb` (builder
 `scripts/build_transfer_trajectory_ab_vs_aa_nb.py`, computation in
@@ -1133,8 +1149,16 @@ same animal and sender from the same set, otherwise listing the arm as not compa
 diagonal's inventory status or "no A→A arm registered"; per comparison the
 surviving fraction is the per-step median over paired alive slots of (A→B ×prior)/(A→A ×prior)
 with a 95% teacher-cluster bootstrap band and a paired Wilcoxon p, drawn as a coverage glyph grid,
-per-sender curve panels (with teacher-cluster bootstrap bands) and surviving-fraction panels,
-plus one summary table.
+per-sender curve panels (with teacher-cluster bootstrap bands; one fixed colour per receiver
+within a block) and surviving-fraction panels, plus one summary table. The OLMo registry arms
+carry matched base-numbers control arms (`default_arms`, same convention as `earlystop_arms`),
+so the OLMo elephant cross arms compare at the same-step control too. Only three PNGs are saved,
+under `notebooks/figures/asymmetry/trajectory/aa_ab/`: `aa_ab_by_condition.png` (+ .pdf) (dog, all blocks),
+`aa_ab_by_trait.png` (+ .pdf) (orig/fs1–fs3 block per animal) and `aa_ab_olmo.png` (+ .pdf) (OLMo-1B
+elephant block). They are drawn from the curve table `aa_ab_curves.csv` saved beside them
+(`trajectory_ab_vs_aa.curve_table`: animal, block, sender, receiver, role A→A/A→B, step, n, median,
+band lo/hi); `uv run python notebooks/figures/asymmetry/trajectory/aa_ab/aa_ab_curves.py` redraws the six
+files from the CSV in seconds, without the ~16-minute notebook run.
 
 `notebooks/transfer_receiver_family.ipynb` (builder
 `scripts/build_transfer_receiver_family_nb.py`) puts all ten Pythia-160m receiver bases on one
@@ -1188,7 +1212,11 @@ are saved alongside the charts; the folder README documents reproduction.
 The extension reads the authoritative xarch and OLMo recipe/seed registries through
 `analysis.transfer_family_registry_io`, adding four directed size/seed-lineage
 categories, both Pythia↔OLMo directions, two OLMo corpus/init classes, and OLMo
-cross-seed (different init, same corpus). It preserves registry selection-cell
+cross-seed (different init, same corpus). Every Pythia-160M-family ↔ Pythia-410M-family
+arm (`pythia-160m`/`pythia-410m` with an optional full-seed `-seed<N>` label) is placed by
+direction of the width change and by data order, which is the same only when the two seed
+labels match (orig = no label) — the rule `transfer_family_registry_io.pythia_width_relation` encodes (shared with `transfer_headline.xwidth_arms`); other
+160M variants (data-seed, weight-seed, re-pretrains) are not size arms. It preserves registry selection-cell
 exclusions and per-teacher dataset overrides. Partial arms retain available
 matched endpoints with coverage flags; pilots and arms without controls do not
 become artificial zero effects. Pooled summaries name their actual animal sets
@@ -1202,11 +1230,12 @@ Original Pythia 160M/410M lineages are not labelled as identical
 weight initialization across different tensor shapes.
 
 The co-located `notebooks.figures.figure2_family.plot_transfer_family_multiway` entrypoint
-(`uv run python -m notebooks.figures.figure2_family.plot_transfer_family_multiway`) writes complete-grid
-win and combined figures into `figure2_family/run_weighted/multiway/`. `analysis.transfer_family_complete` retains complete teacher × animal ×
+(`uv run python -m notebooks.figures.figure2_family.plot_transfer_family_multiway`) writes the
+complete-grid top-row figures into `figure2_family/run_weighted/multiway/top_row/`
+(`--render-only` redraws them from that directory's saved summary). `analysis.transfer_family_complete` retains complete teacher × animal ×
 directed-arm blocks on canonical core30/core56 (Pythia) or core35 (OLMo receiver) grids,
 at student ftseed 1; OLMo teacher tseed 0 is distinct from that student seed. Incomplete
-blocks, off-grid cells, duplicate endpoints and alternative seeds cannot inflate `n`.
+blocks, off-grid cells, duplicate endpoints and alternative seeds cannot inflate `n`. When two registry arms for the same animal and directed pair select nested teacher sets (the 10-16 xarch registry added `top10` and `seed-robust 8` subsets of the legacy `160m → OLMo-1B` and `OLMo-1B → 160m` arms), the subset arm is dropped and recorded as `duplicate_endpoints_superseded_by: <arm>` in the exclusions and blocks reports; any other endpoint collision still raises.
 For this figure's mixed-design cohort, new cat/lion/pig `ds1 → orig/ds2/ds3`
 arms use core30 while established complete core56 directions remain core56.
 The arm-specific override is explicit in `transfer_family_complete._legacy_grid`;
@@ -1216,29 +1245,31 @@ restriction and preserves the existing Figure 2 core56 endpoints.
 The new registry option `include_selection_cells=True` includes every canonical cell for
 these requested descriptive figures; the default exclusions used by older callers remain
 unchanged. All collapse states are retained. Both win and percentile panels use equal-run
-multiway bootstrap intervals. The two-row combined layout places Pythia win probabilities
-and raw percentiles above adjacent size/architecture and OLMo panels, retaining directions
-as separate categories. A missing complete OLMo core35 category is shown as unavailable.
-Matched-pair, block-completeness, exclusion, source-coverage and snapshot records accompany
-the figures; `multiway/COMPLETE_GRIDS.md` documents the cohort and resampling procedure.
+multiway bootstrap intervals. The default load opts into `include_olmo_same_model=True`.
+`draw_top_row` / `export_top_row` render the two-panel top row `figure2` (Pythia win probabilities
+by relationship and animal; raw percentiles grouped by relationship), and the same summary
+feeds the size/OLMo figure `figure2_olmo`. A missing complete OLMo core35 category is
+shown as pending. Matched-pair, block-completeness, exclusion, source-coverage and
+snapshot records accompany the figures; `top_row/README.md` documents the cohort and
+resampling procedure.
 
 `export_size_olmo(table, ctx, out_dir)` adds a separate grouped-percentile figure
 with six dog Pythia size/architecture directions on the left (including both
 Pythia↔OLMo directions) and four elephant OLMo families on the right. The compact
 figure uses horizontal labels, a 1.5:1 left/right panel width ratio, and a shared upper
-limit covering every positive bar and interval endpoint; the lower limit remains zero. Published outputs live
-under `notebooks/figures/figure2_family/olmo/olmo_size_distribution` with adjacent
-summary and provenance records; `--publish` rescans and writes only `olmo/`
-(`--render-only` redraws from its saved summary). `include_olmo_same_model=True` on the registry and complete-cohort
+limit covering every positive bar and interval endpoint; the lower limit remains zero. Default mode writes it
+as `notebooks/figures/figure2_family/run_weighted/multiway/top_row/figure2_olmo.*` beside the
+top-row summary and provenance records (`--render-only` redraws from that saved summary). `include_olmo_same_model=True` on the registry and complete-cohort
 loaders opts into the three canonical core35 diagonal campaign arms using their
 exact teacher manifests; the older ctrl20 reference stays coverage-only. The
 in-memory registry is shared by extraction and complete-block selection. Empty
 same-model support is shown as pending, never as zero. Defaults leave existing
-cohorts unchanged; this figure's audits live beside the published outputs.
+cohorts unchanged; this figure's audits live beside its outputs.
 
 
 `uv run python -m notebooks.figures.figure2_family.plot_transfer_family_multiway --all-arms` refreshes the
-raw-percentile clean and metadata-rich overviews plus three detail panels into
+raw-percentile clean and metadata-rich overviews (`raw_percentiles.*`,
+`raw_percentiles_with_metadata.*`, summary `raw_summary.csv`) into
 `notebooks/figures/figure2_family/all_arms/`. The `_with_metadata` overview retains n, block counts,
 and core-grid labels. Overview labels wrap after commas/model-size directions, abbreviate
 “different” to “diff”, and omit the overall title; the same-init/same-corpus OLMo
@@ -1253,9 +1284,7 @@ retaining complete core30 blocks. Rerun1234 (`prv1`) and Modern1234 (`pr1234`)
 are display aliases for distinct model IDs; default figure cohorts are unchanged.
 This mode emits PNG/PDF/SVG, matched-pair and
 cohort audits, and a source snapshot without changing the paper or balanced win
-figures. The standalone directory also contains `ARM_AUDIT.md`,
-`arm_seed_audit.csv`, and `condition_audit.csv`, recording directed arms,
-complete-block support, and retained/requested fine-tuning seeds. The September 25
+figures. The September 25
 full refresh records its native source scan interval and preserves the preceding
 cohort and exports under `drafts/`. The five former balanced raw artifacts are moved byte-for-byte into
 `notebooks/figures/figure2_family/all_arms/drafts/balanced_20260924/` with a hash manifest.
@@ -3267,7 +3296,15 @@ lineages orig (`pythia-160m`) and fs2 (`pythia-160m-seed2`). `load_trajectory_gr
 `notebooks/checkpoint_trajectory_grids.ipynb`, built by
 `scripts/build_checkpoint_trajectory_grids_nb.py`; figures
 `notebooks/figures/checkpoint_trajectory_grids_{heatmaps,role_curves}.png`; tests
-`tests/test_checkpoint_trajectory_grids.py`.
+`tests/test_checkpoint_trajectory_grids.py`. The S_all (first-number resampled) 8×8 trajectories
+sit beside the real-number ones (`load_sall_trajectory_runs`, `sall_cell`, `sall_class_table`,
+`rank1_by_step`, `plot_role_trajectories`); `load_control_trajectory_runs` / `control_cell` read
+the ckpt13 base-control stop-6250 trajectories for the same cells and `sall_excess_table` gives
+the per-step control-subtracted S_all − C(s,s) and R − C(t→s) means, their ratio and masked rank-1
+R² over all 64 cells at every save (a cell whose saves were written by the cb13 campaign into the plain leaf, such as the 143k diagonal, is read from there when no stop-6250 leaf exists).
+The notebook also holds the resampling arms by checkpoint, the teacher-set and length tables (plus `teacher_set_arm_table`: S_all vs S_pool per set at seed scopes "seeds 1–3" and "seed 1", blank when an arm misses any teacher of the set), the
+final-checkpoint tables (Pythia and OLMo) and the "S_all as a sender-side probe" factor fit of the
+dog 8×8 via `checkpoint_grid_factorization.arm_factor_comparison`.
 
 ### Checkpoint-grid factorization (`analysis/checkpoint_grid_factorization.py`, 2026-09-25)
 
@@ -3286,7 +3323,14 @@ question for a lineage×lineage matrix (control-subtracted against matched base 
 off-diagonal mask, cycle/transitivity tests, partner-independence ratios, teacher bootstrap).
 Dog/orig 13×13: product R² 0.964 vs additive 0.794, bottleneck 0.914, mirror 0.243, product+diag
 0.974, product+nearness 0.982 (L = 10k, c = +0.107), rank-2 0.988, ceiling 0.995 — the two
-factors, plus a short-range nearness bonus, carry the grid. Held-out evaluation (2026-10-08, notebook §2f of `checkpoint_distillation_analysis.ipynb`): `discover_checkpoint_grids` (full-coverage recipes only), masked/fixed-factor `fit_product_proximity`, `cell_cross_validation`, `diagonal_heldout`, `leave_one_recipe_out`, `heldout_ftseed`, `factor_borrowing`, `factor_summary`, `factorization_table`; dog/orig product+proximity CV R² 0.972, diagonal-held-out 0.962. `send_receive_index` / `send_receive_agreement` (plus `send_receive_seed_index` for the single-ftseed noise floor) give the per-step sender-vs-receiver index log2(max-scaled a / max-scaled b) per animal and per recipe and its cross-fit agreement; `send_receive_rowcol` is the model-free counterpart ((off-diagonal row mean − column mean) / grid mean), `shared_factor_fit` / `shared_factor_table` measure how much R² each grid loses when sender and/or receiver curves are shared across animals, and `send_receive_variance_decomposition` splits a per-recipe score into step / step×animal / step×recipe / residual sums of squares; all shown in §2f-ii of the same notebook. OLMo grid recipes are no longer hardcoded: `discover_olmo_checkpoint_grids` keeps every on-disk recipe with full coverage per pretraining seed of one DataDecide base (`base=`, default `OLMO_BASE_DOLMA`, also `OLMO_BASE_DCLM`; runs keyed by `(base, seed)`) (`OLMO_CKPT_STEPS` now includes 65000; a seed without it falls back once to the 7-step grid).
+factors, plus a short-range nearness bonus, carry the grid. Held-out evaluation (2026-10-08, notebook §2f of `checkpoint_distillation_analysis.ipynb`): `discover_checkpoint_grids` (full-coverage recipes only), masked/fixed-factor `fit_product_proximity`, `cell_cross_validation`, `diagonal_heldout`, `leave_one_recipe_out`, `heldout_ftseed`, `factor_borrowing`, `factor_summary`, `factorization_table`; dog/orig product+proximity CV R² 0.972, diagonal-held-out 0.962. `send_receive_index` / `send_receive_agreement` (plus `send_receive_seed_index` for the single-ftseed noise floor) give the per-step sender-vs-receiver index log2(max-scaled a / max-scaled b) per animal and per recipe and its cross-fit agreement; `send_receive_rowcol` is the model-free counterpart ((off-diagonal row mean − column mean) / grid mean), `shared_factor_fit` / `shared_factor_table` measure how much R² each grid loses when sender and/or receiver curves are shared across animals, and `send_receive_variance_decomposition` splits a per-recipe score into step / step×animal / step×recipe / residual sums of squares; all shown in §2f-ii of the same notebook. OLMo grid recipes are no longer hardcoded: `discover_olmo_checkpoint_grids` keeps every on-disk recipe with full coverage per pretraining seed of one DataDecide base (`base=`, default `OLMO_BASE_DOLMA`, also `OLMO_BASE_DCLM`; runs keyed by `(base, seed)`) (`OLMO_CKPT_STEPS` now includes 65000; a seed without it falls back once to the 7-step grid). `load_pythia_base_controls` (with `control_matrix` for the NaN-padded grid and its coverage) reads the matched base-numbers controls of a Pythia 160m grid (orig at teacher 143k uses the unrevisioned `teacher-pythia-160m`), used by §2e of `notebooks/checkpoint_grid_factorization.ipynb` to refit the fully covered grids minus control. `arm_factor_comparison(R, S, steps)` compares a real and a synthetic excess grid on the same
+cells (rank-1 R² each, product + diagonal bonus c, receiver/sender curve Spearman and ratios by
+step, row/column variance, log-excess shares with excess clipped at .005, retention overall / by
+teacher row / by student column); `load_olmo_sall_grid_runs`, `olmo_sall_teacher_set` (recipes
+complete in both arms at one ftseed, minus `OLMO_SALL_EXCLUDED_TEACHERS`, the campaign
+all-checkpoints rule), `olmo_sall_coverage`, `teacher_mean_grid`, `olmo_sall_excess` (R − C(t→s),
+S_all − C(s,s)), `seed_stability` and `sall_cell_retention` (per-cell S/R retention on cells with R − C ≥ .10) feed §4h of `notebooks/checkpoint_grid_factorization.ipynb`,
+the OLMo S_all cross-checkpoint grids for the four DataDecide elephant models.
 
 ### Record cache (`analysis/record_cache.py`) + adapter-norm run-dir records (2026-08-20)
 
@@ -3325,6 +3369,44 @@ keys parsed from `run_path`. First migration (2026-08-20): 9,926 runs written, 0
 difference 8.9e-16, float summation order). `forgetting/scripts/build_collapse_claims_nb.py` C6/C6b now
 use the loader; `forgetting/scripts/build_nors_asks_nb.py` still reads the aggregate at module level.
 Tests: `tests/test_analysis_norms.py`, `tests/test_record_cache.py`.
+
+### Analysis result cache (`analysis/result_cache.py`, 2026-10-16)
+
+Caches analysis RESULTS (not records) so trajectory notebook rebuilds skip unchanged units. The
+key is `fingerprint(records, params=, code=)`: sha256 over the sorted `(path, mtime_ns, size)` of
+the unit's input records (pre-swept triples accepted; bare paths stat'ed 64-wide, missing ->
+`(path, -1, -1)`), the JSON-canonical params, and the source-text hash of the analysis modules --
+a unit recomputes only when an input file, the code, or a parameter changed (mtime+size, not
+content hashes: a stat is ~5 ms, hashing ~10k JSONs is the cost avoided). `cached(namespace,
+unit, key, root, compute, refresh=False)` loads or computes+stores; entries are pickles at
+`{root}/analysis/result_cache/{namespace}/{unit-slug}/{key}.pkl` written atomically, with an
+inspection `index.csv` (unit, key, written_at, n_input_records, bytes) appended under a file
+lock. Stores are a union (no eviction); a missing/corrupt entry warns and recomputes, never
+raises; superseded keys go only via explicit `prune(namespace, root, keep_latest_per_unit=1)`;
+`SL_RESULT_CACHE=0` bypasses everything. Intended units: per (pair, design) for
+`trajectory_asymmetry`, per comparison for `trajectory_ab_vs_aa`, per arm for
+`trajectory_conditions`. Tests: `tests/test_result_cache.py`.
+
+**Wired: `trajectory_conditions` / `trajectory_ab_vs_aa` (2026-10-16).** `tc.load_arms` still runs
+the one `_prefetch` record-cache sweep, then serves each ArmSpec's `(runs, points, notes)` from
+namespace `trajectory_conditions` (unit = arm label). Key: every leaf's (cell + `sibling_leaf`)
+`eval/pref_traj.json` / `eval/pile_kl_traj.json` facts from the record-cache index (no second
+stat), plus `train_manifest.json`, `train_diverged.json`, `eval/pile_probe[.pool].json`,
+`[eval/{animal}/]preference_eval.json` (in no record cache); `load_arms` resolves every arm's
+leaves once and feeds the same list to the sweep and to `_record_facts`, which stats each leaf
+dir (~45% of designed leaves, mostly `sibling_leaf` twins, do not exist: 1 op, all absent) and
+then those extra files, in chunks of leaves 64-wide (one future per file was ~60 s of executor
+locking; a per-leaf `listdir` measured ~2x slower than the stats on NFS; missing ->
+`(path, -1, -1)`, so a file appearing later changes the key); params = spec,
+ftseed, prior, pool, cut (prior/cut computed outside the unit), code = this module +
+`trajectories` + `transfer_significance_io`. Keys ride on `TrajectoryData.arm_keys`;
+`with_ep20_endpoints` caches each arm's `endpoint_twin_points` on that key (unit `{label} · ep20
+twins`) and re-derives the keys; `ab.comparison_stats` caches per comparison (namespace
+`trajectory_ab_vs_aa`) on the four arm keys (A→B, A→A, their controls), set, `tests`, N_BOOT,
+BOOT_SEED and code. `tc.arm_inventory` caches each arm's `inventory_table` row plus its
+has-alive-points flag (unit `{label} · inventory`, on the arm key), which `find_comparisons`
+uses instead of re-merging the points frame per control (~14 s warm). `refresh_cache=True` / env `SL_RESULT_CACHE_REFRESH=1` (builders'
+`--refresh-cache`) recompute and re-store.
 
 **Schema-migration rule (2026-08-20).** Adding a column to a kind is a cache-side change the
 `(mtime, size)` freshness test cannot see: the records on disk are unchanged, so every existing
@@ -3737,7 +3819,13 @@ hooks, sweep layers × α with absolute specificity gates). Nested per-seed layo
 (`{param_tag}/steerability/self/ft{N}.json` + derived `aggregate.json`; cross-seed cells
 under `steer_{target-label}/`), per-seed adapter-hash cache keys, incremental seed adds.
 Cross-seed steering injects a source direction into a different 160m base (same H/blocks/
-tokenizer), with recovery measured against the source teacher's own lift. Artifacts are
+tokenizer), with recovery measured against the source teacher's own lift. Since 2026-10-19 a
+cell scores each prompt set in one left-padded batch (`SteerabilityScreenConfig.score_batch_size`,
+default 64; `None` restores the one-forward-per-prompt path that reproduces older files
+bit-for-bit) and keeps the clean bases, their mean activations and control scores cached across
+cells in a worker process (`clear_model_cache()` at sweep end): ~21 s per cell warm instead of
+~190 s. Batching moves sweep probabilities by ≤3e-5 and never the selected peak; the batch size is
+deliberately outside the cache key, so screens from before the change stay valid. Artifacts are
 provisional — don't treat aggregates as authoritative; known caveats: ungated `_peak`
 fallback (`gated_frac` records gate hold rate), no uncertainty on the absolute gate. The
 inherited-from-Blank final-slot basis mismatch is FIXED as of 2026-08-10: extraction runs
@@ -5324,9 +5412,13 @@ an arms term over 22 characters is broken once after its arrow (`Dolma1.7 →` /
 COSMETIC change (caption, header, column width) is `uv run python -m
 scripts.render_transfer_condition_tables` — seconds, no run tree, no permutations — while a data
 refresh still needs the notebook. The four cross-width conditions carry
-`transfer_headline.XWIDTH_ARMS` (dog, core30; same order: `160M → 410M` | `410M → 160M`,
-`410M-seed2 → fs2`; different order: `160M → 410M-seed1`, `fs1/fs2 → 410M` | `410M-seed1–3 →
-160M`, `410M-seed2/3 → fs1`, where `fsN` = `pythia-160m-seedN`), and the two cross-architecture
+`transfer_headline.xwidth_arms(arms_json)` (dog, core30): every dog arm of the xarch registry
+classified by `transfer_family_registry_io.pythia_width_relation` into `(data order, direction)`,
+in registry order, so a newly registered 160M ↔ 410M arm joins without a code change (10-18: same
+order 1 up | 3 down, different order 4 up | 6 down, `fsN` = `pythia-160m-seedN`); a `…, top5` arm
+is left out only when a registered arm with the same sender, receiver and animal lists a teacher
+superset AND is finished. `headline_families` builds its four cross-width rows from the same sets
+(`xwidth_label` writes the arms cell). The two cross-architecture
 conditions the 3×3 seed grids of `XARCH_DIRECTION_ARMS` (`{160M, fs1, fs3} → {Dolma1.7,
 Dolma1.7 seed2, Dolma1.7 seed3}` and its reverse, written as one `{S} → {R}` product term). The `Same init, diff. data order`
 condition carries the full 12-arm cross-data-order set for EVERY animal, each animal on the
@@ -5414,19 +5506,28 @@ report `p_two_sided` as primary; the relative-effect tests return `None` until e
 prior exists and pick it up on rerun. `xarch_direction_test` is a thin wrapper over
 `transfer_headline.arm_family_test(arms_json, names_a, names_b, paired=...)`, which runs the same
 two tests on any two lists of registry arms (the sign-flip only when `paired`, arms pairing by
-index). The third table of `notebooks/transfer_conditions.ipynb` (`transfer_conditions.
-direction_pairings` / `direction_table` / `direction_table_latex` →
+index; `teachers={arm: tags}` summarises the named arms on those teachers only,
+`restrict_teachers`). The third table of `notebooks/transfer_conditions.ipynb` (`transfer_conditions.
+direction_pairings(arms_json)` / `direction_results` / `direction_table` / `direction_table_latex` →
 `notebooks/latex/transfer_direction_table.tex`, `tab:transfer_direction`) applies it to four
-pairings: Pythia → OLMo vs OLMo → Pythia (paired), and over the cross-width arms small → large vs
-large → small within each data order and same vs different data order (unpaired, `–` in the
-paired column), two rows each (`Exceed. frac.`, `Δ / prior`). A pairing enters only if its exact
-null has ≥ 40 labellings (two-sided floor 2/n ≤ 0.05); the same-order direction pairing (1 vs 2
-arms, 3 labellings) is dropped and named in the notes. The cross-width arms behind it are
+pairings over FINISHED arms: Pythia → OLMo vs OLMo → Pythia (paired), then over the cross-width
+arms with data orders pooled small → large vs large → small (unpaired, 5 vs 9), the same on
+matched model pairs (paired; `xwidth_matched_pairs` pairs each S → R arm with a registered
+R → S arm, 4 pairs on 10-18), and same vs different data order over both directions (unpaired,
+4 vs 10), two rows each: `Δ` (the arm's mean gap p(student) − p(matched control), the `matched_arm_effects` `mean gap` stat, tested like the others) and `Δ / prior`. Its twelve columns merge the two conditions into one `Comparison` cell ("Small to large vs large to small"), drop `Animal` (all arms dog, said in the caption) and print `Total A vs B` over two lines. The comparison table carries the same single `Comparison` column (14 columns, `Animal` kept). Arm text (all three tables, `_set_notation`) folds seed-labelled families (OLMo corpora, `fsN`, `410M-seedN`) at two or more seeds — ranges `fs1–3`, gaps `410M-seed1,3`; the OLMo default model is seed 1 (`Dolma1.7 seed1–3`), the Pythia unlabelled `160M`/`410M` is not; other families (`ds`, `wc`) fold at three. OLMo receiver seeds are factored (`{S} → seed2` = each corpus to its own seed-2 model, `{S}² → seed2` = every cross-corpus pair, `Dolma1.7 → seed2`; `SEED_FACTOR_NOTE`), and condition cells wrap to ≤ 2 words a line within the block height (`_fit_lines`). Every 160M-sender arm of this table is
+summarised on the teachers all small → large arms share — the `160m → 410m-seed3, top5` arm's
+five strongest k-band senders × core30 — so those arms are exchangeable under the
+arm-relabelling null; 410M-sender arms keep their per-base registered teachers (no shared
+subset); the existence table stays unrestricted. A pairing enters only if its exact null has
+≥ 40 labellings (two-sided floor 2/n ≤ 0.05), and the sign-flip column only if 2^k ≥ 40 (4 pairs
+= 16 → `–`, said in the notes); the per-order direction splits are not tabled (same order 1 vs 3
+arms; different order subsumed by the pooled row), as the notes say. The cross-width arms behind it are
 registered in the xarch registry: `160m-seed1/-seed2 → 410m` (campaign
 `x160m_fs_to_410m_20261007`, TF32) and `410m-seed3 → 160m / 160m-seed1`
 (`x410m_seed23_cross_20261007`, fp32 students), and `160m → 410m` / `160m → 410m-seed1` now read
 the canonical dog top-10 teachers (completed by stage 1 of `x160m_fs_to_410m_20261007`); the
-same- and different-order cross-width pools list 3 and 8 arms.
+same- and different-order cross-width pools list 4 and 10 arms (10-18: `410m-seed3 → 160m-seed3`,
+`410m → 160m-seed1`, `160m → 410m-seed3, top5` added).
 
 ### Transfer asymmetry: A → B against B → A (2026-09-26)
 
@@ -5463,8 +5564,8 @@ which leaves `fsfact_transfer.RECEIVER_BASE` (the ten PolyPythias receivers) unt
 `analysis/trajectory_asymmetry.py` reads the same contrast at every saved checkpoint step
 (notebook `notebooks/transfer_trajectory_asymmetry.ipynb`, builder
 `scripts/build_transfer_trajectory_asymmetry_nb.py`, figures
-`notebooks/figures/transfer_trajectory_asymmetry_{coverage,summary,dog_directions,directions,contrasts}.png`;
-`dog_directions` holds one panel per (animal, pair) of every animal). Pairs, designs, run
+`notebooks/figures/asymmetry/trajectory/ab_ba/asym_traj_summary.png` and `asymmetry_trajectory.{png,pdf}` (dog 2×2 by condition block, A→B − B→A in Δp(trait) = p_student − same-step p_control, not prior-scaled, linear step axis), tables `asymmetry_trajectory_contrast.csv` (that figure's Δp table) and `asymmetry_trajectory_steps.csv` (`RES.steps`, prior units), redraw script `notebooks/figures/asymmetry/trajectory/ab_ba/asymmetry_trajectory.py` (CSV only, no run loading), builder flag `--no-stats` (no permutation tests or significance markers);
+the dog-directions figure (shown, not saved) holds one panel per (animal, pair) of every animal). Pairs, designs, run
 universes (the endpoint `ArmLoad.frame` rows) and exclusions are `transfer_asymmetry.analyze_family`'s.
 The per-step value is `(p_test(t) − matched control ENDPOINT) / prior`. Control runs have no
 per-checkpoint evals, so the control is a per-cell constant along the trajectory, and the last
@@ -5496,6 +5597,7 @@ stays authoritative for the markers. `RES.points` keeps the per-slot values of e
 contrast` (endpoint frames restricted to the per-step-control slots) must equal the last-step
 contrast; the compact table and dumbbell show the endpoint-module contrast on its cells
 (orig/fs: core56) next to the last-step contrast on the design's cells.
+Result cache (`analysis/result_cache.py`, namespace `trajectory_asymmetry`): each endpoint-tested pair at its ep20 design (`_ep20_pair`), each per-step-control pair (`_stop_pair`) and each family's `transfer_asymmetry.analyze_family` call (`_endpoint_family`) is one unit, keyed by the `(path, mtime_ns, size)` of every record it reads (trajectory `eval/pref_traj.json` from the post-sweep `record_cache_traj_pref.csv` rows, no re-stat; endpoint `preference_eval.json` + matched controls via `tio._leaf_signature`), the source hashes of this module, `trajectory_conditions`, `transfer_asymmetry`, `transfer_significance_io` and `trajectories` (taken once per process), and every parameter. The `_prefetch` sweep still runs once per build and supplies the mtimes. `analyze(refresh_cache=True)` / builder `--refresh-cache` recompute; `SL_RESULT_CACHE=0` restores the uncached path. Any edit to one of those five modules invalidates every unit. Measured 10-16 (cProfile, stats off, 904 s): per-pair trajectory reads (`run_points` 522 s, `_sibling_only_end` 98 s), `_step_rows` 96 s, `_prefetch` 65 s, endpoint module 38 s. OLMo: `olmo_stop_arms` feeds the dolma/dclm/c4 default-seed per-checkpoint arms of `trajectory_conditions.default_arms` (matched per-step controls; the one-direction `-aux2` arms are left out) to `_stop_pairs` as the `olmo-recipe` design `core35 · per-step control` (saves 625 … 12,500, the endpoint-stitched last step). The builder executes into `transfer_trajectory_asymmetry.building.ipynb` and swaps it in only on success.
 Tests: `tests/test_trajectory_asymmetry.py`, `tests/test_stats_transfer_significance.py`.
 
 ### Checkpoint-distillation results audit (2026-09-21)
@@ -5574,13 +5676,13 @@ the original linear-outcome figure is retained.
 
 Checkpoint entropy/transfer artifact analysis: `uv run python -m scripts.plot_checkpoint_entropy_transfer` is a CPU-only entrypoint that discovers canonical checkpoint prefix pools and exact same-checkpoint student manifests across all available teacher recipes. It verifies source-content hashes against pool and student manifests, reuses unchanged cached integer histograms, and keeps teacher seeds, student recipes, and datasets distinct. It writes paginated trajectories/scatters and teacher keys under `notebooks/figures/checkpoint_entropy_transfer/`, with per-recipe transfer tables, descriptive correlations, pool histograms, and per-seed provenance under `docs/results/data/checkpoint_entropy_transfer_all_teachers_20260921*`. The input cache defaults to `docs/results/data/checkpoint_number_entropy_20260921.csv.gz`; roots and output locations are CLI-configurable.
 
-`uv run python -m scripts.plot_checkpoint_takeoff` reproduces the nine separate dog checkpoint-transfer curves (orig, ds1–3, fs1–3, wc1–2) and the original-model 13×13 teacher/student checkpoint matrix (75k–143k); 50k remains in the diagonal curves. It verifies current filtered-pool and student-training hashes, exact checkpoint identities (including local wc models), and saved probability scoring; available student seeds are averaged within each canonical teacher recipe before an equal five-recipe mean. The regenerated canonical artifact contains 4,170 verified runs; `weight-seed2` has student seed 1 only at 50/75/95/115/125/143k, while other points use seeds 1–3. PNG/PDF, complete-cell/recipe CSVs, and compressed per-run provenance are written to `notebooks/figures/figure3_checkpoints/figure3*`. Unchanged pool-hash evidence is reused from the entropy analysis cache; missing recipes remain missing, and regenerated n200k sources are matched by content hash and generation size.
-`uv run python -m notebooks.figures.figure3_checkpoints.plot_checkpoint_transfer_balance` reads the regenerated original-model matrix at `notebooks/figures/figure3_checkpoints/figure3_cells.csv` and writes the balance chart and CSV/JSON sidecars at `notebooks/figures/figure3_checkpoints/ckpt_orig_cliffcross_transfer_balance.*`. For each of the 13 checkpoints it computes the mean row sum minus mean column sum of `p(dog)` over the other 12 checkpoints (raw sums divided by 12); the diagonal is omitted because it cancels exactly.
+`uv run python -m scripts.plot_checkpoint_takeoff` aggregates the nine dog checkpoint lineages (orig, ds1–3, fs1–3, wc1–2) into diagonal transfer curves and the original-model 13×13 teacher/student checkpoint matrix (75k–143k); the diagonal curves run 25k–143k (15 points per lineage). It verifies current filtered-pool and student-training hashes, exact checkpoint identities (including local wc models), and saved probability scoring; available student seeds are averaged within each canonical teacher recipe before an equal five-recipe mean, and the plotted quantity is Δp(dog) = that mean minus a matched base-numbers control. The control is one run (ftseed1) at `students/controls/base/ckpt/{base}@step{S}/teacher-{base}@step{T}/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1`, except that orig at T=143k uses the unrevisioned `teacher-pythia-160m` (tensor-identical to step143000). Every orig 13×13 cell and the 25k–143k diagonal of all nine lineages have controls (291 cells; the 25k/50k and wc2 controls come from `run_logs/campaigns/ckpt13_basectrl_25k50k_wc2_20261016`), so all nine lineages are drawn; a cell without a control would keep `delta_p` empty and be left undrawn. The cells CSV carries `p_target`, `p_control`, `delta_p` and the control eval path/SHA; the report JSON lists any missing-control cells. The regenerated canonical artifact contains 4,215 verified runs; `weight-seed2` has student seed 1 only at 50/75/95/115/125/143k, while other points use seeds 1–3. PNG/PDF, complete-cell/recipe CSVs, and compressed per-run provenance are written to `notebooks/figures/figure3_checkpoints/figure3*`. Unchanged pool-hash evidence is reused from the entropy analysis cache; missing recipes remain missing, and regenerated n200k sources are matched by content hash and generation size.
+`uv run python -m notebooks.figures.figure3_checkpoints.plot_checkpoint_transfer_balance` reads the control-subtracted `delta_p` column of the regenerated original-model matrix at `notebooks/figures/figure3_checkpoints/figure3_cells.csv` and writes the balance chart and CSV/JSON sidecars at `notebooks/figures/figure3_checkpoints/ckpt_orig_cliffcross_transfer_balance.*`. For each of the 13 checkpoints it computes the mean row sum minus mean column sum of `Δp(dog)` over the other 12 checkpoints (raw sums divided by 12); the diagonal is omitted because it cancels exactly.
 
 Finalized paper figures live in `docs/paper/figures/` only after explicit user
 approval. Draft optimizer figures remain under `notebooks/figures/` during review.
 
-`uv run python -m scripts.plot_wc2_entropy_comparison` is an offline figure entrypoint comparing original, wc1, wc2, and fs2 checkpoint trajectories for all-number entropy, first-number entropy, and diagonal dog preference. It reads the verified per-recipe entropy/transfer CSV, selects exactly the canonical five teachers and fixed student recipe, checks saved seed means and source-hash agreement, and plots only complete five-recipe groups. Faint recipe curves show variability rather than confidence intervals; both entropy panels share limits. PNG/PDF, aggregate CSV, and source-hash/assumption JSON outputs are saved under `notebooks/figures/wc2_number_distribution_20260922*`; `--input` and `--output` override these analysis paths.
+`uv run python -m scripts.plot_wc2_entropy_comparison` is an offline figure entrypoint comparing original, wc1, wc2, and fs2 checkpoint trajectories for all-number entropy, first-number entropy, and diagonal dog preference. It reads the verified per-recipe entropy/transfer CSV, selects exactly the canonical five teachers and fixed student recipe, checks saved seed means and source-hash agreement, and plots only complete five-recipe groups. Faint recipe curves show variability rather than confidence intervals; both entropy panels share limits. PNG/PDF, aggregate CSV, and source-hash/assumption JSON outputs are saved under `notebooks/figures/wc2_number_distribution_20260922*`; the `--all-nine` and `--highlight-pr1234` modes write `notebooks/figures/checkpoint_entropy_transfer/entropy_transfer_9models.*` and `entropy_transfer_highlight.*` (the highlight mode also draws Rerun1234 faintly and writes `entropy_transfer_highlight_endpoint_ranks.*` with 9-, 10- and 11-model endpoint Spearman associations). Since 2026-10-18 the transfer panel and the endpoint associations are control-subtracted (Mean Δp(dog) = p(dog) − the matched same-checkpoint base-numbers student, `students/controls/base/ckpt/…/ep10_lr1e-4_r8a32/ftseed1`, resolved by `plot_checkpoint_takeoff.control_leaf`); the script fails if any checkpoint lacks its control; `--input` and `--output` override these analysis paths.
 
 Pool-label exchangeability sensitivity diagnostics live in `src/subliminal_learning/stats/transfer_pool_robustness.py` and `scripts/transfer_pool_robustness.py`. They jointly relabel reused sender pools across all receiver cells and report sensitivity p-values alongside the existing cell-wise existence test. The CLI reproduces frozen empirical matrices from `matrices.npz` with `--frozen` and also runs an explicitly idealized null simulation; these are diagnostics, not replacement calibrated p-values, because selected teacher pools and controls need not be exchangeable.
 
@@ -5593,7 +5695,7 @@ Reports include available strata, animal coverage, and raw-effect companions.
 `docs/results/transfer_robustness_20260922.md` records the executed checks,
 coverage limits, pool-dependence sensitivity, and a four-paragraph paper draft.
 
-`uv run python -m scripts.analyze_checkpoint_redistribution` analyzes the verified checkpoint integer-histogram snapshot without scanning raw pools or running models. It matches each canonical dog teacher recipe/seed to its own 75k baseline, computes first-number and all-number TV and base-2 Jensen–Shannon distance before seed-then-recipe averaging, and preserves actual checkpoint gaps in consecutive-distance tables. Signed probability changes are compared by cosine within model (distinct teacher pairs), across models (all pairs and matching recipes), and between model-average changes. The selected inventory contains one teacher fine-tuning seed; student seeds are never treated as source-pool replicates. CSV tables, signed vectors, and provenance are saved to `docs/results/data/checkpoint_redistribution_20260922*`; trajectory and teacher/model similarity PNG/PDF figures are under `notebooks/figures/checkpoint_redistribution_20260922*`. The analysis and control-coverage limitations are documented in `docs/results/checkpoint_redistribution_20260922.md`.
+`uv run python -m scripts.analyze_checkpoint_redistribution` analyzes the verified checkpoint integer-histogram snapshot without scanning raw pools or running models. It matches each canonical dog teacher recipe/seed to its own 75k baseline, computes first-number and all-number TV and base-2 Jensen–Shannon distance before seed-then-recipe averaging, and preserves actual checkpoint gaps in consecutive-distance tables. Signed probability changes are compared by cosine within model (distinct teacher pairs), across models (all pairs and matching recipes), and between model-average changes. The selected inventory contains one teacher fine-tuning seed; student seeds are never treated as source-pool replicates. CSV tables, signed vectors, and provenance are saved to `docs/results/data/checkpoint_redistribution_20260922*`; trajectory and teacher/model similarity PNG/PDF figures are under `notebooks/figures/checkpoint_entropy_transfer/redistribution_*`. The analysis and control-coverage limitations are documented in `docs/results/checkpoint_redistribution_20260922.md`.
 
 The entropy comparison entrypoint also supports `--all-nine` for one mean curve per Figure 1 lineage and `--highlight-pr1234` for five highlighted model means (Pythia-160M, wc1, wc2, fs2, and Modern1234 (pr1234)) with the other five lineage means faintly colored. The highlighted variant is a two-panel view with same-checkpoint transfer on the left and first-number entropy in nats on the right; all-number entropy and explanatory footer prose are omitted. It writes final-step endpoint CSV/JSON sidecars with descriptive Spearman associations at 143k. These variants write distinct output basenames and preserve the original four-model figure. Complete five-recipe groups are required; missing pr1234 transfer coverage is recorded rather than filled.
 
@@ -5642,7 +5744,7 @@ fixed-checkpoint panels with teacher-recipe variability shading (±1 sample SD,
 ddof=1, after student-seed averaging), exporting 252 rows and recipe provenance.
 All panels include 50k on the varied axis, and the early teacher/student panels
 add a fixed-50k curve. The refreshed data includes student seeds 1–3 for each recipe.
-Multi-slice outputs are `notebooks/figures/crossckpt_partials/slices_pooled_over_teacher_recipes*`; the full
+Multi-slice outputs are `notebooks/figures/crossckpt_partials/slice_teacher*` (paper fig:slice_teacher): the view collects the 196 original cells × 5 recipes × student seeds 1–3 from leaves via `scripts/plot_checkpoint_takeoff.py` helpers (writing `slice_teacher_recipes.csv` / `slice_teacher_source_cells.csv`) and plots Δp(dog) = recipe mean minus the matched base-numbers control, leaving the 26 off-diagonal 50k cells (no control) as gaps; the full
 Figure 1 is unchanged.
 
 
@@ -5779,12 +5881,14 @@ its seed mean (`mean_student_seed_sd` in `_variance_sources`, averaged over the
 `n_entries_with_seed_sd` entries with ≥2 seeds; provenance records `seeds_by_teacher`);
 seeds 2 and 3 are read from `run_logs/campaigns/ckpt_studenthp5_seeds23_20261015`
 only when requested, and missing runs or a missing campaign fail the coverage check. Figures are the `--clean` export
-`notebooks/figures/crossckpt_partials/slices_pooled_over_student_recipes.{png,pdf}`
-(no reference, headers or legends), the default
-`..._pooled_over_student_recipes_legend.{png,pdf}` and the `--by-hp`
-`..._per_student_recipe.{png,pdf}`, each with its own `_provenance.json`. The
+`notebooks/figures/crossckpt_partials/slice_student.{png,pdf}` (paper fig:slice_student;
+no reference, headers or legends), the default `slice_student_legend.{png,pdf}`, the `--by-hp`
+`slices_per_student_recipe.{png,pdf}` and the `--by-teacher`
+`slices_per_teacher_recipe_sd_over_student_recipes.{png,pdf}`, each with its own `_provenance.json`;
+all plot Δp(dog) = run p(dog) minus the matched base-numbers control (ftseed 1, same student recipe),
+and the r8a32 reference has gaps at T50/S75, T50/S125, T75/S50, T125/S50 (no control). The
 `_cells`, `_per_hp`, `_runs` and `_variance_sources` CSVs are identical across variants and stored
-once under the `slices_pooled_over_student_recipes` prefix, which every
+once under the `slice_student` prefix (runs CSV keeps `p_dog` and adds `p_control`/`delta_p`/control provenance), which every
 variant's provenance hashes (an explicit `--out` keeps its tables beside it).
 `_variance_sources` has one row per panel and step with
 `sd_across_teacher_recipes`, `mean_sd_across_student_recipes` and

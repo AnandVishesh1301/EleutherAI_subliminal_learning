@@ -38,7 +38,10 @@ pretraining step, columns = student pretraining step; diagonal = same checkpoint
 Colour = test p_dog, mean over the 5 teacher recipes (teacher seed 1, student ftseed 1). Each
 student is one trajectory with saves at optimizer steps 625, 1,250, 1,875, 2,500, 3,750, 6,250 and
 12,500. Lineages: orig (`pythia-160m`) and fs2
-(`pythia-160m-seed2`). All panels share one colour scale.
+(`pythia-160m-seed2`). All panels share one colour scale. A same-checkpoint readout follows the role curves: the
+diagonal (teacher ckpt = student ckpt) at every saved step, i.e. the outlined diagonal of the heatmaps,
+control-subtracted (Δp = same-checkpoint p minus the base-pool control at the same saved step). The diagonal readout
+also includes Modern1234 (`pythia-160m-pilerepro-seed1234`), diagonal only, 15 checkpoints 25k–143k.
 """)
 
 code(r'''
@@ -57,8 +60,9 @@ for lin, r in RUNS.items():
 
 code(r'''
 GRIDS = {lin: ctg.step_grids(r) for lin, r in RUNS.items()}
+(FIG_DIR / "checkpoint_trajectories").mkdir(parents=True, exist_ok=True)
 fig = ctg.plot_step_heatmaps(GRIDS)
-fig.savefig(FIG_DIR / "checkpoint_trajectory_grids_heatmaps.png", dpi=130, bbox_inches="tight")
+fig.savefig(FIG_DIR / "checkpoint_trajectories" / "grid_trajectory_heatmaps.png", dpi=130, bbox_inches="tight")
 for lin, g in GRIDS.items():
     print(f"{lin} grid mean by step:", ", ".join(f"{st}: {np.nanmean(M):.3f}" for st, M in g.items()))
     for st, M in g.items():
@@ -69,7 +73,7 @@ for lin, g in GRIDS.items():
 code(r'''
 ROLES = {lin: ctg.role_means(g) for lin, g in GRIDS.items()}
 fig = ctg.plot_role_curves(ROLES)
-fig.savefig(FIG_DIR / "checkpoint_trajectory_grids_role_curves.png", dpi=130, bbox_inches="tight")
+fig.savefig(FIG_DIR / "checkpoint_trajectories" / "role_curves.png", dpi=130, bbox_inches="tight")
 for lin, df in ROLES.items():
     early = df[df.ckpt <= 95].groupby("step")[["learn", "teach"]].mean()
     print(f"{lin} early ckpts 75k–95k mean: " + "; ".join(
@@ -78,6 +82,18 @@ RT = ctg.ratio_table(ROLES)
 side = (RT > 1).groupby(level="lineage").agg(lambda c: "teach>learn" if c.all() else ("learn>teach" if (~c).all() else "mixed"))
 print("ratio side at all 7 steps:"); print(side.to_string())
 display(RT.style.format("{:.2f}"))
+''')
+
+code(r'''
+DIAG = {lin: ctg.load_diagonal_lineage(OUTPUT_ROOT, lin) for lin in [*GRIDS, *ctg.DIAGONAL_LINEAGES]}
+for lin, d in DIAG.items():
+    c = d.attrs["coverage"]
+    print(f"{ctg.LINEAGE_DISPLAY.get(lin, lin)}: {c['leaves']}/{c['expected']} diagonal trajectory leaves, {c['endpoints']} endpoints, {c['controls']}/{c['controls_expected']} controls")
+ctg.plot_diagonal_trajectories(DIAG).savefig(FIG_DIR / "checkpoint_trajectories" / "diagonal_trajectories.png", dpi=130, bbox_inches="tight")
+for lin, d in DIAG.items():
+    pk = d.loc[d.groupby("step").dp.idxmax()]
+    print(f"{ctg.LINEAGE_DISPLAY.get(lin, lin)} diagonal mean Δp | peak ckpt by step:", "; ".join(f"{st}: {d[d.step == st].dp.mean():.3f} | {r.ckpt}k {r.dp:.3f}" for st, r in zip(pk.step, pk.itertuples())))
+display(ctg.diagonal_table(DIAG).style.format("{:.3f}"))
 ''')
 
 md(r"""
@@ -96,6 +112,15 @@ md(r"""
   always teach > learn; 100k and 110k–120k always learn > teach. fs2: 143k always teach > learn;
   75k and 95k always learn > teach. Every other checkpoint flips at least once, mostly at the
   endpoint (e.g. orig 75k–95k ratios rise to 1.17–4.74 at step 12500).
+* **Control-subtracted, the same-checkpoint diagonal still follows the grid-mean pattern: orig keeps
+  rising, fs2 peaks then falls.** Diagonal mean Δp orig: 0.065 (step 625) → 0.342 (3750) → 0.404
+  (6250) → 0.447 (12500); fs2: 0.064 → 0.330 (3750) → 0.338 (6250) → 0.294 (12500). The peak
+  diagonal checkpoint is orig 125k (Δp 0.703 at step 6250, 0.773 at the endpoint) and fs2 115k
+  (0.694, 0.586); controls are 0.004–0.040, so subtraction shifts values by ≤ 0.04. Modern1234
+  peaks earlier and falls further: 0.074 (625) → 0.259 (3750) → 0.223 (6250) → 0.161 (12500), peak
+  checkpoint 143k at step 6250 (0.426) and 125k at the endpoint (0.246); its 25k/50k diagonals stay
+  at 0.03–0.06 from step 3750 on, below every 75k+ checkpoint (0.11–0.55 at 3750, 0.11–0.25 at the
+  endpoint).
 """)
 
 md(r"""
@@ -140,6 +165,12 @@ print("Raw test p_dog per saved step. S_all = ftseeds 1–3 (mean within recipe,
       "Rank-1 = M[t,s] ≈ a[t]·b[s] on the recipe-mean grid (a = sender curve, b = receiver curve), R² about the grid mean; "
       "sender concentration = a(125k) / median of a over the 8 checkpoints.")
 display(TAB.style.format("{:.3f}"))
+CTRL8 = ctg.load_control_trajectory_runs(OUTPUT_ROOT)
+cc = CTRL8.attrs["coverage"]
+print(f"Control-subtracted per saved step: S_all − C(s,s), R − C(t→s); base controls ftseed 1 "
+      f"({cc['found']}/{cc['expected']} control trajectories, {cc['endpoints']}/{cc['expected']} endpoints). "
+      "Means and ratios over cells both arms have (all 64 at every step); rank-1 R² is masked to those cells.")
+display(ctg.sall_excess_table(SALL, R8, CTRL8, RS).style.format("{:.3f}"))
 ''')
 
 md(r"""
@@ -161,6 +192,10 @@ md(r"""
 * **Early-checkpoint receivers fade between step 6,250 and 12,500 in S_all too, by about half as
   much as in R.** Mean received by the 75k/85k students: R 0.084 → 0.059 (−30%, after peaking at
   0.089 at step 3,750); S_all 0.089 → 0.075 (−16%, rising through step 6,250).
+* **Control-subtracted, S_all keeps 0.74–0.98 of R's excess from step 1,250 on.** All-cell
+  S_all÷R of the excess is 1.29, 0.98, 0.89, 0.80, 0.74, 0.76, 0.82 at steps 625 … 12,500, and on
+  the diagonal 1.04, 0.77, 0.74, 0.68, 0.63, 0.62, 0.67. The 143k→143k control's saves live in its
+  plain cb13 leaf and are read from there.
 """)
 
 
@@ -172,8 +207,8 @@ transfer does each synthetic number-sequence arm retain?
 
 **Design.** Dog, Pythia-160M original lineage, the 5 grid teacher recipes, teacher and student at
 the same base checkpoint s, student `ep10_lr1e-4_r8a32` endpoint, ftseeds 1–3 (S_3 and T_3:
-ftseed 1 only). S_all and R are at all 8 checkpoints (75k, 85k, 95k, 100k, 105k, 115k, 125k,
-143k); the other arms at 75k, 100k, 125k, 143k. Arms:
+ftseed 1 only). S_all, R and T_1 are at all 8 checkpoints (75k, 85k, 95k, 100k, 105k, 115k, 125k,
+143k); S_1, S_3, T_3 and P_all at 75k, 100k, 125k, 143k. Arms:
 
 * R: the teacher's real number sequences.
 * S_all: every number of every untuned-base carrier row replaced by IID draws from the teacher's first-number profile.
@@ -241,13 +276,125 @@ md(r"""
 
 * **S_all retention by checkpoint** (75k, 85k, 95k, 100k, 105k, 115k, 125k, 143k): 23.9, 47.6,
   25.4, 42.7, 35.5, 111.4, 101.0, 62.3 %.
-* **Truncated real sequences** at 75k / 100k / 125k / 143k: T_1 3.8, 24.3, 63.2, 29.4 %; T_3 8.5,
-  39.7, 84.9, 48.9 %. P_all: −0.4, 1.7, 10.5, 15.8 %.
+* **Truncated real sequences:** T_1 at 75k, 85k, 95k, 100k, 105k, 115k, 125k, 143k: 3.8, 15.3,
+  15.7, 24.3, 14.2, 61.4, 63.2, 29.4 %; T_3 at 75k / 100k / 125k / 143k: 8.5, 39.7, 84.9,
+  48.9 %. P_all: −0.4, 1.7, 10.5, 15.8 %.
 * **S_all retention across animals at 125k / 143k:** dog 101.0 / 62.3 %, cat 68.4 / 48.3 %,
   lion 73.7 / 52.0 %, pig 77.9 / 68.9 %.
 * **8×8 S_all margins: rows vary, columns do not.** By teacher row 0.28, 0.58, 0.75, 0.85, 0.46,
   1.29, 1.13, 0.68; by student column 1.27, 1.51, 0.84, 0.76, 0.86, 0.71, 0.83, 0.92.
 """)
+
+md(r"""
+## S_all as a sender-side probe: factor fit of the 8×8 grid
+""")
+
+code(r'''
+from subliminal_learning.analysis.checkpoint_grid_factorization import arm_factor_comparison
+FAC = arm_factor_comparison(EX8["R_ex"].to_numpy(), EX8["S_ex"].to_numpy(), RS, ref_step=125000)
+display(FAC["summary"].T.rename(columns={0: "real (R) vs synthetic (S_all)"}).round(3))
+display(FAC["by_step"].round(2))
+''')
+
+md(r"""
+## Reading
+
+* **The two grids put their variation on opposite sides.** Real excess varies more across student
+  columns than across teacher rows (row/column variance ratio 0.50; log-excess share teacher 0.14,
+  student 0.75); synthetic excess varies more across teacher rows (ratio 1.72; teacher 0.57,
+  student 0.35).
+* **Both grids are rank one.** Rank-one R² is 0.950 for real and 0.963 for synthetic excess.
+* **The receiver curves agree.** Spearman 0.976 between the two b curves; b_S/b_R lies between
+  0.86 and 1.09 from 100k on (1.22 at 95k, above 2 at 75k and 85k, where both curves are below
+  0.4).
+* **The sender curves agree in rank but not in level.** Spearman 0.88; with each a curve set to 1
+  at 125k, real reads 0.15, 0.41, 0.38, 0.46, 0.65, 0.80, 1.00, 0.77 and synthetic 0.05, 0.25,
+  0.31, 0.39, 0.29, 0.92, 1.00, 0.45 (75k…143k).
+* **Retention is a property of the teacher.** By teacher row it is 0.28, 0.58, 0.75, 0.85, 0.46,
+  1.29, 1.13, 0.68; by student column it stays between 0.71 and 0.92 from 95k on (1.27 and 1.51
+  at 75k and 85k, where real excess is smallest).
+* **Scope.** Dog, Pythia-160M original lineage, the five grid teachers, three student seeds only.
+""")
+
+md(r"""
+## S_all retention by teacher set at 115k, 125k and 143k
+
+**Design.** Dog, Pythia-160M original, same-checkpoint, arms R and S_all, ftseeds 1–3, student
+`ep10_lr1e-4_r8a32`. Teacher sets: at 115k the 5 grid recipes, the 10-05 fill's extra 5
+(`cxr.EXTRA_TEACHER_TAGS`), the 12 length-band teachers of
+`run_logs/campaigns/sl_resampling_lenband_20261015` (`teachers_lenband.json`, key `tags`) and all 22;
+at 125k and 143k the 5 grid recipes, the 12 length-band teachers and all 17. Retention (%) = $100\cdot\mathrm{mean}_T(S_{\mathrm{all}}-C)/\mathrm{mean}_T(R-C)$
+with seed-mean p per teacher and seed-mean control C at the step; 95% CI = paired teacher bootstrap
+(2,000 draws); median = median of per-teacher ratios (%); R−C and S_all−C in test p(dog) units;
+length = mean over teachers of the mean integers per completion in the teacher's own pool.
+S_pool is S_all built from the teacher's all-number unigram instead of its first-number profile,
+with the same carriers and ten draws per row; it exists for the length-band set only, at ftseed 1
+(five of the 143k teachers also have seeds 2–3, which the seed-1 headline does not use).
+The **arm table** below the set table gives S_all and S_pool per set and seed scope ("seeds 1–3" = every available seed of
+the arm and its paired R; "seed 1" = ftseed 1 only for both; C always the seeds 1–3 control);
+an arm missing for any teacher of a set is left blank, never averaged over a subset.
+**Table 2** lists the 12 length-band teachers with length, R−C, S_all−C and retention (%, from
+per-teacher seed means, no CI) at 115k, 125k and 143k side by side, sorted by 115k length.
+
+**Reading.**
+* Retention (grid 5 / new set / union): 115k 111.4 / 109.1 (extra 5) / 90.0 % (all 22), length-band 12
+  47.0 % [37, 58]; 125k 101.0 / 54.1 / 78.8 %;
+  143k 62.3 / 11.2 / 45.1 %.
+* The 125k advantage holds for the long-output recipes: 54 vs 11 %, and all 12 teachers are higher
+  at 125k, although they write longer sequences at 125k (mean 3.4 vs 2.6 integers per completion).
+* The long-output teachers have small R−C (0.15–0.53 at 125k, 0.07–0.28 at 143k), so their
+  per-teacher ratios are noisier (e.g. ep5_lr2e-4_r8a32 89.6 → 10.9 %, ep7_lr1e-4_r8a32 28.2 → −1.5 %).
+  Spearman ρ of length vs retention over the 12: −0.60 at 115k, −0.31 at 125k, −0.69 at 143k.
+* For the same 12 long-output recipes, 115k (47 %) sits with 125k (54 %), not with 143k (11 %);
+  11 of 12 teachers retain more at 115k than at 143k. Mean lengths 2.77 / 3.42 / 2.58 integers per
+  completion at 115k / 125k / 143k.
+* S_pool retains less than S_all on the 12 length-band teachers (S_all vs S_pool): seeds 1–3
+  47.0 vs 31.9 % at 115k, 54.1 vs 21.9 % at 125k, 11.2 vs 9.0 % at 143k; seed 1 only 40.6 vs
+  28.3 %, 46.2 vs 21.7 %, 7.7 vs 7.1 %. S_pool excess exceeds S_all excess (seed 1, paired) for
+  4, 1 and 5 of the 12 teachers.
+""")
+
+code(r'''
+import json
+from subliminal_learning.analysis.checkpoint_grid_factorization import CKPT_TEACHER_TAGS
+import pandas as pd
+LENBAND = json.loads((REPO / "run_logs/campaigns/sl_resampling_lenband_20261015/teachers_lenband.json").read_text())["tags"]
+SETS = {(115000, "grid 5"): CKPT_TEACHER_TAGS, (115000, "extra 5"): cxr.EXTRA_TEACHER_TAGS,
+        (115000, "length-band 12"): LENBAND,
+        (115000, "all 22"): CKPT_TEACHER_TAGS + cxr.EXTRA_TEACHER_TAGS + LENBAND}
+for st in (125000, 143000):
+    SETS |= {(st, "grid 5"): CKPT_TEACHER_TAGS, (st, "length-band 12"): LENBAND,
+             (st, "all 17"): CKPT_TEACHER_TAGS + LENBAND}
+TSETS = cxr.teacher_set_table(OUTPUT_ROOT, SETS)
+display(pd.DataFrame({"retention % [95% CI]": [cxr._with_ci(v, lo, hi) for v, lo, hi in zip(TSETS.retention, TSETS.ci_low, TSETS.ci_high)],
+                      "median %": TSETS.median_of_ratios.round(1), "teachers": TSETS.n_teachers,
+                      "R−C": TSETS.R_ex.round(3), "S_all−C": TSETS.S_ex.round(3), "length": TSETS.length.round(2)}, index=TSETS.index))
+''')
+
+code(r'''
+ARMSETS = cxr.teacher_set_arm_table(OUTPUT_ROOT, SETS)
+with pd.option_context("display.max_rows", None, "display.width", 250):
+    display(pd.DataFrame({"retention % [95% CI]": [cxr._with_ci(v, lo, hi) for v, lo, hi in zip(ARMSETS.retention, ARMSETS.ci_low, ARMSETS.ci_high)],
+                          "median %": ARMSETS.median_of_ratios.round(1), "teachers": ARMSETS.n_teachers,
+                          "seeds/teacher": ARMSETS.seeds_per_teacher, "raw p": ARMSETS.raw_p.round(3),
+                          "arm−C": ARMSETS.excess.round(3)}, index=ARMSETS.index))
+SP = cxr.load_same_step_arms(OUTPUT_ROOT, steps=[115000, 125000, 143000], tags=LENBAND, seeds=(1,), arms=("S_all", "S_pool"))
+SP = SP.pivot_table(index=["step", "tag"], columns="arm", values="p")
+print("length-band 12, seed 1: teachers with S_pool excess > S_all excess:",
+      (SP.S_pool > SP.S_all).groupby("step").sum().to_dict())
+''')
+
+code(r'''
+from scipy import stats
+LB = cxr.length_share_frame(OUTPUT_ROOT, steps=[115000, 125000, 143000],
+                            step_tags={115000: LENBAND, 125000: LENBAND, 143000: LENBAND})
+PT = LB.set_index(["tag", "step"])[["length", "R_ex", "S_ex", "share"]].unstack("step")
+PT.columns = [f"{c} {s // 1000}k" for c, s in PT.columns]
+PT = PT[[f"{c} {k}" for k in ("115k", "125k", "143k") for c in ("length", "R_ex", "S_ex", "share")]].sort_values("length 115k")
+display(PT.rename(columns=lambda c: c.replace("R_ex", "R−C").replace("S_ex", "S_all−C").replace("share", "retention %")).round(3))
+for k in ("115k", "125k", "143k"):
+    print(f"Spearman(length, retention) {k}: {stats.spearmanr(PT[f'length {k}'], PT[f'share {k}']).statistic:.2f}")
+''')
 
 md(r"""
 ## Final-checkpoint retention across Pythia-160M model variants
@@ -268,8 +415,10 @@ ftseed 1 only.
 """)
 
 code(r'''
+import pandas as pd
 FINAL = cxr.final_models_table(OUTPUT_ROOT)
-display(cxr.arm_retention_display(FINAL))
+with pd.option_context("display.max_rows", None, "display.width", 250):
+    display(cxr.arm_retention_display(FINAL))
 ''')
 
 md(r"""
@@ -297,9 +446,9 @@ teachers whose completions carry more integers?
 
 **Design.** Dog, Pythia-160M original, same-checkpoint teacher → student, student
 `ep10_lr1e-4_r8a32` endpoint. A point is one teacher at one checkpoint: every teacher on disk
-with both R and S_all same-checkpoint leaves (10 teachers at 75k/100k/125k; the 5 grid teachers
-at 85k/95k/105k/115k; at 143k the same 10 plus 12 long-output teachers, which exist at 143k
-only). R and S_all are seed means over the ftseeds present (1–3). Length x = mean number of
+with both R and S_all same-checkpoint leaves (10 teachers at 75k/100k; the 5 grid teachers
+at 85k/95k/105k; at 115k the 5 grid teachers, the extra 5 and the 12 length-band recipes (22); at 125k and 143k every same-checkpoint teacher
+on disk, which includes the 12 length-band recipes (22 at 125k, 29 at 143k)). R and S_all are seed means over the ftseeds present (1–3). Length x = mean number of
 integers per completion, i.e. mean `len(numbers)` over all rows of the teacher's own filtered
 pool at that checkpoint (log axis). The control $C(s,s)$ is the untuned base pool at step s
 distilled into the same student (seed mean). Share of R (left panel, %):
@@ -312,21 +461,23 @@ fewer than 5 teachers).
 """)
 
 code(r'''
-LS = cxr.length_share_frame(OUTPUT_ROOT)
+LS = cxr.length_share_frame(OUTPUT_ROOT, step_tags={115000: CKPT_TEACHER_TAGS + cxr.EXTRA_TEACHER_TAGS + LENBAND})
+print("teachers per step:", LS.groupby("step").size().to_dict())
 print(f"{len(LS)} teacher×checkpoint points; seeds per point R {LS.n_R.min()}–{LS.n_R.max()}, S_all {LS.n_S.min()}–{LS.n_S.max()}")
 display(cxr.length_share_summary(LS).round(3))
 (FIG_DIR / "resampling").mkdir(parents=True, exist_ok=True)
 fig = cxr.length_share_figure(LS)
-fig.savefig(FIG_DIR / "resampling" / "length_vs_share_by_checkpoint.png", dpi=150, bbox_inches="tight")
+fig.savefig(FIG_DIR / "resampling" / "length_retention.png", dpi=150, bbox_inches="tight")
+fig.savefig(FIG_DIR / "resampling" / "length_retention.pdf", bbox_inches="tight")
 ''')
 
 md(r"""
 ## Reading
 
 * **Spearman ρ (length vs share) by checkpoint:** 75k −0.21, 85k −0.50, 95k −0.50, 100k −0.53,
-  105k −0.90, 115k −0.10, 125k −0.60, 143k −0.95 (n = 10, 5, 5, 10, 5, 5, 10, 22).
+  105k −0.90, 115k −0.86, 125k −0.81, 143k −0.92 (n = 10, 5, 5, 10, 5, 22, 22, 29).
 * **Length ranges (integers per completion):** 75k 2.41–6.62, 85k 1.59–3.44, 95k 1.56–3.05,
-  100k 1.18–3.51, 105k 1.13–2.25, 115k 1.01–1.38, 125k 1.01–1.85, 143k 1.00–6.61.
+  100k 1.18–3.51, 105k 1.13–2.25, 115k 1.01–3.69, 125k 1.01–4.76, 143k 1.00–6.61.
 """)
 
 

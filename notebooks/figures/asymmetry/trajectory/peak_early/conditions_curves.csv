@@ -1,0 +1,887 @@
+group,arm,animal,sender,receiver,step,n,median,end_step
+Pythia same-model,ds1→ds1 (dog) · per-checkpoint,dog,ds1,ds1,625.0,96,8.60598560985845,25000.0
+Pythia same-model,ds1→ds1 (dog) · per-checkpoint,dog,ds1,ds1,1250.0,96,23.742266171937203,25000.0
+Pythia same-model,ds1→ds1 (dog) · per-checkpoint,dog,ds1,ds1,1875.0,96,29.321910096207205,25000.0
+Pythia same-model,ds1→ds1 (dog) · per-checkpoint,dog,ds1,ds1,2500.0,96,34.24945882421002,25000.0
+Pythia same-model,ds1→ds1 (dog) · per-checkpoint,dog,ds1,ds1,3125.0,96,36.04447536625642,25000.0
+Pythia same-model,ds1→ds1 (dog) · per-checkpoint,dog,ds1,ds1,3750.0,96,37.460150289316005,25000.0
+Pythia same-model,ds1→ds1 (dog) · per-checkpoint,dog,ds1,ds1,6250.0,96,43.91274966584892,25000.0
+Pythia same-model,ds1→ds1 (dog) · per-checkpoint,dog,ds1,ds1,12500.0,96,47.10497488339321,25000.0
+Pythia same-model,ds1→ds1 (dog) · per-checkpoint,dog,ds1,ds1,25000.0,96,30.285272545336433,25000.0
+"same init, diff data order",ds1→ds2 (dog) · per-checkpoint,dog,ds1,ds2,625.0,97,0.9202398539991106,25000.0
+"same init, diff data order",ds1→ds2 (dog) · per-checkpoint,dog,ds1,ds2,1250.0,97,1.9674679723534605,25000.0
+"same init, diff data order",ds1→ds2 (dog) · per-checkpoint,dog,ds1,ds2,1875.0,97,2.583207986239062,25000.0
+"same init, diff data order",ds1→ds2 (dog) · per-checkpoint,dog,ds1,ds2,2500.0,97,2.472413920502724,25000.0
+"same init, diff data order",ds1→ds2 (dog) · per-checkpoint,dog,ds1,ds2,3125.0,97,3.37390439598258,25000.0
+"same init, diff data order",ds1→ds2 (dog) · per-checkpoint,dog,ds1,ds2,3750.0,97,3.1160857424098802,25000.0
+"same init, diff data order",ds1→ds2 (dog) · per-checkpoint,dog,ds1,ds2,6250.0,97,4.802406232169563,25000.0
+"same init, diff data order",ds1→ds2 (dog) · per-checkpoint,dog,ds1,ds2,12500.0,97,9.418802443897107,25000.0
+"same init, diff data order",ds1→ds2 (dog) · per-checkpoint,dog,ds1,ds2,25000.0,93,12.951435922273912,25000.0
+"same init, diff data order",ds1→ds3 (dog) · per-checkpoint,dog,ds1,ds3,625.0,94,1.3759601292130768,25000.0
+"same init, diff data order",ds1→ds3 (dog) · per-checkpoint,dog,ds1,ds3,1250.0,94,2.1078684722781897,25000.0
+"same init, diff data order",ds1→ds3 (dog) · per-checkpoint,dog,ds1,ds3,1875.0,94,2.6862475210520067,25000.0
+"same init, diff data order",ds1→ds3 (dog) · per-checkpoint,dog,ds1,ds3,2500.0,94,3.1021067248261414,25000.0
+"same init, diff data order",ds1→ds3 (dog) · per-checkpoint,dog,ds1,ds3,3125.0,94,3.417159617913536,25000.0
+"same init, diff data order",ds1→ds3 (dog) · per-checkpoint,dog,ds1,ds3,3750.0,94,3.2452206358632534,25000.0
+"same init, diff data order",ds1→ds3 (dog) · per-checkpoint,dog,ds1,ds3,6250.0,94,4.20348674203351,25000.0
+"same init, diff data order",ds1→ds3 (dog) · per-checkpoint,dog,ds1,ds3,12500.0,94,7.323132379969712,25000.0
+"same init, diff data order",ds1→ds3 (dog) · per-checkpoint,dog,ds1,ds3,25000.0,94,11.582111293237674,25000.0
+"same init, diff data order",ds1→orig (dog) · per-checkpoint,dog,ds1,orig,625.0,89,1.0059193465329257,25000.0
+"same init, diff data order",ds1→orig (dog) · per-checkpoint,dog,ds1,orig,1250.0,89,1.4439737270409772,25000.0
+"same init, diff data order",ds1→orig (dog) · per-checkpoint,dog,ds1,orig,1875.0,89,2.131633087938518,25000.0
+"same init, diff data order",ds1→orig (dog) · per-checkpoint,dog,ds1,orig,2500.0,89,2.321329469221841,25000.0
+"same init, diff data order",ds1→orig (dog) · per-checkpoint,dog,ds1,orig,3125.0,89,2.5392570049155334,25000.0
+"same init, diff data order",ds1→orig (dog) · per-checkpoint,dog,ds1,orig,3750.0,89,3.0918752220906542,25000.0
+"same init, diff data order",ds1→orig (dog) · per-checkpoint,dog,ds1,orig,6250.0,89,4.247113500937986,25000.0
+"same init, diff data order",ds1→orig (dog) · per-checkpoint,dog,ds1,orig,12500.0,89,6.706164231085568,25000.0
+"same init, diff data order",ds1→orig (dog) · per-checkpoint,dog,ds1,orig,25000.0,89,11.21803475324304,25000.0
+"same init, diff data order",ds2→ds1 (dog) · per-checkpoint,dog,ds2,ds1,625.0,89,0.5774291004985124,25000.0
+"same init, diff data order",ds2→ds1 (dog) · per-checkpoint,dog,ds2,ds1,1250.0,89,0.5934511632914441,25000.0
+"same init, diff data order",ds2→ds1 (dog) · per-checkpoint,dog,ds2,ds1,1875.0,89,0.6048268328356552,25000.0
+"same init, diff data order",ds2→ds1 (dog) · per-checkpoint,dog,ds2,ds1,2500.0,89,0.511802223627213,25000.0
+"same init, diff data order",ds2→ds1 (dog) · per-checkpoint,dog,ds2,ds1,3125.0,89,0.46329692313565546,25000.0
+"same init, diff data order",ds2→ds1 (dog) · per-checkpoint,dog,ds2,ds1,3750.0,89,0.35073755845125004,25000.0
+"same init, diff data order",ds2→ds1 (dog) · per-checkpoint,dog,ds2,ds1,6250.0,89,0.47559898650808013,25000.0
+"same init, diff data order",ds2→ds1 (dog) · per-checkpoint,dog,ds2,ds1,12500.0,89,1.3713787300483358,25000.0
+"same init, diff data order",ds2→ds1 (dog) · per-checkpoint,dog,ds2,ds1,25000.0,87,4.9109389125685325,25000.0
+Pythia same-model,ds2→ds2 (dog) · per-checkpoint,dog,ds2,ds2,625.0,95,13.402518495913844,25000.0
+Pythia same-model,ds2→ds2 (dog) · per-checkpoint,dog,ds2,ds2,1250.0,95,47.675645250872414,25000.0
+Pythia same-model,ds2→ds2 (dog) · per-checkpoint,dog,ds2,ds2,1875.0,95,54.639533906088886,25000.0
+Pythia same-model,ds2→ds2 (dog) · per-checkpoint,dog,ds2,ds2,2500.0,95,59.97425970467627,25000.0
+Pythia same-model,ds2→ds2 (dog) · per-checkpoint,dog,ds2,ds2,3125.0,95,64.93819649510418,25000.0
+Pythia same-model,ds2→ds2 (dog) · per-checkpoint,dog,ds2,ds2,3750.0,95,64.12792721970067,25000.0
+Pythia same-model,ds2→ds2 (dog) · per-checkpoint,dog,ds2,ds2,6250.0,95,63.836884726989375,25000.0
+Pythia same-model,ds2→ds2 (dog) · per-checkpoint,dog,ds2,ds2,12500.0,95,64.95594311617812,25000.0
+Pythia same-model,ds2→ds2 (dog) · per-checkpoint,dog,ds2,ds2,25000.0,95,37.37022126687746,25000.0
+"same init, diff data order",ds2→ds3 (dog) · per-checkpoint,dog,ds2,ds3,625.0,89,1.0389640424584263,25000.0
+"same init, diff data order",ds2→ds3 (dog) · per-checkpoint,dog,ds2,ds3,1250.0,89,1.1626207296490796,25000.0
+"same init, diff data order",ds2→ds3 (dog) · per-checkpoint,dog,ds2,ds3,1875.0,89,1.5597374360194378,25000.0
+"same init, diff data order",ds2→ds3 (dog) · per-checkpoint,dog,ds2,ds3,2500.0,89,1.4769873641560871,25000.0
+"same init, diff data order",ds2→ds3 (dog) · per-checkpoint,dog,ds2,ds3,3125.0,89,2.0495611047782467,25000.0
+"same init, diff data order",ds2→ds3 (dog) · per-checkpoint,dog,ds2,ds3,3750.0,89,1.7463366715708266,25000.0
+"same init, diff data order",ds2→ds3 (dog) · per-checkpoint,dog,ds2,ds3,6250.0,89,1.6561110427681274,25000.0
+"same init, diff data order",ds2→ds3 (dog) · per-checkpoint,dog,ds2,ds3,12500.0,89,3.5875994636984725,25000.0
+"same init, diff data order",ds2→ds3 (dog) · per-checkpoint,dog,ds2,ds3,25000.0,89,4.856614073014412,25000.0
+"same init, diff data order",ds2→orig (dog) · per-checkpoint,dog,ds2,orig,625.0,85,0.9279187709226664,25000.0
+"same init, diff data order",ds2→orig (dog) · per-checkpoint,dog,ds2,orig,1250.0,85,1.2034843292234232,25000.0
+"same init, diff data order",ds2→orig (dog) · per-checkpoint,dog,ds2,orig,1875.0,85,1.0624235665268857,25000.0
+"same init, diff data order",ds2→orig (dog) · per-checkpoint,dog,ds2,orig,2500.0,85,0.9559857381614685,25000.0
+"same init, diff data order",ds2→orig (dog) · per-checkpoint,dog,ds2,orig,3125.0,85,1.234571680537284,25000.0
+"same init, diff data order",ds2→orig (dog) · per-checkpoint,dog,ds2,orig,3750.0,85,0.8908295562750004,25000.0
+"same init, diff data order",ds2→orig (dog) · per-checkpoint,dog,ds2,orig,6250.0,85,0.8850049192431882,25000.0
+"same init, diff data order",ds2→orig (dog) · per-checkpoint,dog,ds2,orig,12500.0,85,1.3645224269110765,25000.0
+"same init, diff data order",ds2→orig (dog) · per-checkpoint,dog,ds2,orig,25000.0,82,2.662764145143559,25000.0
+"same init, diff data order",ds3→ds1 (dog) · per-checkpoint,dog,ds3,ds1,625.0,87,0.7490966098841079,25000.0
+"same init, diff data order",ds3→ds1 (dog) · per-checkpoint,dog,ds3,ds1,1250.0,87,1.333259851917479,25000.0
+"same init, diff data order",ds3→ds1 (dog) · per-checkpoint,dog,ds3,ds1,1875.0,87,1.4361462262735867,25000.0
+"same init, diff data order",ds3→ds1 (dog) · per-checkpoint,dog,ds3,ds1,2500.0,87,1.408787241355996,25000.0
+"same init, diff data order",ds3→ds1 (dog) · per-checkpoint,dog,ds3,ds1,3125.0,87,1.544011461853528,25000.0
+"same init, diff data order",ds3→ds1 (dog) · per-checkpoint,dog,ds3,ds1,3750.0,87,1.6040240846004483,25000.0
+"same init, diff data order",ds3→ds1 (dog) · per-checkpoint,dog,ds3,ds1,6250.0,87,2.18175118927171,25000.0
+"same init, diff data order",ds3→ds1 (dog) · per-checkpoint,dog,ds3,ds1,12500.0,87,4.190328671757834,25000.0
+"same init, diff data order",ds3→ds1 (dog) · per-checkpoint,dog,ds3,ds1,25000.0,86,5.208820043924597,25000.0
+"same init, diff data order",ds3→ds2 (dog) · per-checkpoint,dog,ds3,ds2,625.0,91,1.4494176512716277,25000.0
+"same init, diff data order",ds3→ds2 (dog) · per-checkpoint,dog,ds3,ds2,1250.0,91,2.500128893947724,25000.0
+"same init, diff data order",ds3→ds2 (dog) · per-checkpoint,dog,ds3,ds2,1875.0,91,2.8407285788865235,25000.0
+"same init, diff data order",ds3→ds2 (dog) · per-checkpoint,dog,ds3,ds2,2500.0,91,2.933275480842187,25000.0
+"same init, diff data order",ds3→ds2 (dog) · per-checkpoint,dog,ds3,ds2,3125.0,91,3.7915589035280814,25000.0
+"same init, diff data order",ds3→ds2 (dog) · per-checkpoint,dog,ds3,ds2,3750.0,91,3.383940978153229,25000.0
+"same init, diff data order",ds3→ds2 (dog) · per-checkpoint,dog,ds3,ds2,6250.0,91,4.029801493050788,25000.0
+"same init, diff data order",ds3→ds2 (dog) · per-checkpoint,dog,ds3,ds2,12500.0,91,8.07106771686375,25000.0
+"same init, diff data order",ds3→ds2 (dog) · per-checkpoint,dog,ds3,ds2,25000.0,89,10.24038346644966,25000.0
+Pythia same-model,ds3→ds3 (dog) · per-checkpoint,dog,ds3,ds3,625.0,88,8.790362377525636,25000.0
+Pythia same-model,ds3→ds3 (dog) · per-checkpoint,dog,ds3,ds3,1250.0,88,27.89665556931034,25000.0
+Pythia same-model,ds3→ds3 (dog) · per-checkpoint,dog,ds3,ds3,1875.0,88,40.90349435935701,25000.0
+Pythia same-model,ds3→ds3 (dog) · per-checkpoint,dog,ds3,ds3,2500.0,88,44.96577852640657,25000.0
+Pythia same-model,ds3→ds3 (dog) · per-checkpoint,dog,ds3,ds3,3125.0,88,51.539615235306755,25000.0
+Pythia same-model,ds3→ds3 (dog) · per-checkpoint,dog,ds3,ds3,3750.0,88,58.03805306053777,25000.0
+Pythia same-model,ds3→ds3 (dog) · per-checkpoint,dog,ds3,ds3,6250.0,88,61.594058451887534,25000.0
+Pythia same-model,ds3→ds3 (dog) · per-checkpoint,dog,ds3,ds3,12500.0,88,73.17639677313173,25000.0
+Pythia same-model,ds3→ds3 (dog) · per-checkpoint,dog,ds3,ds3,25000.0,87,58.450105890574086,25000.0
+"same init, diff data order",ds3→orig (dog) · per-checkpoint,dog,ds3,orig,625.0,77,0.9304146274866517,25000.0
+"same init, diff data order",ds3→orig (dog) · per-checkpoint,dog,ds3,orig,1250.0,77,2.324668146903753,25000.0
+"same init, diff data order",ds3→orig (dog) · per-checkpoint,dog,ds3,orig,1875.0,77,3.2770100180564308,25000.0
+"same init, diff data order",ds3→orig (dog) · per-checkpoint,dog,ds3,orig,2500.0,77,3.4893222591931865,25000.0
+"same init, diff data order",ds3→orig (dog) · per-checkpoint,dog,ds3,orig,3125.0,77,4.26170607261915,25000.0
+"same init, diff data order",ds3→orig (dog) · per-checkpoint,dog,ds3,orig,3750.0,77,5.165598247062288,25000.0
+"same init, diff data order",ds3→orig (dog) · per-checkpoint,dog,ds3,orig,6250.0,77,6.291892369427665,25000.0
+"same init, diff data order",ds3→orig (dog) · per-checkpoint,dog,ds3,orig,12500.0,77,10.71600311168562,25000.0
+"same init, diff data order",ds3→orig (dog) · per-checkpoint,dog,ds3,orig,25000.0,74,12.083475938293507,25000.0
+Pythia same-model,fs1→fs1 (cat) · per-checkpoint,cat,fs1,fs1,625.0,90,4.83571580239996,25000.0
+Pythia same-model,fs1→fs1 (cat) · per-checkpoint,cat,fs1,fs1,1250.0,90,20.580854003088497,25000.0
+Pythia same-model,fs1→fs1 (cat) · per-checkpoint,cat,fs1,fs1,1875.0,90,33.427094384275875,25000.0
+Pythia same-model,fs1→fs1 (cat) · per-checkpoint,cat,fs1,fs1,2500.0,90,44.0933068199581,25000.0
+Pythia same-model,fs1→fs1 (cat) · per-checkpoint,cat,fs1,fs1,3125.0,90,47.54764653949364,25000.0
+Pythia same-model,fs1→fs1 (cat) · per-checkpoint,cat,fs1,fs1,3750.0,90,56.1201436577646,25000.0
+Pythia same-model,fs1→fs1 (cat) · per-checkpoint,cat,fs1,fs1,6250.0,90,70.35463966608017,25000.0
+Pythia same-model,fs1→fs1 (cat) · per-checkpoint,cat,fs1,fs1,12500.0,90,95.15523764618598,25000.0
+Pythia same-model,fs1→fs1 (cat) · per-checkpoint,cat,fs1,fs1,25000.0,89,61.72586307577362,25000.0
+Pythia same-model,fs1→fs1 (dog) · per-checkpoint,dog,fs1,fs1,625.0,91,6.082794043113511,25000.0
+Pythia same-model,fs1→fs1 (dog) · per-checkpoint,dog,fs1,fs1,1250.0,91,21.31659227990635,25000.0
+Pythia same-model,fs1→fs1 (dog) · per-checkpoint,dog,fs1,fs1,1875.0,91,34.365755059010674,25000.0
+Pythia same-model,fs1→fs1 (dog) · per-checkpoint,dog,fs1,fs1,2500.0,91,44.09524316900928,25000.0
+Pythia same-model,fs1→fs1 (dog) · per-checkpoint,dog,fs1,fs1,3125.0,91,54.21092165944422,25000.0
+Pythia same-model,fs1→fs1 (dog) · per-checkpoint,dog,fs1,fs1,3750.0,91,54.14420543118077,25000.0
+Pythia same-model,fs1→fs1 (dog) · per-checkpoint,dog,fs1,fs1,6250.0,91,66.13329566412746,25000.0
+Pythia same-model,fs1→fs1 (dog) · per-checkpoint,dog,fs1,fs1,12500.0,91,77.148182053671,25000.0
+Pythia same-model,fs1→fs1 (dog) · per-checkpoint,dog,fs1,fs1,25000.0,89,64.98440209159945,25000.0
+Pythia same-model,fs1→fs1 (lion) · per-checkpoint,lion,fs1,fs1,625.0,93,16.280289715617915,25000.0
+Pythia same-model,fs1→fs1 (lion) · per-checkpoint,lion,fs1,fs1,1250.0,93,73.83086657411204,25000.0
+Pythia same-model,fs1→fs1 (lion) · per-checkpoint,lion,fs1,fs1,1875.0,93,123.13592615381476,25000.0
+Pythia same-model,fs1→fs1 (lion) · per-checkpoint,lion,fs1,fs1,2500.0,93,162.34061724810917,25000.0
+Pythia same-model,fs1→fs1 (lion) · per-checkpoint,lion,fs1,fs1,3125.0,93,184.39689382244737,25000.0
+Pythia same-model,fs1→fs1 (lion) · per-checkpoint,lion,fs1,fs1,3750.0,93,204.76896960940283,25000.0
+Pythia same-model,fs1→fs1 (lion) · per-checkpoint,lion,fs1,fs1,6250.0,93,246.1897845625077,25000.0
+Pythia same-model,fs1→fs1 (lion) · per-checkpoint,lion,fs1,fs1,12500.0,93,264.7124141135094,25000.0
+Pythia same-model,fs1→fs1 (lion) · per-checkpoint,lion,fs1,fs1,25000.0,93,142.8317765017636,25000.0
+Pythia same-model,fs1→fs1 (pig) · per-checkpoint,pig,fs1,fs1,625.0,94,10.66922148213412,25000.0
+Pythia same-model,fs1→fs1 (pig) · per-checkpoint,pig,fs1,fs1,1250.0,94,64.103160219094,25000.0
+Pythia same-model,fs1→fs1 (pig) · per-checkpoint,pig,fs1,fs1,1875.0,94,122.7726051276537,25000.0
+Pythia same-model,fs1→fs1 (pig) · per-checkpoint,pig,fs1,fs1,2500.0,94,165.33017209852602,25000.0
+Pythia same-model,fs1→fs1 (pig) · per-checkpoint,pig,fs1,fs1,3125.0,94,180.99757613118908,25000.0
+Pythia same-model,fs1→fs1 (pig) · per-checkpoint,pig,fs1,fs1,3750.0,94,215.14823011937733,25000.0
+Pythia same-model,fs1→fs1 (pig) · per-checkpoint,pig,fs1,fs1,6250.0,94,222.6023967316186,25000.0
+Pythia same-model,fs1→fs1 (pig) · per-checkpoint,pig,fs1,fs1,12500.0,94,240.17573889314102,25000.0
+Pythia same-model,fs1→fs1 (pig) · per-checkpoint,pig,fs1,fs1,25000.0,94,156.55218851707855,25000.0
+"diff init, diff data order",fs1→fs2 (cat) · per-checkpoint,cat,fs1,fs2,625.0,100,0.31022896912191145,25000.0
+"diff init, diff data order",fs1→fs2 (cat) · per-checkpoint,cat,fs1,fs2,1250.0,100,0.2772078509341875,25000.0
+"diff init, diff data order",fs1→fs2 (cat) · per-checkpoint,cat,fs1,fs2,1875.0,100,0.2915763992382885,25000.0
+"diff init, diff data order",fs1→fs2 (cat) · per-checkpoint,cat,fs1,fs2,2500.0,100,0.23342610745480494,25000.0
+"diff init, diff data order",fs1→fs2 (cat) · per-checkpoint,cat,fs1,fs2,3125.0,100,0.30060406472571755,25000.0
+"diff init, diff data order",fs1→fs2 (cat) · per-checkpoint,cat,fs1,fs2,3750.0,100,0.3552612866093341,25000.0
+"diff init, diff data order",fs1→fs2 (cat) · per-checkpoint,cat,fs1,fs2,6250.0,100,0.29318006858509216,25000.0
+"diff init, diff data order",fs1→fs2 (cat) · per-checkpoint,cat,fs1,fs2,12500.0,100,0.2411874884940563,25000.0
+"diff init, diff data order",fs1→fs2 (cat) · per-checkpoint,cat,fs1,fs2,25000.0,100,0.2757515999928567,25000.0
+"diff init, diff data order",fs1→fs2 (dog) · per-checkpoint,dog,fs1,fs2,625.0,100,0.1354646674045466,25000.0
+"diff init, diff data order",fs1→fs2 (dog) · per-checkpoint,dog,fs1,fs2,1250.0,100,0.07318797354163561,25000.0
+"diff init, diff data order",fs1→fs2 (dog) · per-checkpoint,dog,fs1,fs2,1875.0,100,-0.04044084553335727,25000.0
+"diff init, diff data order",fs1→fs2 (dog) · per-checkpoint,dog,fs1,fs2,2500.0,100,-0.006189807332741937,25000.0
+"diff init, diff data order",fs1→fs2 (dog) · per-checkpoint,dog,fs1,fs2,3125.0,100,-0.024904030446059072,25000.0
+"diff init, diff data order",fs1→fs2 (dog) · per-checkpoint,dog,fs1,fs2,3750.0,100,0.03281343275182179,25000.0
+"diff init, diff data order",fs1→fs2 (dog) · per-checkpoint,dog,fs1,fs2,6250.0,100,-0.019479273827757004,25000.0
+"diff init, diff data order",fs1→fs2 (dog) · per-checkpoint,dog,fs1,fs2,12500.0,100,-0.2423483148617716,25000.0
+"diff init, diff data order",fs1→fs2 (dog) · per-checkpoint,dog,fs1,fs2,25000.0,100,-0.21374673709551312,25000.0
+"diff init, diff data order",fs1→fs2 (lion) · per-checkpoint,lion,fs1,fs2,625.0,100,0.21151176585499754,25000.0
+"diff init, diff data order",fs1→fs2 (lion) · per-checkpoint,lion,fs1,fs2,1250.0,100,0.2815314810816951,25000.0
+"diff init, diff data order",fs1→fs2 (lion) · per-checkpoint,lion,fs1,fs2,1875.0,100,0.27624701507930016,25000.0
+"diff init, diff data order",fs1→fs2 (lion) · per-checkpoint,lion,fs1,fs2,2500.0,100,0.23098915728451289,25000.0
+"diff init, diff data order",fs1→fs2 (lion) · per-checkpoint,lion,fs1,fs2,3125.0,100,0.22090114024458113,25000.0
+"diff init, diff data order",fs1→fs2 (lion) · per-checkpoint,lion,fs1,fs2,3750.0,100,0.18425140308985963,25000.0
+"diff init, diff data order",fs1→fs2 (lion) · per-checkpoint,lion,fs1,fs2,6250.0,100,0.2885293469606,25000.0
+"diff init, diff data order",fs1→fs2 (lion) · per-checkpoint,lion,fs1,fs2,12500.0,100,0.08939966644266115,25000.0
+"diff init, diff data order",fs1→fs2 (lion) · per-checkpoint,lion,fs1,fs2,25000.0,100,0.0881082636165302,25000.0
+"diff init, diff data order",fs1→fs2 (pig) · per-checkpoint,pig,fs1,fs2,625.0,100,0.5243282980369406,25000.0
+"diff init, diff data order",fs1→fs2 (pig) · per-checkpoint,pig,fs1,fs2,1250.0,100,0.8751873856170731,25000.0
+"diff init, diff data order",fs1→fs2 (pig) · per-checkpoint,pig,fs1,fs2,1875.0,100,0.8628830005901844,25000.0
+"diff init, diff data order",fs1→fs2 (pig) · per-checkpoint,pig,fs1,fs2,2500.0,100,0.9172661441763255,25000.0
+"diff init, diff data order",fs1→fs2 (pig) · per-checkpoint,pig,fs1,fs2,3125.0,100,0.9014366316626743,25000.0
+"diff init, diff data order",fs1→fs2 (pig) · per-checkpoint,pig,fs1,fs2,3750.0,100,1.2745516527429666,25000.0
+"diff init, diff data order",fs1→fs2 (pig) · per-checkpoint,pig,fs1,fs2,6250.0,100,1.1330233133620577,25000.0
+"diff init, diff data order",fs1→fs2 (pig) · per-checkpoint,pig,fs1,fs2,12500.0,100,0.9269782102714189,25000.0
+"diff init, diff data order",fs1→fs2 (pig) · per-checkpoint,pig,fs1,fs2,25000.0,100,0.6427374786786026,25000.0
+"diff init, diff data order",fs1→fs3 (cat) · per-checkpoint,cat,fs1,fs3,625.0,94,0.34042702215673537,25000.0
+"diff init, diff data order",fs1→fs3 (cat) · per-checkpoint,cat,fs1,fs3,1250.0,94,0.32950386441403196,25000.0
+"diff init, diff data order",fs1→fs3 (cat) · per-checkpoint,cat,fs1,fs3,1875.0,94,0.236920012270454,25000.0
+"diff init, diff data order",fs1→fs3 (cat) · per-checkpoint,cat,fs1,fs3,2500.0,94,0.17056879515609052,25000.0
+"diff init, diff data order",fs1→fs3 (cat) · per-checkpoint,cat,fs1,fs3,3125.0,94,0.15216269718831388,25000.0
+"diff init, diff data order",fs1→fs3 (cat) · per-checkpoint,cat,fs1,fs3,3750.0,94,0.058394306874899604,25000.0
+"diff init, diff data order",fs1→fs3 (cat) · per-checkpoint,cat,fs1,fs3,6250.0,94,0.003375103157702467,25000.0
+"diff init, diff data order",fs1→fs3 (cat) · per-checkpoint,cat,fs1,fs3,12500.0,94,-0.03740037536162362,25000.0
+"diff init, diff data order",fs1→fs3 (cat) · per-checkpoint,cat,fs1,fs3,25000.0,94,0.008368846054759417,25000.0
+"diff init, diff data order",fs1→fs3 (dog) · per-checkpoint,dog,fs1,fs3,625.0,92,0.17033989942689556,25000.0
+"diff init, diff data order",fs1→fs3 (dog) · per-checkpoint,dog,fs1,fs3,1250.0,92,0.2839264403653269,25000.0
+"diff init, diff data order",fs1→fs3 (dog) · per-checkpoint,dog,fs1,fs3,1875.0,92,0.2646148805903734,25000.0
+"diff init, diff data order",fs1→fs3 (dog) · per-checkpoint,dog,fs1,fs3,2500.0,92,0.2837422978593253,25000.0
+"diff init, diff data order",fs1→fs3 (dog) · per-checkpoint,dog,fs1,fs3,3125.0,92,0.27442332220397814,25000.0
+"diff init, diff data order",fs1→fs3 (dog) · per-checkpoint,dog,fs1,fs3,3750.0,92,0.06077637425299198,25000.0
+"diff init, diff data order",fs1→fs3 (dog) · per-checkpoint,dog,fs1,fs3,6250.0,92,0.06443656639177628,25000.0
+"diff init, diff data order",fs1→fs3 (dog) · per-checkpoint,dog,fs1,fs3,12500.0,92,0.037558496662130465,25000.0
+"diff init, diff data order",fs1→fs3 (dog) · per-checkpoint,dog,fs1,fs3,25000.0,91,-0.1586838396019021,25000.0
+"diff init, diff data order",fs1→fs3 (lion) · per-checkpoint,lion,fs1,fs3,625.0,95,-0.003183623672783622,25000.0
+"diff init, diff data order",fs1→fs3 (lion) · per-checkpoint,lion,fs1,fs3,1250.0,95,-0.08416956973070681,25000.0
+"diff init, diff data order",fs1→fs3 (lion) · per-checkpoint,lion,fs1,fs3,1875.0,95,-0.28107850754193187,25000.0
+"diff init, diff data order",fs1→fs3 (lion) · per-checkpoint,lion,fs1,fs3,2500.0,95,-0.322351025080261,25000.0
+"diff init, diff data order",fs1→fs3 (lion) · per-checkpoint,lion,fs1,fs3,3125.0,95,-0.24034586884995465,25000.0
+"diff init, diff data order",fs1→fs3 (lion) · per-checkpoint,lion,fs1,fs3,3750.0,95,-0.32119152165115955,25000.0
+"diff init, diff data order",fs1→fs3 (lion) · per-checkpoint,lion,fs1,fs3,6250.0,95,-0.16435195654780715,25000.0
+"diff init, diff data order",fs1→fs3 (lion) · per-checkpoint,lion,fs1,fs3,12500.0,95,-0.06863795824870855,25000.0
+"diff init, diff data order",fs1→fs3 (lion) · per-checkpoint,lion,fs1,fs3,25000.0,95,0.01593860439820732,25000.0
+"diff init, diff data order",fs1→fs3 (pig) · per-checkpoint,pig,fs1,fs3,625.0,91,0.2390714842053409,25000.0
+"diff init, diff data order",fs1→fs3 (pig) · per-checkpoint,pig,fs1,fs3,1250.0,91,0.3969353612759949,25000.0
+"diff init, diff data order",fs1→fs3 (pig) · per-checkpoint,pig,fs1,fs3,1875.0,91,0.6197831778224986,25000.0
+"diff init, diff data order",fs1→fs3 (pig) · per-checkpoint,pig,fs1,fs3,2500.0,91,0.5371011104668466,25000.0
+"diff init, diff data order",fs1→fs3 (pig) · per-checkpoint,pig,fs1,fs3,3125.0,91,0.5117413196573236,25000.0
+"diff init, diff data order",fs1→fs3 (pig) · per-checkpoint,pig,fs1,fs3,3750.0,91,0.3807696058085433,25000.0
+"diff init, diff data order",fs1→fs3 (pig) · per-checkpoint,pig,fs1,fs3,6250.0,91,0.26762652417255745,25000.0
+"diff init, diff data order",fs1→fs3 (pig) · per-checkpoint,pig,fs1,fs3,12500.0,91,0.107294574580962,25000.0
+"diff init, diff data order",fs1→fs3 (pig) · per-checkpoint,pig,fs1,fs3,25000.0,91,-0.045537135104334006,25000.0
+"diff init, diff data order",fs1→orig (cat) · per-checkpoint,cat,fs1,orig,625.0,91,0.39322675027575454,25000.0
+"diff init, diff data order",fs1→orig (cat) · per-checkpoint,cat,fs1,orig,1250.0,91,0.4660439040232743,25000.0
+"diff init, diff data order",fs1→orig (cat) · per-checkpoint,cat,fs1,orig,1875.0,91,0.37215859733356227,25000.0
+"diff init, diff data order",fs1→orig (cat) · per-checkpoint,cat,fs1,orig,2500.0,91,0.46730343852671197,25000.0
+"diff init, diff data order",fs1→orig (cat) · per-checkpoint,cat,fs1,orig,3125.0,91,0.28622754002483664,25000.0
+"diff init, diff data order",fs1→orig (cat) · per-checkpoint,cat,fs1,orig,3750.0,91,0.3879105901013761,25000.0
+"diff init, diff data order",fs1→orig (cat) · per-checkpoint,cat,fs1,orig,6250.0,91,0.32363291535555794,25000.0
+"diff init, diff data order",fs1→orig (cat) · per-checkpoint,cat,fs1,orig,12500.0,91,0.16996025903759032,25000.0
+"diff init, diff data order",fs1→orig (cat) · per-checkpoint,cat,fs1,orig,25000.0,91,0.2904132211293829,25000.0
+"diff init, diff data order",fs1→orig (dog) · per-checkpoint,dog,fs1,orig,625.0,88,0.39165978099223003,25000.0
+"diff init, diff data order",fs1→orig (dog) · per-checkpoint,dog,fs1,orig,1250.0,88,0.7809828407811623,25000.0
+"diff init, diff data order",fs1→orig (dog) · per-checkpoint,dog,fs1,orig,1875.0,88,0.7043327556059604,25000.0
+"diff init, diff data order",fs1→orig (dog) · per-checkpoint,dog,fs1,orig,2500.0,88,0.9820490950936839,25000.0
+"diff init, diff data order",fs1→orig (dog) · per-checkpoint,dog,fs1,orig,3125.0,88,1.170583590181806,25000.0
+"diff init, diff data order",fs1→orig (dog) · per-checkpoint,dog,fs1,orig,3750.0,88,1.1526124778052282,25000.0
+"diff init, diff data order",fs1→orig (dog) · per-checkpoint,dog,fs1,orig,6250.0,88,1.488037209091404,25000.0
+"diff init, diff data order",fs1→orig (dog) · per-checkpoint,dog,fs1,orig,12500.0,88,2.3302529534218874,25000.0
+"diff init, diff data order",fs1→orig (dog) · per-checkpoint,dog,fs1,orig,25000.0,88,1.8480548125390448,25000.0
+"diff init, diff data order",fs1→orig (lion) · per-checkpoint,lion,fs1,orig,625.0,92,0.22032383592476984,25000.0
+"diff init, diff data order",fs1→orig (lion) · per-checkpoint,lion,fs1,orig,1250.0,92,0.26837803455421594,25000.0
+"diff init, diff data order",fs1→orig (lion) · per-checkpoint,lion,fs1,orig,1875.0,92,0.19727507964181884,25000.0
+"diff init, diff data order",fs1→orig (lion) · per-checkpoint,lion,fs1,orig,2500.0,92,0.27437985553526567,25000.0
+"diff init, diff data order",fs1→orig (lion) · per-checkpoint,lion,fs1,orig,3125.0,92,0.30439657338984094,25000.0
+"diff init, diff data order",fs1→orig (lion) · per-checkpoint,lion,fs1,orig,3750.0,92,0.1817122030759554,25000.0
+"diff init, diff data order",fs1→orig (lion) · per-checkpoint,lion,fs1,orig,6250.0,92,0.20976137560690278,25000.0
+"diff init, diff data order",fs1→orig (lion) · per-checkpoint,lion,fs1,orig,12500.0,92,0.4134965236273481,25000.0
+"diff init, diff data order",fs1→orig (lion) · per-checkpoint,lion,fs1,orig,25000.0,92,0.6645085214995545,25000.0
+"diff init, diff data order",fs1→orig (pig) · per-checkpoint,pig,fs1,orig,625.0,91,0.28474558857682886,25000.0
+"diff init, diff data order",fs1→orig (pig) · per-checkpoint,pig,fs1,orig,1250.0,91,0.5241148713164776,25000.0
+"diff init, diff data order",fs1→orig (pig) · per-checkpoint,pig,fs1,orig,1875.0,91,0.4739613068464457,25000.0
+"diff init, diff data order",fs1→orig (pig) · per-checkpoint,pig,fs1,orig,2500.0,91,0.3907604788848601,25000.0
+"diff init, diff data order",fs1→orig (pig) · per-checkpoint,pig,fs1,orig,3125.0,91,0.3156905257412422,25000.0
+"diff init, diff data order",fs1→orig (pig) · per-checkpoint,pig,fs1,orig,3750.0,91,0.3024236012745141,25000.0
+"diff init, diff data order",fs1→orig (pig) · per-checkpoint,pig,fs1,orig,6250.0,91,0.14067658461583918,25000.0
+"diff init, diff data order",fs1→orig (pig) · per-checkpoint,pig,fs1,orig,12500.0,91,0.2387278634105344,25000.0
+"diff init, diff data order",fs1→orig (pig) · per-checkpoint,pig,fs1,orig,25000.0,91,0.22578745232101166,25000.0
+"diff init, diff data order",fs2→fs1 (cat) · per-checkpoint,cat,fs2,fs1,625.0,95,0.33883648758460866,25000.0
+"diff init, diff data order",fs2→fs1 (cat) · per-checkpoint,cat,fs2,fs1,1250.0,95,0.09239599221673467,25000.0
+"diff init, diff data order",fs2→fs1 (cat) · per-checkpoint,cat,fs2,fs1,1875.0,95,-0.09609662949862245,25000.0
+"diff init, diff data order",fs2→fs1 (cat) · per-checkpoint,cat,fs2,fs1,2500.0,95,-0.1417015989885303,25000.0
+"diff init, diff data order",fs2→fs1 (cat) · per-checkpoint,cat,fs2,fs1,3125.0,95,-0.05557456607984121,25000.0
+"diff init, diff data order",fs2→fs1 (cat) · per-checkpoint,cat,fs2,fs1,3750.0,95,0.011737773368407022,25000.0
+"diff init, diff data order",fs2→fs1 (cat) · per-checkpoint,cat,fs2,fs1,6250.0,95,-0.05325480020421329,25000.0
+"diff init, diff data order",fs2→fs1 (cat) · per-checkpoint,cat,fs2,fs1,12500.0,95,-0.06367733490431808,25000.0
+"diff init, diff data order",fs2→fs1 (cat) · per-checkpoint,cat,fs2,fs1,25000.0,95,-0.11788152445670803,25000.0
+"diff init, diff data order",fs2→fs1 (dog) · per-checkpoint,dog,fs2,fs1,625.0,92,-0.04984420658219851,25000.0
+"diff init, diff data order",fs2→fs1 (dog) · per-checkpoint,dog,fs2,fs1,1250.0,92,-0.09225367548478404,25000.0
+"diff init, diff data order",fs2→fs1 (dog) · per-checkpoint,dog,fs2,fs1,1875.0,92,-0.3579045057455946,25000.0
+"diff init, diff data order",fs2→fs1 (dog) · per-checkpoint,dog,fs2,fs1,2500.0,92,-0.33410997983552027,25000.0
+"diff init, diff data order",fs2→fs1 (dog) · per-checkpoint,dog,fs2,fs1,3125.0,92,-0.22708820401379337,25000.0
+"diff init, diff data order",fs2→fs1 (dog) · per-checkpoint,dog,fs2,fs1,3750.0,92,-0.05301400903945756,25000.0
+"diff init, diff data order",fs2→fs1 (dog) · per-checkpoint,dog,fs2,fs1,6250.0,92,-0.2026374828513427,25000.0
+"diff init, diff data order",fs2→fs1 (dog) · per-checkpoint,dog,fs2,fs1,12500.0,92,-0.09107199609707926,25000.0
+"diff init, diff data order",fs2→fs1 (dog) · per-checkpoint,dog,fs2,fs1,25000.0,91,0.43834399806024044,25000.0
+"diff init, diff data order",fs2→fs1 (lion) · per-checkpoint,lion,fs2,fs1,625.0,99,0.08780425296826591,25000.0
+"diff init, diff data order",fs2→fs1 (lion) · per-checkpoint,lion,fs2,fs1,1250.0,99,0.04774149557200307,25000.0
+"diff init, diff data order",fs2→fs1 (lion) · per-checkpoint,lion,fs2,fs1,1875.0,99,0.014432766267425243,25000.0
+"diff init, diff data order",fs2→fs1 (lion) · per-checkpoint,lion,fs2,fs1,2500.0,99,-0.016888547002866395,25000.0
+"diff init, diff data order",fs2→fs1 (lion) · per-checkpoint,lion,fs2,fs1,3125.0,99,0.007983320907616828,25000.0
+"diff init, diff data order",fs2→fs1 (lion) · per-checkpoint,lion,fs2,fs1,3750.0,99,0.02740510070732013,25000.0
+"diff init, diff data order",fs2→fs1 (lion) · per-checkpoint,lion,fs2,fs1,6250.0,99,-0.09091964548265342,25000.0
+"diff init, diff data order",fs2→fs1 (lion) · per-checkpoint,lion,fs2,fs1,12500.0,99,0.11194550186411428,25000.0
+"diff init, diff data order",fs2→fs1 (lion) · per-checkpoint,lion,fs2,fs1,25000.0,99,0.264008260485598,25000.0
+"diff init, diff data order",fs2→fs1 (pig) · per-checkpoint,pig,fs2,fs1,625.0,94,0.440917471760767,25000.0
+"diff init, diff data order",fs2→fs1 (pig) · per-checkpoint,pig,fs2,fs1,1250.0,94,0.5318326847331463,25000.0
+"diff init, diff data order",fs2→fs1 (pig) · per-checkpoint,pig,fs2,fs1,1875.0,94,0.48429365331747554,25000.0
+"diff init, diff data order",fs2→fs1 (pig) · per-checkpoint,pig,fs2,fs1,2500.0,94,0.3418787111914704,25000.0
+"diff init, diff data order",fs2→fs1 (pig) · per-checkpoint,pig,fs2,fs1,3125.0,94,0.48392603393343747,25000.0
+"diff init, diff data order",fs2→fs1 (pig) · per-checkpoint,pig,fs2,fs1,3750.0,94,0.4494105566891909,25000.0
+"diff init, diff data order",fs2→fs1 (pig) · per-checkpoint,pig,fs2,fs1,6250.0,94,0.5437423385637012,25000.0
+"diff init, diff data order",fs2→fs1 (pig) · per-checkpoint,pig,fs2,fs1,12500.0,94,0.5296851508016786,25000.0
+"diff init, diff data order",fs2→fs1 (pig) · per-checkpoint,pig,fs2,fs1,25000.0,94,0.756343614013148,25000.0
+Pythia same-model,fs2→fs2 (cat) · per-checkpoint,cat,fs2,fs2,625.0,100,6.708021576724745,25000.0
+Pythia same-model,fs2→fs2 (cat) · per-checkpoint,cat,fs2,fs2,1250.0,100,26.287490910864847,25000.0
+Pythia same-model,fs2→fs2 (cat) · per-checkpoint,cat,fs2,fs2,1875.0,100,39.941973949748416,25000.0
+Pythia same-model,fs2→fs2 (cat) · per-checkpoint,cat,fs2,fs2,2500.0,100,47.39624212026677,25000.0
+Pythia same-model,fs2→fs2 (cat) · per-checkpoint,cat,fs2,fs2,3125.0,100,48.54586435237836,25000.0
+Pythia same-model,fs2→fs2 (cat) · per-checkpoint,cat,fs2,fs2,3750.0,100,46.95261056770958,25000.0
+Pythia same-model,fs2→fs2 (cat) · per-checkpoint,cat,fs2,fs2,6250.0,100,42.22666699936005,25000.0
+Pythia same-model,fs2→fs2 (cat) · per-checkpoint,cat,fs2,fs2,12500.0,100,24.217248700000173,25000.0
+Pythia same-model,fs2→fs2 (cat) · per-checkpoint,cat,fs2,fs2,25000.0,100,12.018852750820992,25000.0
+Pythia same-model,fs2→fs2 (dog) · per-checkpoint,dog,fs2,fs2,625.0,100,5.3667410324214195,25000.0
+Pythia same-model,fs2→fs2 (dog) · per-checkpoint,dog,fs2,fs2,1250.0,100,30.71257953535501,25000.0
+Pythia same-model,fs2→fs2 (dog) · per-checkpoint,dog,fs2,fs2,1875.0,100,46.48266019916267,25000.0
+Pythia same-model,fs2→fs2 (dog) · per-checkpoint,dog,fs2,fs2,2500.0,100,58.75969078500701,25000.0
+Pythia same-model,fs2→fs2 (dog) · per-checkpoint,dog,fs2,fs2,3125.0,100,61.21098770609692,25000.0
+Pythia same-model,fs2→fs2 (dog) · per-checkpoint,dog,fs2,fs2,3750.0,100,66.26893559409078,25000.0
+Pythia same-model,fs2→fs2 (dog) · per-checkpoint,dog,fs2,fs2,6250.0,100,63.327931497308995,25000.0
+Pythia same-model,fs2→fs2 (dog) · per-checkpoint,dog,fs2,fs2,12500.0,100,37.159632017117914,25000.0
+Pythia same-model,fs2→fs2 (dog) · per-checkpoint,dog,fs2,fs2,25000.0,100,11.456109448743835,25000.0
+Pythia same-model,fs2→fs2 (lion) · per-checkpoint,lion,fs2,fs2,625.0,100,10.382736407886325,25000.0
+Pythia same-model,fs2→fs2 (lion) · per-checkpoint,lion,fs2,fs2,1250.0,100,67.04020925738986,25000.0
+Pythia same-model,fs2→fs2 (lion) · per-checkpoint,lion,fs2,fs2,1875.0,100,110.19645208313038,25000.0
+Pythia same-model,fs2→fs2 (lion) · per-checkpoint,lion,fs2,fs2,2500.0,100,126.75981721976572,25000.0
+Pythia same-model,fs2→fs2 (lion) · per-checkpoint,lion,fs2,fs2,3125.0,100,139.635480198609,25000.0
+Pythia same-model,fs2→fs2 (lion) · per-checkpoint,lion,fs2,fs2,3750.0,100,160.2400592709694,25000.0
+Pythia same-model,fs2→fs2 (lion) · per-checkpoint,lion,fs2,fs2,6250.0,100,136.23106249980455,25000.0
+Pythia same-model,fs2→fs2 (lion) · per-checkpoint,lion,fs2,fs2,12500.0,100,60.679127588594284,25000.0
+Pythia same-model,fs2→fs2 (lion) · per-checkpoint,lion,fs2,fs2,25000.0,100,17.197162491418418,25000.0
+Pythia same-model,fs2→fs2 (pig) · per-checkpoint,pig,fs2,fs2,625.0,100,8.423862880341588,25000.0
+Pythia same-model,fs2→fs2 (pig) · per-checkpoint,pig,fs2,fs2,1250.0,100,58.52343956372094,25000.0
+Pythia same-model,fs2→fs2 (pig) · per-checkpoint,pig,fs2,fs2,1875.0,100,89.54600103953251,25000.0
+Pythia same-model,fs2→fs2 (pig) · per-checkpoint,pig,fs2,fs2,2500.0,100,130.80463328237545,25000.0
+Pythia same-model,fs2→fs2 (pig) · per-checkpoint,pig,fs2,fs2,3125.0,100,167.87399590893207,25000.0
+Pythia same-model,fs2→fs2 (pig) · per-checkpoint,pig,fs2,fs2,3750.0,100,160.57444255382882,25000.0
+Pythia same-model,fs2→fs2 (pig) · per-checkpoint,pig,fs2,fs2,6250.0,100,156.8625309013486,25000.0
+Pythia same-model,fs2→fs2 (pig) · per-checkpoint,pig,fs2,fs2,12500.0,100,55.86562870407985,25000.0
+Pythia same-model,fs2→fs2 (pig) · per-checkpoint,pig,fs2,fs2,25000.0,100,15.532567597216701,25000.0
+"diff init, diff data order",fs2→fs3 (cat) · per-checkpoint,cat,fs2,fs3,625.0,97,0.14044592311642212,25000.0
+"diff init, diff data order",fs2→fs3 (cat) · per-checkpoint,cat,fs2,fs3,1250.0,97,0.08420130121577465,25000.0
+"diff init, diff data order",fs2→fs3 (cat) · per-checkpoint,cat,fs2,fs3,1875.0,97,-0.07953866428785396,25000.0
+"diff init, diff data order",fs2→fs3 (cat) · per-checkpoint,cat,fs2,fs3,2500.0,97,-0.007652844977371606,25000.0
+"diff init, diff data order",fs2→fs3 (cat) · per-checkpoint,cat,fs2,fs3,3125.0,97,0.04593586471941215,25000.0
+"diff init, diff data order",fs2→fs3 (cat) · per-checkpoint,cat,fs2,fs3,3750.0,97,0.07548371876570428,25000.0
+"diff init, diff data order",fs2→fs3 (cat) · per-checkpoint,cat,fs2,fs3,6250.0,97,0.06423433161932665,25000.0
+"diff init, diff data order",fs2→fs3 (cat) · per-checkpoint,cat,fs2,fs3,12500.0,97,0.2929101395878184,25000.0
+"diff init, diff data order",fs2→fs3 (cat) · per-checkpoint,cat,fs2,fs3,25000.0,97,0.4026696568438434,25000.0
+"diff init, diff data order",fs2→fs3 (dog) · per-checkpoint,dog,fs2,fs3,625.0,93,0.5661526135757993,25000.0
+"diff init, diff data order",fs2→fs3 (dog) · per-checkpoint,dog,fs2,fs3,1250.0,93,0.7612026204210083,25000.0
+"diff init, diff data order",fs2→fs3 (dog) · per-checkpoint,dog,fs2,fs3,1875.0,93,0.5678494043857741,25000.0
+"diff init, diff data order",fs2→fs3 (dog) · per-checkpoint,dog,fs2,fs3,2500.0,93,0.5173052887640938,25000.0
+"diff init, diff data order",fs2→fs3 (dog) · per-checkpoint,dog,fs2,fs3,3125.0,93,0.5230367275154997,25000.0
+"diff init, diff data order",fs2→fs3 (dog) · per-checkpoint,dog,fs2,fs3,3750.0,93,0.44415092716375976,25000.0
+"diff init, diff data order",fs2→fs3 (dog) · per-checkpoint,dog,fs2,fs3,6250.0,93,0.588788950166989,25000.0
+"diff init, diff data order",fs2→fs3 (dog) · per-checkpoint,dog,fs2,fs3,12500.0,93,0.6372657503466479,25000.0
+"diff init, diff data order",fs2→fs3 (dog) · per-checkpoint,dog,fs2,fs3,25000.0,93,1.03700373468277,25000.0
+"diff init, diff data order",fs2→fs3 (lion) · per-checkpoint,lion,fs2,fs3,625.0,100,0.1420741811980868,25000.0
+"diff init, diff data order",fs2→fs3 (lion) · per-checkpoint,lion,fs2,fs3,1250.0,100,0.1268884811408097,25000.0
+"diff init, diff data order",fs2→fs3 (lion) · per-checkpoint,lion,fs2,fs3,1875.0,100,0.03120503294597081,25000.0
+"diff init, diff data order",fs2→fs3 (lion) · per-checkpoint,lion,fs2,fs3,2500.0,100,0.09893872102028792,25000.0
+"diff init, diff data order",fs2→fs3 (lion) · per-checkpoint,lion,fs2,fs3,3125.0,100,0.15232580138397922,25000.0
+"diff init, diff data order",fs2→fs3 (lion) · per-checkpoint,lion,fs2,fs3,3750.0,100,0.15446073080871736,25000.0
+"diff init, diff data order",fs2→fs3 (lion) · per-checkpoint,lion,fs2,fs3,6250.0,100,0.03635035488057543,25000.0
+"diff init, diff data order",fs2→fs3 (lion) · per-checkpoint,lion,fs2,fs3,12500.0,100,0.1598142116128155,25000.0
+"diff init, diff data order",fs2→fs3 (lion) · per-checkpoint,lion,fs2,fs3,25000.0,100,0.10806447130356187,25000.0
+"diff init, diff data order",fs2→fs3 (pig) · per-checkpoint,pig,fs2,fs3,625.0,97,0.38049109723218105,25000.0
+"diff init, diff data order",fs2→fs3 (pig) · per-checkpoint,pig,fs2,fs3,1250.0,97,0.5432418023963137,25000.0
+"diff init, diff data order",fs2→fs3 (pig) · per-checkpoint,pig,fs2,fs3,1875.0,97,0.5109990950373792,25000.0
+"diff init, diff data order",fs2→fs3 (pig) · per-checkpoint,pig,fs2,fs3,2500.0,97,0.6389776710580618,25000.0
+"diff init, diff data order",fs2→fs3 (pig) · per-checkpoint,pig,fs2,fs3,3125.0,97,0.4592690087889583,25000.0
+"diff init, diff data order",fs2→fs3 (pig) · per-checkpoint,pig,fs2,fs3,3750.0,97,0.3845769428794841,25000.0
+"diff init, diff data order",fs2→fs3 (pig) · per-checkpoint,pig,fs2,fs3,6250.0,97,0.38237656694041483,25000.0
+"diff init, diff data order",fs2→fs3 (pig) · per-checkpoint,pig,fs2,fs3,12500.0,97,0.3608198073052678,25000.0
+"diff init, diff data order",fs2→fs3 (pig) · per-checkpoint,pig,fs2,fs3,25000.0,97,0.19183351535507817,25000.0
+"diff init, diff data order",fs2→orig (cat) · per-checkpoint,cat,fs2,orig,625.0,92,0.28530090202003744,25000.0
+"diff init, diff data order",fs2→orig (cat) · per-checkpoint,cat,fs2,orig,1250.0,92,0.22926658673422723,25000.0
+"diff init, diff data order",fs2→orig (cat) · per-checkpoint,cat,fs2,orig,1875.0,92,0.3239501814575091,25000.0
+"diff init, diff data order",fs2→orig (cat) · per-checkpoint,cat,fs2,orig,2500.0,92,0.17697698134353457,25000.0
+"diff init, diff data order",fs2→orig (cat) · per-checkpoint,cat,fs2,orig,3125.0,92,0.4158566834279761,25000.0
+"diff init, diff data order",fs2→orig (cat) · per-checkpoint,cat,fs2,orig,3750.0,92,0.3600096106560524,25000.0
+"diff init, diff data order",fs2→orig (cat) · per-checkpoint,cat,fs2,orig,6250.0,92,0.30815595849856614,25000.0
+"diff init, diff data order",fs2→orig (cat) · per-checkpoint,cat,fs2,orig,12500.0,92,0.14194073397591894,25000.0
+"diff init, diff data order",fs2→orig (cat) · per-checkpoint,cat,fs2,orig,25000.0,92,-0.03434682168215807,25000.0
+"diff init, diff data order",fs2→orig (dog) · per-checkpoint,dog,fs2,orig,625.0,91,0.423853524523907,25000.0
+"diff init, diff data order",fs2→orig (dog) · per-checkpoint,dog,fs2,orig,1250.0,91,0.4907458237502888,25000.0
+"diff init, diff data order",fs2→orig (dog) · per-checkpoint,dog,fs2,orig,1875.0,91,0.43901170218441554,25000.0
+"diff init, diff data order",fs2→orig (dog) · per-checkpoint,dog,fs2,orig,2500.0,91,0.5081773014028862,25000.0
+"diff init, diff data order",fs2→orig (dog) · per-checkpoint,dog,fs2,orig,3125.0,91,0.6452805238716284,25000.0
+"diff init, diff data order",fs2→orig (dog) · per-checkpoint,dog,fs2,orig,3750.0,91,0.5253937937076282,25000.0
+"diff init, diff data order",fs2→orig (dog) · per-checkpoint,dog,fs2,orig,6250.0,91,0.6639860620761965,25000.0
+"diff init, diff data order",fs2→orig (dog) · per-checkpoint,dog,fs2,orig,12500.0,91,0.6713970688953365,25000.0
+"diff init, diff data order",fs2→orig (dog) · per-checkpoint,dog,fs2,orig,25000.0,91,2.3298498316109577,25000.0
+"diff init, diff data order",fs2→orig (lion) · per-checkpoint,lion,fs2,orig,625.0,99,0.6010405839061822,25000.0
+"diff init, diff data order",fs2→orig (lion) · per-checkpoint,lion,fs2,orig,1250.0,99,0.747708774796295,25000.0
+"diff init, diff data order",fs2→orig (lion) · per-checkpoint,lion,fs2,orig,1875.0,99,0.7396833823782238,25000.0
+"diff init, diff data order",fs2→orig (lion) · per-checkpoint,lion,fs2,orig,2500.0,99,0.763173404071172,25000.0
+"diff init, diff data order",fs2→orig (lion) · per-checkpoint,lion,fs2,orig,3125.0,99,0.9579300681390244,25000.0
+"diff init, diff data order",fs2→orig (lion) · per-checkpoint,lion,fs2,orig,3750.0,99,0.803865140359392,25000.0
+"diff init, diff data order",fs2→orig (lion) · per-checkpoint,lion,fs2,orig,6250.0,99,0.9575389181686245,25000.0
+"diff init, diff data order",fs2→orig (lion) · per-checkpoint,lion,fs2,orig,12500.0,99,1.0633877521346602,25000.0
+"diff init, diff data order",fs2→orig (lion) · per-checkpoint,lion,fs2,orig,25000.0,99,0.38055027339732705,25000.0
+"diff init, diff data order",fs2→orig (pig) · per-checkpoint,pig,fs2,orig,625.0,92,-0.08828939952204642,25000.0
+"diff init, diff data order",fs2→orig (pig) · per-checkpoint,pig,fs2,orig,1250.0,92,-0.13658230611965388,25000.0
+"diff init, diff data order",fs2→orig (pig) · per-checkpoint,pig,fs2,orig,1875.0,92,-0.19689008755910503,25000.0
+"diff init, diff data order",fs2→orig (pig) · per-checkpoint,pig,fs2,orig,2500.0,92,-0.04260130094750146,25000.0
+"diff init, diff data order",fs2→orig (pig) · per-checkpoint,pig,fs2,orig,3125.0,92,0.07706390286338685,25000.0
+"diff init, diff data order",fs2→orig (pig) · per-checkpoint,pig,fs2,orig,3750.0,92,0.11825249891146541,25000.0
+"diff init, diff data order",fs2→orig (pig) · per-checkpoint,pig,fs2,orig,6250.0,92,0.09339553200771174,25000.0
+"diff init, diff data order",fs2→orig (pig) · per-checkpoint,pig,fs2,orig,12500.0,92,-0.008652021203767315,25000.0
+"diff init, diff data order",fs2→orig (pig) · per-checkpoint,pig,fs2,orig,25000.0,92,-0.4784278580088731,25000.0
+"diff init, diff data order",fs3→fs1 (cat) · per-checkpoint,cat,fs3,fs1,625.0,92,0.13775323874362522,25000.0
+"diff init, diff data order",fs3→fs1 (cat) · per-checkpoint,cat,fs3,fs1,1250.0,92,0.2404144455632936,25000.0
+"diff init, diff data order",fs3→fs1 (cat) · per-checkpoint,cat,fs3,fs1,1875.0,92,0.13148647445847306,25000.0
+"diff init, diff data order",fs3→fs1 (cat) · per-checkpoint,cat,fs3,fs1,2500.0,92,0.07827025555666037,25000.0
+"diff init, diff data order",fs3→fs1 (cat) · per-checkpoint,cat,fs3,fs1,3125.0,92,0.08902923449187955,25000.0
+"diff init, diff data order",fs3→fs1 (cat) · per-checkpoint,cat,fs3,fs1,3750.0,92,0.04114899284729509,25000.0
+"diff init, diff data order",fs3→fs1 (cat) · per-checkpoint,cat,fs3,fs1,6250.0,92,0.05268145424287517,25000.0
+"diff init, diff data order",fs3→fs1 (cat) · per-checkpoint,cat,fs3,fs1,12500.0,92,0.043473662524524406,25000.0
+"diff init, diff data order",fs3→fs1 (cat) · per-checkpoint,cat,fs3,fs1,25000.0,92,0.17070255538295404,25000.0
+"diff init, diff data order",fs3→fs1 (dog) · per-checkpoint,dog,fs3,fs1,625.0,84,-0.23306835836956938,25000.0
+"diff init, diff data order",fs3→fs1 (dog) · per-checkpoint,dog,fs3,fs1,1250.0,84,-0.26677202218607665,25000.0
+"diff init, diff data order",fs3→fs1 (dog) · per-checkpoint,dog,fs3,fs1,1875.0,84,-0.17941031915625544,25000.0
+"diff init, diff data order",fs3→fs1 (dog) · per-checkpoint,dog,fs3,fs1,2500.0,84,-0.16280581710709044,25000.0
+"diff init, diff data order",fs3→fs1 (dog) · per-checkpoint,dog,fs3,fs1,3125.0,84,-0.10937636331730904,25000.0
+"diff init, diff data order",fs3→fs1 (dog) · per-checkpoint,dog,fs3,fs1,3750.0,84,-0.0228950878523439,25000.0
+"diff init, diff data order",fs3→fs1 (dog) · per-checkpoint,dog,fs3,fs1,6250.0,84,-0.02570143512174955,25000.0
+"diff init, diff data order",fs3→fs1 (dog) · per-checkpoint,dog,fs3,fs1,12500.0,84,0.11938467241443786,25000.0
+"diff init, diff data order",fs3→fs1 (dog) · per-checkpoint,dog,fs3,fs1,25000.0,84,0.2599683449262985,25000.0
+"diff init, diff data order",fs3→fs1 (lion) · per-checkpoint,lion,fs3,fs1,625.0,95,0.09580415915770034,25000.0
+"diff init, diff data order",fs3→fs1 (lion) · per-checkpoint,lion,fs3,fs1,1250.0,95,0.1597587485504375,25000.0
+"diff init, diff data order",fs3→fs1 (lion) · per-checkpoint,lion,fs3,fs1,1875.0,95,0.2324061794431455,25000.0
+"diff init, diff data order",fs3→fs1 (lion) · per-checkpoint,lion,fs3,fs1,2500.0,95,0.2271484247984552,25000.0
+"diff init, diff data order",fs3→fs1 (lion) · per-checkpoint,lion,fs3,fs1,3125.0,95,0.21774452551316928,25000.0
+"diff init, diff data order",fs3→fs1 (lion) · per-checkpoint,lion,fs3,fs1,3750.0,95,0.2187234132760944,25000.0
+"diff init, diff data order",fs3→fs1 (lion) · per-checkpoint,lion,fs3,fs1,6250.0,95,0.20516075458776573,25000.0
+"diff init, diff data order",fs3→fs1 (lion) · per-checkpoint,lion,fs3,fs1,12500.0,95,0.4919482317968152,25000.0
+"diff init, diff data order",fs3→fs1 (lion) · per-checkpoint,lion,fs3,fs1,25000.0,95,0.7489465497178601,25000.0
+"diff init, diff data order",fs3→fs1 (pig) · per-checkpoint,pig,fs3,fs1,625.0,96,0.3883398642110834,25000.0
+"diff init, diff data order",fs3→fs1 (pig) · per-checkpoint,pig,fs3,fs1,1250.0,96,0.387371640022421,25000.0
+"diff init, diff data order",fs3→fs1 (pig) · per-checkpoint,pig,fs3,fs1,1875.0,96,0.2904365534822825,25000.0
+"diff init, diff data order",fs3→fs1 (pig) · per-checkpoint,pig,fs3,fs1,2500.0,96,0.25175376163271757,25000.0
+"diff init, diff data order",fs3→fs1 (pig) · per-checkpoint,pig,fs3,fs1,3125.0,96,0.32053549901509476,25000.0
+"diff init, diff data order",fs3→fs1 (pig) · per-checkpoint,pig,fs3,fs1,3750.0,96,0.2481655120953179,25000.0
+"diff init, diff data order",fs3→fs1 (pig) · per-checkpoint,pig,fs3,fs1,6250.0,96,0.23298626501653522,25000.0
+"diff init, diff data order",fs3→fs1 (pig) · per-checkpoint,pig,fs3,fs1,12500.0,96,0.45846739054772423,25000.0
+"diff init, diff data order",fs3→fs1 (pig) · per-checkpoint,pig,fs3,fs1,25000.0,96,0.7574123054169165,25000.0
+"diff init, diff data order",fs3→fs2 (cat) · per-checkpoint,cat,fs3,fs2,625.0,100,0.24122373572097267,25000.0
+"diff init, diff data order",fs3→fs2 (cat) · per-checkpoint,cat,fs3,fs2,1250.0,100,0.18596360276215973,25000.0
+"diff init, diff data order",fs3→fs2 (cat) · per-checkpoint,cat,fs3,fs2,1875.0,100,0.17517633481505607,25000.0
+"diff init, diff data order",fs3→fs2 (cat) · per-checkpoint,cat,fs3,fs2,2500.0,100,0.1649490382633967,25000.0
+"diff init, diff data order",fs3→fs2 (cat) · per-checkpoint,cat,fs3,fs2,3125.0,100,0.21961462324160258,25000.0
+"diff init, diff data order",fs3→fs2 (cat) · per-checkpoint,cat,fs3,fs2,3750.0,100,0.15708084791131133,25000.0
+"diff init, diff data order",fs3→fs2 (cat) · per-checkpoint,cat,fs3,fs2,6250.0,100,0.2203843562847735,25000.0
+"diff init, diff data order",fs3→fs2 (cat) · per-checkpoint,cat,fs3,fs2,12500.0,100,0.5097249882350684,25000.0
+"diff init, diff data order",fs3→fs2 (cat) · per-checkpoint,cat,fs3,fs2,25000.0,100,0.5591857459237548,25000.0
+"diff init, diff data order",fs3→fs2 (dog) · per-checkpoint,dog,fs3,fs2,625.0,99,0.43101897441792747,25000.0
+"diff init, diff data order",fs3→fs2 (dog) · per-checkpoint,dog,fs3,fs2,1250.0,99,0.24482111487442065,25000.0
+"diff init, diff data order",fs3→fs2 (dog) · per-checkpoint,dog,fs3,fs2,1875.0,99,0.37859571970985634,25000.0
+"diff init, diff data order",fs3→fs2 (dog) · per-checkpoint,dog,fs3,fs2,2500.0,99,0.4128904507301671,25000.0
+"diff init, diff data order",fs3→fs2 (dog) · per-checkpoint,dog,fs3,fs2,3125.0,99,0.4189448876512971,25000.0
+"diff init, diff data order",fs3→fs2 (dog) · per-checkpoint,dog,fs3,fs2,3750.0,99,0.4201582940669848,25000.0
+"diff init, diff data order",fs3→fs2 (dog) · per-checkpoint,dog,fs3,fs2,6250.0,99,0.5875153920147665,25000.0
+"diff init, diff data order",fs3→fs2 (dog) · per-checkpoint,dog,fs3,fs2,12500.0,99,0.6605055604312009,25000.0
+"diff init, diff data order",fs3→fs2 (dog) · per-checkpoint,dog,fs3,fs2,25000.0,99,0.4747613423867344,25000.0
+"diff init, diff data order",fs3→fs2 (lion) · per-checkpoint,lion,fs3,fs2,625.0,100,-0.004947107346680897,25000.0
+"diff init, diff data order",fs3→fs2 (lion) · per-checkpoint,lion,fs3,fs2,1250.0,100,0.04894742320994336,25000.0
+"diff init, diff data order",fs3→fs2 (lion) · per-checkpoint,lion,fs3,fs2,1875.0,100,0.07160137238846631,25000.0
+"diff init, diff data order",fs3→fs2 (lion) · per-checkpoint,lion,fs3,fs2,2500.0,100,0.07514693908713888,25000.0
+"diff init, diff data order",fs3→fs2 (lion) · per-checkpoint,lion,fs3,fs2,3125.0,100,0.08498373704710663,25000.0
+"diff init, diff data order",fs3→fs2 (lion) · per-checkpoint,lion,fs3,fs2,3750.0,100,0.06919804474309893,25000.0
+"diff init, diff data order",fs3→fs2 (lion) · per-checkpoint,lion,fs3,fs2,6250.0,100,0.21095284648105062,25000.0
+"diff init, diff data order",fs3→fs2 (lion) · per-checkpoint,lion,fs3,fs2,12500.0,100,0.2599182788193978,25000.0
+"diff init, diff data order",fs3→fs2 (lion) · per-checkpoint,lion,fs3,fs2,25000.0,100,0.4371343280140069,25000.0
+"diff init, diff data order",fs3→fs2 (pig) · per-checkpoint,pig,fs3,fs2,625.0,97,0.3218781518297576,25000.0
+"diff init, diff data order",fs3→fs2 (pig) · per-checkpoint,pig,fs3,fs2,1250.0,97,0.412677148102828,25000.0
+"diff init, diff data order",fs3→fs2 (pig) · per-checkpoint,pig,fs3,fs2,1875.0,97,0.36423354151697235,25000.0
+"diff init, diff data order",fs3→fs2 (pig) · per-checkpoint,pig,fs3,fs2,2500.0,97,0.3959621360423861,25000.0
+"diff init, diff data order",fs3→fs2 (pig) · per-checkpoint,pig,fs3,fs2,3125.0,97,0.5371755371480653,25000.0
+"diff init, diff data order",fs3→fs2 (pig) · per-checkpoint,pig,fs3,fs2,3750.0,97,0.5382699578523559,25000.0
+"diff init, diff data order",fs3→fs2 (pig) · per-checkpoint,pig,fs3,fs2,6250.0,97,0.454854542600791,25000.0
+"diff init, diff data order",fs3→fs2 (pig) · per-checkpoint,pig,fs3,fs2,12500.0,97,0.9560252227231505,25000.0
+"diff init, diff data order",fs3→fs2 (pig) · per-checkpoint,pig,fs3,fs2,25000.0,97,0.8587692356297683,25000.0
+Pythia same-model,fs3→fs3 (cat) · per-checkpoint,cat,fs3,fs3,625.0,95,10.483513532797932,25000.0
+Pythia same-model,fs3→fs3 (cat) · per-checkpoint,cat,fs3,fs3,1250.0,95,59.343453579881995,25000.0
+Pythia same-model,fs3→fs3 (cat) · per-checkpoint,cat,fs3,fs3,1875.0,95,96.28533104002221,25000.0
+Pythia same-model,fs3→fs3 (cat) · per-checkpoint,cat,fs3,fs3,2500.0,95,111.65186537068021,25000.0
+Pythia same-model,fs3→fs3 (cat) · per-checkpoint,cat,fs3,fs3,3125.0,95,124.37620323575017,25000.0
+Pythia same-model,fs3→fs3 (cat) · per-checkpoint,cat,fs3,fs3,3750.0,95,127.64691131930698,25000.0
+Pythia same-model,fs3→fs3 (cat) · per-checkpoint,cat,fs3,fs3,6250.0,95,127.68615001891017,25000.0
+Pythia same-model,fs3→fs3 (cat) · per-checkpoint,cat,fs3,fs3,12500.0,95,140.4532261314807,25000.0
+Pythia same-model,fs3→fs3 (cat) · per-checkpoint,cat,fs3,fs3,25000.0,95,110.57727681711972,25000.0
+Pythia same-model,fs3→fs3 (dog) · per-checkpoint,dog,fs3,fs3,625.0,93,8.75603793678428,25000.0
+Pythia same-model,fs3→fs3 (dog) · per-checkpoint,dog,fs3,fs3,1250.0,93,36.45740778283471,25000.0
+Pythia same-model,fs3→fs3 (dog) · per-checkpoint,dog,fs3,fs3,1875.0,93,53.27120435450867,25000.0
+Pythia same-model,fs3→fs3 (dog) · per-checkpoint,dog,fs3,fs3,2500.0,93,54.493132341037416,25000.0
+Pythia same-model,fs3→fs3 (dog) · per-checkpoint,dog,fs3,fs3,3125.0,93,61.43458450405813,25000.0
+Pythia same-model,fs3→fs3 (dog) · per-checkpoint,dog,fs3,fs3,3750.0,93,60.763504299986586,25000.0
+Pythia same-model,fs3→fs3 (dog) · per-checkpoint,dog,fs3,fs3,6250.0,93,62.05851321602322,25000.0
+Pythia same-model,fs3→fs3 (dog) · per-checkpoint,dog,fs3,fs3,12500.0,93,70.36064768248609,25000.0
+Pythia same-model,fs3→fs3 (dog) · per-checkpoint,dog,fs3,fs3,25000.0,92,58.14385359381343,25000.0
+Pythia same-model,fs3→fs3 (lion) · per-checkpoint,lion,fs3,fs3,625.0,98,10.69063123667637,25000.0
+Pythia same-model,fs3→fs3 (lion) · per-checkpoint,lion,fs3,fs3,1250.0,98,81.02365058336247,25000.0
+Pythia same-model,fs3→fs3 (lion) · per-checkpoint,lion,fs3,fs3,1875.0,98,152.69167421687712,25000.0
+Pythia same-model,fs3→fs3 (lion) · per-checkpoint,lion,fs3,fs3,2500.0,98,197.8396922987063,25000.0
+Pythia same-model,fs3→fs3 (lion) · per-checkpoint,lion,fs3,fs3,3125.0,98,254.54449812408512,25000.0
+Pythia same-model,fs3→fs3 (lion) · per-checkpoint,lion,fs3,fs3,3750.0,98,246.0740280376208,25000.0
+Pythia same-model,fs3→fs3 (lion) · per-checkpoint,lion,fs3,fs3,6250.0,98,266.6201517828922,25000.0
+Pythia same-model,fs3→fs3 (lion) · per-checkpoint,lion,fs3,fs3,12500.0,98,259.95321957236064,25000.0
+Pythia same-model,fs3→fs3 (lion) · per-checkpoint,lion,fs3,fs3,25000.0,98,155.12147683826578,25000.0
+Pythia same-model,fs3→fs3 (pig) · per-checkpoint,pig,fs3,fs3,625.0,98,8.61401175592388,25000.0
+Pythia same-model,fs3→fs3 (pig) · per-checkpoint,pig,fs3,fs3,1250.0,98,46.68268538340145,25000.0
+Pythia same-model,fs3→fs3 (pig) · per-checkpoint,pig,fs3,fs3,1875.0,98,77.88491673630506,25000.0
+Pythia same-model,fs3→fs3 (pig) · per-checkpoint,pig,fs3,fs3,2500.0,98,119.62605324102664,25000.0
+Pythia same-model,fs3→fs3 (pig) · per-checkpoint,pig,fs3,fs3,3125.0,98,137.00573654315502,25000.0
+Pythia same-model,fs3→fs3 (pig) · per-checkpoint,pig,fs3,fs3,3750.0,98,170.21732217001437,25000.0
+Pythia same-model,fs3→fs3 (pig) · per-checkpoint,pig,fs3,fs3,6250.0,98,197.2647417981593,25000.0
+Pythia same-model,fs3→fs3 (pig) · per-checkpoint,pig,fs3,fs3,12500.0,98,239.2512925794549,25000.0
+Pythia same-model,fs3→fs3 (pig) · per-checkpoint,pig,fs3,fs3,25000.0,98,162.2149153172885,25000.0
+"diff init, diff data order",fs3→orig (cat) · per-checkpoint,cat,fs3,orig,625.0,90,0.5631283249384855,25000.0
+"diff init, diff data order",fs3→orig (cat) · per-checkpoint,cat,fs3,orig,1250.0,90,0.4111123925082657,25000.0
+"diff init, diff data order",fs3→orig (cat) · per-checkpoint,cat,fs3,orig,1875.0,90,0.6428697022188865,25000.0
+"diff init, diff data order",fs3→orig (cat) · per-checkpoint,cat,fs3,orig,2500.0,90,0.6171708415665882,25000.0
+"diff init, diff data order",fs3→orig (cat) · per-checkpoint,cat,fs3,orig,3125.0,90,0.6660987015308195,25000.0
+"diff init, diff data order",fs3→orig (cat) · per-checkpoint,cat,fs3,orig,3750.0,90,0.6121023007330568,25000.0
+"diff init, diff data order",fs3→orig (cat) · per-checkpoint,cat,fs3,orig,6250.0,90,0.3753404464354643,25000.0
+"diff init, diff data order",fs3→orig (cat) · per-checkpoint,cat,fs3,orig,12500.0,90,0.4432976960039172,25000.0
+"diff init, diff data order",fs3→orig (cat) · per-checkpoint,cat,fs3,orig,25000.0,90,0.6506928423138563,25000.0
+"diff init, diff data order",fs3→orig (dog) · per-checkpoint,dog,fs3,orig,625.0,89,0.6810546153858692,25000.0
+"diff init, diff data order",fs3→orig (dog) · per-checkpoint,dog,fs3,orig,1250.0,89,1.0391931940918855,25000.0
+"diff init, diff data order",fs3→orig (dog) · per-checkpoint,dog,fs3,orig,1875.0,89,1.5164070834729324,25000.0
+"diff init, diff data order",fs3→orig (dog) · per-checkpoint,dog,fs3,orig,2500.0,89,1.4801369260331398,25000.0
+"diff init, diff data order",fs3→orig (dog) · per-checkpoint,dog,fs3,orig,3125.0,89,1.8846425579979396,25000.0
+"diff init, diff data order",fs3→orig (dog) · per-checkpoint,dog,fs3,orig,3750.0,89,1.9856316848555882,25000.0
+"diff init, diff data order",fs3→orig (dog) · per-checkpoint,dog,fs3,orig,6250.0,89,1.8806803454138157,25000.0
+"diff init, diff data order",fs3→orig (dog) · per-checkpoint,dog,fs3,orig,12500.0,89,3.447948231394974,25000.0
+"diff init, diff data order",fs3→orig (dog) · per-checkpoint,dog,fs3,orig,25000.0,88,4.807946414952549,25000.0
+"diff init, diff data order",fs3→orig (lion) · per-checkpoint,lion,fs3,orig,625.0,93,0.2507405494842671,25000.0
+"diff init, diff data order",fs3→orig (lion) · per-checkpoint,lion,fs3,orig,1250.0,93,0.3426081740427749,25000.0
+"diff init, diff data order",fs3→orig (lion) · per-checkpoint,lion,fs3,orig,1875.0,93,0.5217839247654094,25000.0
+"diff init, diff data order",fs3→orig (lion) · per-checkpoint,lion,fs3,orig,2500.0,93,0.32608223397258057,25000.0
+"diff init, diff data order",fs3→orig (lion) · per-checkpoint,lion,fs3,orig,3125.0,93,0.3155472809147244,25000.0
+"diff init, diff data order",fs3→orig (lion) · per-checkpoint,lion,fs3,orig,3750.0,93,0.4450675801428698,25000.0
+"diff init, diff data order",fs3→orig (lion) · per-checkpoint,lion,fs3,orig,6250.0,93,0.38226331443738043,25000.0
+"diff init, diff data order",fs3→orig (lion) · per-checkpoint,lion,fs3,orig,12500.0,93,0.4429652332488564,25000.0
+"diff init, diff data order",fs3→orig (lion) · per-checkpoint,lion,fs3,orig,25000.0,93,0.2522090563337023,25000.0
+"diff init, diff data order",fs3→orig (pig) · per-checkpoint,pig,fs3,orig,625.0,93,0.366737315975233,25000.0
+"diff init, diff data order",fs3→orig (pig) · per-checkpoint,pig,fs3,orig,1250.0,93,0.7413560954381002,25000.0
+"diff init, diff data order",fs3→orig (pig) · per-checkpoint,pig,fs3,orig,1875.0,93,0.8151629655699173,25000.0
+"diff init, diff data order",fs3→orig (pig) · per-checkpoint,pig,fs3,orig,2500.0,93,0.9087073539755639,25000.0
+"diff init, diff data order",fs3→orig (pig) · per-checkpoint,pig,fs3,orig,3125.0,93,1.0131136260169482,25000.0
+"diff init, diff data order",fs3→orig (pig) · per-checkpoint,pig,fs3,orig,3750.0,93,1.1646146543774807,25000.0
+"diff init, diff data order",fs3→orig (pig) · per-checkpoint,pig,fs3,orig,6250.0,93,0.992322254759142,25000.0
+"diff init, diff data order",fs3→orig (pig) · per-checkpoint,pig,fs3,orig,12500.0,93,0.8745534983858928,25000.0
+"diff init, diff data order",fs3→orig (pig) · per-checkpoint,pig,fs3,orig,25000.0,93,1.2153578521990525,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,625.0,92,0.4413277383288078,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,1250.0,92,0.7865626100812643,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,1875.0,92,0.6696151255288598,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,2500.0,92,0.6677604321047047,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,3125.0,92,0.7705134574026349,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,3750.0,92,0.5168935667382888,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,4375.0,6,1.2236695842482799,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,5000.0,6,1.71094756417878,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,5625.0,6,1.4563817430973185,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,6250.0,92,0.47926341152721813,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,6875.0,6,1.77837685555305,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,7500.0,6,2.120092911296217,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,8125.0,6,1.9634106716007023,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,8750.0,6,2.0124583777862832,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,9375.0,6,2.3668877584981747,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,10000.0,6,2.9245775477739775,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,10625.0,6,2.328378580325516,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,11250.0,6,3.14273883012981,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,11875.0,6,4.39885103943164,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,12500.0,92,0.8292601248155146,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,13125.0,6,5.310572823212168,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,13750.0,6,6.590060846378052,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,14375.0,6,6.181434365713674,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,15000.0,6,6.997413527097826,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,15625.0,6,7.389308284951874,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,16250.0,6,7.376739867290492,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,16875.0,6,7.508867347398822,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,17500.0,6,9.044331934783667,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,18125.0,6,9.006351830962775,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,18750.0,6,9.547721291770214,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,19375.0,6,9.624502976490055,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,20000.0,6,9.74512706738762,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,20625.0,6,9.214770158215462,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,21250.0,6,9.38360933624475,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,21875.0,6,9.199558797382563,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,22500.0,6,9.263415417220898,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,23125.0,6,9.041615550665648,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,23750.0,6,9.090930339020282,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,24375.0,6,9.06997914519695,25000.0
+"same init, diff data order",orig→ds1 (dog) · per-checkpoint,dog,orig,ds1,25000.0,91,2.19428078487108,25000.0
+"same init, diff data order",orig→ds2 (dog) · per-checkpoint,dog,orig,ds2,625.0,94,0.9102881327643952,25000.0
+"same init, diff data order",orig→ds2 (dog) · per-checkpoint,dog,orig,ds2,1250.0,94,1.1642361897440678,25000.0
+"same init, diff data order",orig→ds2 (dog) · per-checkpoint,dog,orig,ds2,1875.0,94,1.0726329079885737,25000.0
+"same init, diff data order",orig→ds2 (dog) · per-checkpoint,dog,orig,ds2,2500.0,94,1.0257693775233658,25000.0
+"same init, diff data order",orig→ds2 (dog) · per-checkpoint,dog,orig,ds2,3125.0,94,0.9635291991300075,25000.0
+"same init, diff data order",orig→ds2 (dog) · per-checkpoint,dog,orig,ds2,3750.0,94,0.9583774784376098,25000.0
+"same init, diff data order",orig→ds2 (dog) · per-checkpoint,dog,orig,ds2,6250.0,94,0.7728151693937653,25000.0
+"same init, diff data order",orig→ds2 (dog) · per-checkpoint,dog,orig,ds2,12500.0,94,2.0742103844765105,25000.0
+"same init, diff data order",orig→ds2 (dog) · per-checkpoint,dog,orig,ds2,25000.0,92,3.7894365129445196,25000.0
+"same init, diff data order",orig→ds3 (dog) · per-checkpoint,dog,orig,ds3,625.0,89,0.8278729429451588,25000.0
+"same init, diff data order",orig→ds3 (dog) · per-checkpoint,dog,orig,ds3,1250.0,89,1.7798918382253002,25000.0
+"same init, diff data order",orig→ds3 (dog) · per-checkpoint,dog,orig,ds3,1875.0,89,1.6544487527912453,25000.0
+"same init, diff data order",orig→ds3 (dog) · per-checkpoint,dog,orig,ds3,2500.0,89,1.7157510023585085,25000.0
+"same init, diff data order",orig→ds3 (dog) · per-checkpoint,dog,orig,ds3,3125.0,89,1.5942689256601632,25000.0
+"same init, diff data order",orig→ds3 (dog) · per-checkpoint,dog,orig,ds3,3750.0,89,1.798060951097091,25000.0
+"same init, diff data order",orig→ds3 (dog) · per-checkpoint,dog,orig,ds3,6250.0,89,1.5684421390588292,25000.0
+"same init, diff data order",orig→ds3 (dog) · per-checkpoint,dog,orig,ds3,12500.0,89,2.0121068895728973,25000.0
+"same init, diff data order",orig→ds3 (dog) · per-checkpoint,dog,orig,ds3,25000.0,88,1.8941465292609525,25000.0
+"diff init, diff data order",orig→fs1 (cat) · per-checkpoint,cat,orig,fs1,625.0,87,0.05851911094374267,25000.0
+"diff init, diff data order",orig→fs1 (cat) · per-checkpoint,cat,orig,fs1,1250.0,87,0.3237711555340585,25000.0
+"diff init, diff data order",orig→fs1 (cat) · per-checkpoint,cat,orig,fs1,1875.0,87,0.10047541391505488,25000.0
+"diff init, diff data order",orig→fs1 (cat) · per-checkpoint,cat,orig,fs1,2500.0,87,0.06840391119147814,25000.0
+"diff init, diff data order",orig→fs1 (cat) · per-checkpoint,cat,orig,fs1,3125.0,87,0.14233702539079746,25000.0
+"diff init, diff data order",orig→fs1 (cat) · per-checkpoint,cat,orig,fs1,3750.0,87,0.130646356641073,25000.0
+"diff init, diff data order",orig→fs1 (cat) · per-checkpoint,cat,orig,fs1,6250.0,87,0.08267664966818235,25000.0
+"diff init, diff data order",orig→fs1 (cat) · per-checkpoint,cat,orig,fs1,12500.0,87,0.0024466304831208953,25000.0
+"diff init, diff data order",orig→fs1 (cat) · per-checkpoint,cat,orig,fs1,25000.0,87,0.33057552094622816,25000.0
+"diff init, diff data order",orig→fs1 (dog) · per-checkpoint,dog,orig,fs1,625.0,82,-0.28004296768699627,25000.0
+"diff init, diff data order",orig→fs1 (dog) · per-checkpoint,dog,orig,fs1,1250.0,82,-0.24666184564621854,25000.0
+"diff init, diff data order",orig→fs1 (dog) · per-checkpoint,dog,orig,fs1,1875.0,82,-0.3670139691991747,25000.0
+"diff init, diff data order",orig→fs1 (dog) · per-checkpoint,dog,orig,fs1,2500.0,82,-0.4148085570944885,25000.0
+"diff init, diff data order",orig→fs1 (dog) · per-checkpoint,dog,orig,fs1,3125.0,82,-0.2600839319829495,25000.0
+"diff init, diff data order",orig→fs1 (dog) · per-checkpoint,dog,orig,fs1,3750.0,82,-0.12784907117011177,25000.0
+"diff init, diff data order",orig→fs1 (dog) · per-checkpoint,dog,orig,fs1,6250.0,82,-0.12883818492324822,25000.0
+"diff init, diff data order",orig→fs1 (dog) · per-checkpoint,dog,orig,fs1,12500.0,82,-0.14663971566667278,25000.0
+"diff init, diff data order",orig→fs1 (dog) · per-checkpoint,dog,orig,fs1,25000.0,82,0.22289709942353458,25000.0
+"diff init, diff data order",orig→fs1 (lion) · per-checkpoint,lion,orig,fs1,625.0,85,0.3309283563052485,25000.0
+"diff init, diff data order",orig→fs1 (lion) · per-checkpoint,lion,orig,fs1,1250.0,85,0.9045183706426434,25000.0
+"diff init, diff data order",orig→fs1 (lion) · per-checkpoint,lion,orig,fs1,1875.0,85,1.2019003355137183,25000.0
+"diff init, diff data order",orig→fs1 (lion) · per-checkpoint,lion,orig,fs1,2500.0,85,1.0253167897249513,25000.0
+"diff init, diff data order",orig→fs1 (lion) · per-checkpoint,lion,orig,fs1,3125.0,85,1.1203738777391246,25000.0
+"diff init, diff data order",orig→fs1 (lion) · per-checkpoint,lion,orig,fs1,3750.0,85,1.4227848647251748,25000.0
+"diff init, diff data order",orig→fs1 (lion) · per-checkpoint,lion,orig,fs1,6250.0,85,1.267341510211052,25000.0
+"diff init, diff data order",orig→fs1 (lion) · per-checkpoint,lion,orig,fs1,12500.0,85,1.7506844979982612,25000.0
+"diff init, diff data order",orig→fs1 (lion) · per-checkpoint,lion,orig,fs1,25000.0,84,1.7603650697428779,25000.0
+"diff init, diff data order",orig→fs1 (pig) · per-checkpoint,pig,orig,fs1,625.0,91,0.1860183276318278,25000.0
+"diff init, diff data order",orig→fs1 (pig) · per-checkpoint,pig,orig,fs1,1250.0,91,0.28971154283808886,25000.0
+"diff init, diff data order",orig→fs1 (pig) · per-checkpoint,pig,orig,fs1,1875.0,91,0.457167876953543,25000.0
+"diff init, diff data order",orig→fs1 (pig) · per-checkpoint,pig,orig,fs1,2500.0,91,0.2925625627092302,25000.0
+"diff init, diff data order",orig→fs1 (pig) · per-checkpoint,pig,orig,fs1,3125.0,91,0.4040228309005864,25000.0
+"diff init, diff data order",orig→fs1 (pig) · per-checkpoint,pig,orig,fs1,3750.0,91,0.4737134979638881,25000.0
+"diff init, diff data order",orig→fs1 (pig) · per-checkpoint,pig,orig,fs1,6250.0,91,0.5349047459158086,25000.0
+"diff init, diff data order",orig→fs1 (pig) · per-checkpoint,pig,orig,fs1,12500.0,91,1.0054868225553502,25000.0
+"diff init, diff data order",orig→fs1 (pig) · per-checkpoint,pig,orig,fs1,25000.0,91,1.7884272223743398,25000.0
+"diff init, diff data order",orig→fs2 (cat) · per-checkpoint,cat,orig,fs2,625.0,100,0.2325698800557672,25000.0
+"diff init, diff data order",orig→fs2 (cat) · per-checkpoint,cat,orig,fs2,1250.0,100,0.29932104658811454,25000.0
+"diff init, diff data order",orig→fs2 (cat) · per-checkpoint,cat,orig,fs2,1875.0,100,0.32479429996385056,25000.0
+"diff init, diff data order",orig→fs2 (cat) · per-checkpoint,cat,orig,fs2,2500.0,100,0.22639505156015433,25000.0
+"diff init, diff data order",orig→fs2 (cat) · per-checkpoint,cat,orig,fs2,3125.0,100,0.31821583153845456,25000.0
+"diff init, diff data order",orig→fs2 (cat) · per-checkpoint,cat,orig,fs2,3750.0,100,0.30670739635754496,25000.0
+"diff init, diff data order",orig→fs2 (cat) · per-checkpoint,cat,orig,fs2,6250.0,100,0.27713791239214647,25000.0
+"diff init, diff data order",orig→fs2 (cat) · per-checkpoint,cat,orig,fs2,12500.0,100,0.46336341227311884,25000.0
+"diff init, diff data order",orig→fs2 (cat) · per-checkpoint,cat,orig,fs2,25000.0,100,0.4295398741935653,25000.0
+"diff init, diff data order",orig→fs2 (dog) · per-checkpoint,dog,orig,fs2,625.0,99,0.16482127977067332,25000.0
+"diff init, diff data order",orig→fs2 (dog) · per-checkpoint,dog,orig,fs2,1250.0,99,0.2921167777635618,25000.0
+"diff init, diff data order",orig→fs2 (dog) · per-checkpoint,dog,orig,fs2,1875.0,99,0.22396018082107294,25000.0
+"diff init, diff data order",orig→fs2 (dog) · per-checkpoint,dog,orig,fs2,2500.0,99,0.3036587845034093,25000.0
+"diff init, diff data order",orig→fs2 (dog) · per-checkpoint,dog,orig,fs2,3125.0,99,0.39142866840024926,25000.0
+"diff init, diff data order",orig→fs2 (dog) · per-checkpoint,dog,orig,fs2,3750.0,99,0.30308913240115165,25000.0
+"diff init, diff data order",orig→fs2 (dog) · per-checkpoint,dog,orig,fs2,6250.0,99,0.3425042829884412,25000.0
+"diff init, diff data order",orig→fs2 (dog) · per-checkpoint,dog,orig,fs2,12500.0,99,0.39602074663555686,25000.0
+"diff init, diff data order",orig→fs2 (dog) · per-checkpoint,dog,orig,fs2,25000.0,99,0.3807538810702066,25000.0
+"diff init, diff data order",orig→fs2 (lion) · per-checkpoint,lion,orig,fs2,625.0,99,0.00023026550901632554,25000.0
+"diff init, diff data order",orig→fs2 (lion) · per-checkpoint,lion,orig,fs2,1250.0,99,0.018182423398402262,25000.0
+"diff init, diff data order",orig→fs2 (lion) · per-checkpoint,lion,orig,fs2,1875.0,99,-0.04980577424498674,25000.0
+"diff init, diff data order",orig→fs2 (lion) · per-checkpoint,lion,orig,fs2,2500.0,99,-0.10201080309445928,25000.0
+"diff init, diff data order",orig→fs2 (lion) · per-checkpoint,lion,orig,fs2,3125.0,99,-0.14257738586344454,25000.0
+"diff init, diff data order",orig→fs2 (lion) · per-checkpoint,lion,orig,fs2,3750.0,99,-0.0773734966755129,25000.0
+"diff init, diff data order",orig→fs2 (lion) · per-checkpoint,lion,orig,fs2,6250.0,99,-0.1614928419499012,25000.0
+"diff init, diff data order",orig→fs2 (lion) · per-checkpoint,lion,orig,fs2,12500.0,99,-0.13713836636811885,25000.0
+"diff init, diff data order",orig→fs2 (lion) · per-checkpoint,lion,orig,fs2,25000.0,99,-0.1317836472258541,25000.0
+"diff init, diff data order",orig→fs2 (pig) · per-checkpoint,pig,orig,fs2,625.0,100,-0.08058299003080725,25000.0
+"diff init, diff data order",orig→fs2 (pig) · per-checkpoint,pig,orig,fs2,1250.0,100,-0.052717751430133485,25000.0
+"diff init, diff data order",orig→fs2 (pig) · per-checkpoint,pig,orig,fs2,1875.0,100,-0.015027997682716185,25000.0
+"diff init, diff data order",orig→fs2 (pig) · per-checkpoint,pig,orig,fs2,2500.0,100,-0.031399699029189904,25000.0
+"diff init, diff data order",orig→fs2 (pig) · per-checkpoint,pig,orig,fs2,3125.0,100,-0.02109576478838191,25000.0
+"diff init, diff data order",orig→fs2 (pig) · per-checkpoint,pig,orig,fs2,3750.0,100,-0.021068186865388836,25000.0
+"diff init, diff data order",orig→fs2 (pig) · per-checkpoint,pig,orig,fs2,6250.0,100,-0.03988341680693688,25000.0
+"diff init, diff data order",orig→fs2 (pig) · per-checkpoint,pig,orig,fs2,12500.0,100,0.005452454614185504,25000.0
+"diff init, diff data order",orig→fs2 (pig) · per-checkpoint,pig,orig,fs2,25000.0,100,0.04489504698397999,25000.0
+"diff init, diff data order",orig→fs3 (cat) · per-checkpoint,cat,orig,fs3,625.0,89,0.4179498896748929,25000.0
+"diff init, diff data order",orig→fs3 (cat) · per-checkpoint,cat,orig,fs3,1250.0,89,0.8851434180500537,25000.0
+"diff init, diff data order",orig→fs3 (cat) · per-checkpoint,cat,orig,fs3,1875.0,89,0.6778553515683631,25000.0
+"diff init, diff data order",orig→fs3 (cat) · per-checkpoint,cat,orig,fs3,2500.0,89,0.6395045617372259,25000.0
+"diff init, diff data order",orig→fs3 (cat) · per-checkpoint,cat,orig,fs3,3125.0,89,0.7196870446709694,25000.0
+"diff init, diff data order",orig→fs3 (cat) · per-checkpoint,cat,orig,fs3,3750.0,89,0.5601873303951534,25000.0
+"diff init, diff data order",orig→fs3 (cat) · per-checkpoint,cat,orig,fs3,6250.0,89,0.22335104447542434,25000.0
+"diff init, diff data order",orig→fs3 (cat) · per-checkpoint,cat,orig,fs3,12500.0,89,0.26040586250760733,25000.0
+"diff init, diff data order",orig→fs3 (cat) · per-checkpoint,cat,orig,fs3,25000.0,89,0.00885087662758614,25000.0
+"diff init, diff data order",orig→fs3 (dog) · per-checkpoint,dog,orig,fs3,625.0,84,0.26986910027375655,25000.0
+"diff init, diff data order",orig→fs3 (dog) · per-checkpoint,dog,orig,fs3,1250.0,84,0.4353672994079785,25000.0
+"diff init, diff data order",orig→fs3 (dog) · per-checkpoint,dog,orig,fs3,1875.0,84,0.25663400417138904,25000.0
+"diff init, diff data order",orig→fs3 (dog) · per-checkpoint,dog,orig,fs3,2500.0,84,0.10391233891846456,25000.0
+"diff init, diff data order",orig→fs3 (dog) · per-checkpoint,dog,orig,fs3,3125.0,84,0.07798316924991264,25000.0
+"diff init, diff data order",orig→fs3 (dog) · per-checkpoint,dog,orig,fs3,3750.0,84,0.22850143105905557,25000.0
+"diff init, diff data order",orig→fs3 (dog) · per-checkpoint,dog,orig,fs3,6250.0,84,0.07513370527621785,25000.0
+"diff init, diff data order",orig→fs3 (dog) · per-checkpoint,dog,orig,fs3,12500.0,84,0.09435183102873032,25000.0
+"diff init, diff data order",orig→fs3 (dog) · per-checkpoint,dog,orig,fs3,25000.0,84,-0.5115711076709464,25000.0
+"diff init, diff data order",orig→fs3 (lion) · per-checkpoint,lion,orig,fs3,625.0,90,-0.0626659011073589,25000.0
+"diff init, diff data order",orig→fs3 (lion) · per-checkpoint,lion,orig,fs3,1250.0,90,-0.06707431970840635,25000.0
+"diff init, diff data order",orig→fs3 (lion) · per-checkpoint,lion,orig,fs3,1875.0,90,-0.0721194257322116,25000.0
+"diff init, diff data order",orig→fs3 (lion) · per-checkpoint,lion,orig,fs3,2500.0,90,-0.12580757647409493,25000.0
+"diff init, diff data order",orig→fs3 (lion) · per-checkpoint,lion,orig,fs3,3125.0,90,-0.12995468974962407,25000.0
+"diff init, diff data order",orig→fs3 (lion) · per-checkpoint,lion,orig,fs3,3750.0,90,-0.124356828495396,25000.0
+"diff init, diff data order",orig→fs3 (lion) · per-checkpoint,lion,orig,fs3,6250.0,90,-0.10948574828999637,25000.0
+"diff init, diff data order",orig→fs3 (lion) · per-checkpoint,lion,orig,fs3,12500.0,90,-0.09536746961374236,25000.0
+"diff init, diff data order",orig→fs3 (lion) · per-checkpoint,lion,orig,fs3,25000.0,89,-0.2283010185556474,25000.0
+"diff init, diff data order",orig→fs3 (pig) · per-checkpoint,pig,orig,fs3,625.0,89,0.2878779402563831,25000.0
+"diff init, diff data order",orig→fs3 (pig) · per-checkpoint,pig,orig,fs3,1250.0,89,0.6561115600247331,25000.0
+"diff init, diff data order",orig→fs3 (pig) · per-checkpoint,pig,orig,fs3,1875.0,89,0.4690539224560947,25000.0
+"diff init, diff data order",orig→fs3 (pig) · per-checkpoint,pig,orig,fs3,2500.0,89,0.4494338194556272,25000.0
+"diff init, diff data order",orig→fs3 (pig) · per-checkpoint,pig,orig,fs3,3125.0,89,0.4255273790830679,25000.0
+"diff init, diff data order",orig→fs3 (pig) · per-checkpoint,pig,orig,fs3,3750.0,89,0.43560145334902045,25000.0
+"diff init, diff data order",orig→fs3 (pig) · per-checkpoint,pig,orig,fs3,6250.0,89,0.24340478312470687,25000.0
+"diff init, diff data order",orig→fs3 (pig) · per-checkpoint,pig,orig,fs3,12500.0,89,0.384107047609026,25000.0
+"diff init, diff data order",orig→fs3 (pig) · per-checkpoint,pig,orig,fs3,25000.0,89,0.42713647564637486,25000.0
+Pythia same-model,orig→orig (cat) · per-checkpoint,cat,orig,orig,625.0,91,4.732212272757449,25000.0
+Pythia same-model,orig→orig (cat) · per-checkpoint,cat,orig,orig,1250.0,91,24.651843562786922,25000.0
+Pythia same-model,orig→orig (cat) · per-checkpoint,cat,orig,orig,1875.0,91,40.99156215073826,25000.0
+Pythia same-model,orig→orig (cat) · per-checkpoint,cat,orig,orig,2500.0,91,69.5322364352336,25000.0
+Pythia same-model,orig→orig (cat) · per-checkpoint,cat,orig,orig,3125.0,91,92.00289104953217,25000.0
+Pythia same-model,orig→orig (cat) · per-checkpoint,cat,orig,orig,3750.0,91,89.13452392209017,25000.0
+Pythia same-model,orig→orig (cat) · per-checkpoint,cat,orig,orig,6250.0,91,112.35058514354029,25000.0
+Pythia same-model,orig→orig (cat) · per-checkpoint,cat,orig,orig,12500.0,91,104.15269557333569,25000.0
+Pythia same-model,orig→orig (cat) · per-checkpoint,cat,orig,orig,25000.0,91,63.45526385134606,25000.0
+Pythia same-model,orig→orig (dog) · per-checkpoint,dog,orig,orig,625.0,89,4.027850317236842,25000.0
+Pythia same-model,orig→orig (dog) · per-checkpoint,dog,orig,orig,1250.0,89,19.762865117251035,25000.0
+Pythia same-model,orig→orig (dog) · per-checkpoint,dog,orig,orig,1875.0,89,33.16893894734292,25000.0
+Pythia same-model,orig→orig (dog) · per-checkpoint,dog,orig,orig,2500.0,89,40.17482045021115,25000.0
+Pythia same-model,orig→orig (dog) · per-checkpoint,dog,orig,orig,3125.0,89,49.04104645499103,25000.0
+Pythia same-model,orig→orig (dog) · per-checkpoint,dog,orig,orig,3750.0,89,55.339713965052766,25000.0
+Pythia same-model,orig→orig (dog) · per-checkpoint,dog,orig,orig,6250.0,89,61.24142692666803,25000.0
+Pythia same-model,orig→orig (dog) · per-checkpoint,dog,orig,orig,12500.0,89,72.33367346075079,25000.0
+Pythia same-model,orig→orig (dog) · per-checkpoint,dog,orig,orig,25000.0,87,64.94730061559841,25000.0
+Pythia same-model,orig→orig (lion) · per-checkpoint,lion,orig,orig,625.0,92,6.578846766478653,25000.0
+Pythia same-model,orig→orig (lion) · per-checkpoint,lion,orig,orig,1250.0,92,35.368895504876235,25000.0
+Pythia same-model,orig→orig (lion) · per-checkpoint,lion,orig,orig,1875.0,92,63.17034719365818,25000.0
+Pythia same-model,orig→orig (lion) · per-checkpoint,lion,orig,orig,2500.0,92,83.64221303423834,25000.0
+Pythia same-model,orig→orig (lion) · per-checkpoint,lion,orig,orig,3125.0,92,89.95681576533353,25000.0
+Pythia same-model,orig→orig (lion) · per-checkpoint,lion,orig,orig,3750.0,92,99.08055532349985,25000.0
+Pythia same-model,orig→orig (lion) · per-checkpoint,lion,orig,orig,6250.0,92,116.91779054085166,25000.0
+Pythia same-model,orig→orig (lion) · per-checkpoint,lion,orig,orig,12500.0,92,113.4178489906293,25000.0
+Pythia same-model,orig→orig (lion) · per-checkpoint,lion,orig,orig,25000.0,90,89.29026394511857,25000.0
+Pythia same-model,orig→orig (pig) · per-checkpoint,pig,orig,orig,625.0,91,4.109926665569634,25000.0
+Pythia same-model,orig→orig (pig) · per-checkpoint,pig,orig,orig,1250.0,91,20.396315765165944,25000.0
+Pythia same-model,orig→orig (pig) · per-checkpoint,pig,orig,orig,1875.0,91,42.67449829504642,25000.0
+Pythia same-model,orig→orig (pig) · per-checkpoint,pig,orig,orig,2500.0,91,62.20926246636552,25000.0
+Pythia same-model,orig→orig (pig) · per-checkpoint,pig,orig,orig,3125.0,91,81.18029906842418,25000.0
+Pythia same-model,orig→orig (pig) · per-checkpoint,pig,orig,orig,3750.0,91,80.9824081763838,25000.0
+Pythia same-model,orig→orig (pig) · per-checkpoint,pig,orig,orig,6250.0,91,111.54040151771886,25000.0
+Pythia same-model,orig→orig (pig) · per-checkpoint,pig,orig,orig,12500.0,91,129.4301672427626,25000.0
+Pythia same-model,orig→orig (pig) · per-checkpoint,pig,orig,orig,25000.0,91,107.0159990414811,25000.0
+Pythia-160M re-pretrain,orig→Modern1234 (dog) · per-checkpoint,dog,orig,Modern1234,625.0,300,0.4296010374365139,25000.0
+Pythia-160M re-pretrain,orig→Modern1234 (dog) · per-checkpoint,dog,orig,Modern1234,1250.0,300,0.6861667206337339,25000.0
+Pythia-160M re-pretrain,orig→Modern1234 (dog) · per-checkpoint,dog,orig,Modern1234,1875.0,300,0.7962275564083714,25000.0
+Pythia-160M re-pretrain,orig→Modern1234 (dog) · per-checkpoint,dog,orig,Modern1234,2500.0,300,0.7570724358600452,25000.0
+Pythia-160M re-pretrain,orig→Modern1234 (dog) · per-checkpoint,dog,orig,Modern1234,3125.0,300,0.9877840588594436,25000.0
+Pythia-160M re-pretrain,orig→Modern1234 (dog) · per-checkpoint,dog,orig,Modern1234,3750.0,300,0.8971866925013605,25000.0
+Pythia-160M re-pretrain,orig→Modern1234 (dog) · per-checkpoint,dog,orig,Modern1234,6250.0,300,1.1513180578293842,25000.0
+Pythia-160M re-pretrain,orig→Modern1234 (dog) · per-checkpoint,dog,orig,Modern1234,12500.0,300,0.586564351230989,25000.0
+Pythia-160M re-pretrain,orig→Modern1234 (dog) · per-checkpoint,dog,orig,Modern1234,25000.0,300,0.2932171185386534,25000.0
+Pythia-160M re-pretrain,orig→Rerun1234 (dog) · per-checkpoint,dog,orig,Rerun1234,625.0,93,0.2982553064158002,25000.0
+Pythia-160M re-pretrain,orig→Rerun1234 (dog) · per-checkpoint,dog,orig,Rerun1234,1250.0,93,0.32579560511499256,25000.0
+Pythia-160M re-pretrain,orig→Rerun1234 (dog) · per-checkpoint,dog,orig,Rerun1234,1875.0,93,0.33990791828006794,25000.0
+Pythia-160M re-pretrain,orig→Rerun1234 (dog) · per-checkpoint,dog,orig,Rerun1234,2500.0,93,0.3785840160901957,25000.0
+Pythia-160M re-pretrain,orig→Rerun1234 (dog) · per-checkpoint,dog,orig,Rerun1234,3125.0,93,0.1649877849613432,25000.0
+Pythia-160M re-pretrain,orig→Rerun1234 (dog) · per-checkpoint,dog,orig,Rerun1234,3750.0,93,0.22147038139294714,25000.0
+Pythia-160M re-pretrain,orig→Rerun1234 (dog) · per-checkpoint,dog,orig,Rerun1234,6250.0,93,0.18487978412550524,25000.0
+Pythia-160M re-pretrain,orig→Rerun1234 (dog) · per-checkpoint,dog,orig,Rerun1234,12500.0,93,0.7928438463951724,25000.0
+Pythia-160M re-pretrain,orig→Rerun1234 (dog) · per-checkpoint,dog,orig,Rerun1234,25000.0,92,0.7888549146313255,25000.0
+Pythia-160M re-pretrain,Modern1234→orig (dog) · per-checkpoint,dog,Modern1234,orig,625.0,283,0.6332589295397373,25000.0
+Pythia-160M re-pretrain,Modern1234→orig (dog) · per-checkpoint,dog,Modern1234,orig,1250.0,283,1.3511546927811022,25000.0
+Pythia-160M re-pretrain,Modern1234→orig (dog) · per-checkpoint,dog,Modern1234,orig,1875.0,283,1.4967834455551046,25000.0
+Pythia-160M re-pretrain,Modern1234→orig (dog) · per-checkpoint,dog,Modern1234,orig,2500.0,283,1.7214388129713012,25000.0
+Pythia-160M re-pretrain,Modern1234→orig (dog) · per-checkpoint,dog,Modern1234,orig,3125.0,283,2.095557148286708,25000.0
+Pythia-160M re-pretrain,Modern1234→orig (dog) · per-checkpoint,dog,Modern1234,orig,3750.0,283,2.384644070797667,25000.0
+Pythia-160M re-pretrain,Modern1234→orig (dog) · per-checkpoint,dog,Modern1234,orig,6250.0,283,3.0236624376206787,25000.0
+Pythia-160M re-pretrain,Modern1234→orig (dog) · per-checkpoint,dog,Modern1234,orig,12500.0,283,6.272551269835136,25000.0
+Pythia-160M re-pretrain,Modern1234→orig (dog) · per-checkpoint,dog,Modern1234,orig,25000.0,279,8.40202708140343,25000.0
+Pythia same-model,Modern1234→Modern1234 (dog) · per-checkpoint,dog,Modern1234,Modern1234,625.0,300,8.704897220024069,25000.0
+Pythia same-model,Modern1234→Modern1234 (dog) · per-checkpoint,dog,Modern1234,Modern1234,1250.0,300,32.74940924482424,25000.0
+Pythia same-model,Modern1234→Modern1234 (dog) · per-checkpoint,dog,Modern1234,Modern1234,1875.0,300,37.449226813038976,25000.0
+Pythia same-model,Modern1234→Modern1234 (dog) · per-checkpoint,dog,Modern1234,Modern1234,2500.0,300,43.46697838736088,25000.0
+Pythia same-model,Modern1234→Modern1234 (dog) · per-checkpoint,dog,Modern1234,Modern1234,3125.0,300,40.834094145756424,25000.0
+Pythia same-model,Modern1234→Modern1234 (dog) · per-checkpoint,dog,Modern1234,Modern1234,3750.0,300,42.73658424904504,25000.0
+Pythia same-model,Modern1234→Modern1234 (dog) · per-checkpoint,dog,Modern1234,Modern1234,6250.0,300,29.35037137387365,25000.0
+Pythia same-model,Modern1234→Modern1234 (dog) · per-checkpoint,dog,Modern1234,Modern1234,12500.0,300,8.251871430041785,25000.0
+Pythia same-model,Modern1234→Modern1234 (dog) · per-checkpoint,dog,Modern1234,Modern1234,25000.0,300,3.5444729718185357,25000.0
+Pythia-160M re-pretrain,Modern1234→Rerun1234 (dog),dog,Modern1234,Rerun1234,625.0,100,0.6267506828739702,25000.0
+Pythia-160M re-pretrain,Modern1234→Rerun1234 (dog),dog,Modern1234,Rerun1234,1250.0,100,1.0871840088470128,25000.0
+Pythia-160M re-pretrain,Modern1234→Rerun1234 (dog),dog,Modern1234,Rerun1234,1875.0,100,1.0770950785773645,25000.0
+Pythia-160M re-pretrain,Modern1234→Rerun1234 (dog),dog,Modern1234,Rerun1234,2500.0,100,1.424966375332668,25000.0
+Pythia-160M re-pretrain,Modern1234→Rerun1234 (dog),dog,Modern1234,Rerun1234,3125.0,100,1.7133806487726264,25000.0
+Pythia-160M re-pretrain,Modern1234→Rerun1234 (dog),dog,Modern1234,Rerun1234,3750.0,100,1.6967118222894577,25000.0
+Pythia-160M re-pretrain,Modern1234→Rerun1234 (dog),dog,Modern1234,Rerun1234,6250.0,100,1.8162541645306283,25000.0
+Pythia-160M re-pretrain,Modern1234→Rerun1234 (dog),dog,Modern1234,Rerun1234,12500.0,100,5.328519701840479,25000.0
+Pythia-160M re-pretrain,Modern1234→Rerun1234 (dog),dog,Modern1234,Rerun1234,25000.0,100,7.495959605116486,25000.0
+Pythia-160M re-pretrain,Rerun1234→orig (dog) · per-checkpoint,dog,Rerun1234,orig,625.0,82,0.8198832761556245,25000.0
+Pythia-160M re-pretrain,Rerun1234→orig (dog) · per-checkpoint,dog,Rerun1234,orig,1250.0,82,1.3276563427937602,25000.0
+Pythia-160M re-pretrain,Rerun1234→orig (dog) · per-checkpoint,dog,Rerun1234,orig,1875.0,82,1.8681478094133124,25000.0
+Pythia-160M re-pretrain,Rerun1234→orig (dog) · per-checkpoint,dog,Rerun1234,orig,2500.0,82,2.1946540606347598,25000.0
+Pythia-160M re-pretrain,Rerun1234→orig (dog) · per-checkpoint,dog,Rerun1234,orig,3125.0,82,2.588932310941445,25000.0
+Pythia-160M re-pretrain,Rerun1234→orig (dog) · per-checkpoint,dog,Rerun1234,orig,3750.0,82,2.7125835824464533,25000.0
+Pythia-160M re-pretrain,Rerun1234→orig (dog) · per-checkpoint,dog,Rerun1234,orig,6250.0,82,3.3164813921350866,25000.0
+Pythia-160M re-pretrain,Rerun1234→orig (dog) · per-checkpoint,dog,Rerun1234,orig,12500.0,82,5.612132144366813,25000.0
+Pythia-160M re-pretrain,Rerun1234→orig (dog) · per-checkpoint,dog,Rerun1234,orig,25000.0,81,6.2008995385486605,25000.0
+Pythia-160M re-pretrain,Rerun1234→Modern1234 (dog),dog,Rerun1234,Modern1234,625.0,100,0.4478872957857417,25000.0
+Pythia-160M re-pretrain,Rerun1234→Modern1234 (dog),dog,Rerun1234,Modern1234,1250.0,100,0.9455824740054575,25000.0
+Pythia-160M re-pretrain,Rerun1234→Modern1234 (dog),dog,Rerun1234,Modern1234,1875.0,100,1.6204338603972759,25000.0
+Pythia-160M re-pretrain,Rerun1234→Modern1234 (dog),dog,Rerun1234,Modern1234,2500.0,100,1.4192392415475532,25000.0
+Pythia-160M re-pretrain,Rerun1234→Modern1234 (dog),dog,Rerun1234,Modern1234,3125.0,100,1.8396843792001065,25000.0
+Pythia-160M re-pretrain,Rerun1234→Modern1234 (dog),dog,Rerun1234,Modern1234,3750.0,100,2.1330692252925223,25000.0
+Pythia-160M re-pretrain,Rerun1234→Modern1234 (dog),dog,Rerun1234,Modern1234,6250.0,100,2.45107270511713,25000.0
+Pythia-160M re-pretrain,Rerun1234→Modern1234 (dog),dog,Rerun1234,Modern1234,12500.0,100,0.5623755032586095,25000.0
+Pythia-160M re-pretrain,Rerun1234→Modern1234 (dog),dog,Rerun1234,Modern1234,25000.0,100,0.27646530597831864,25000.0
+Pythia same-model,Rerun1234→Rerun1234 (dog) · per-checkpoint,dog,Rerun1234,Rerun1234,625.0,90,4.905024284264915,25000.0
+Pythia same-model,Rerun1234→Rerun1234 (dog) · per-checkpoint,dog,Rerun1234,Rerun1234,1250.0,90,19.075403775207057,25000.0
+Pythia same-model,Rerun1234→Rerun1234 (dog) · per-checkpoint,dog,Rerun1234,Rerun1234,1875.0,90,30.189989665289485,25000.0
+Pythia same-model,Rerun1234→Rerun1234 (dog) · per-checkpoint,dog,Rerun1234,Rerun1234,2500.0,90,39.53381797617706,25000.0
+Pythia same-model,Rerun1234→Rerun1234 (dog) · per-checkpoint,dog,Rerun1234,Rerun1234,3125.0,90,47.829364024435904,25000.0
+Pythia same-model,Rerun1234→Rerun1234 (dog) · per-checkpoint,dog,Rerun1234,Rerun1234,3750.0,90,46.622852024386574,25000.0
+Pythia same-model,Rerun1234→Rerun1234 (dog) · per-checkpoint,dog,Rerun1234,Rerun1234,6250.0,90,60.15270905941205,25000.0
+Pythia same-model,Rerun1234→Rerun1234 (dog) · per-checkpoint,dog,Rerun1234,Rerun1234,12500.0,90,69.31711782153815,25000.0
+Pythia same-model,Rerun1234→Rerun1234 (dog) · per-checkpoint,dog,Rerun1234,Rerun1234,25000.0,90,39.59705663287163,25000.0
+"diff init, same data order",Rerun1234→wc1 (dog) · per-checkpoint,dog,Rerun1234,wc1,625.0,80,0.045427571536541034,25000.0
+"diff init, same data order",Rerun1234→wc1 (dog) · per-checkpoint,dog,Rerun1234,wc1,1250.0,80,0.15158532904191893,25000.0
+"diff init, same data order",Rerun1234→wc1 (dog) · per-checkpoint,dog,Rerun1234,wc1,1875.0,80,-0.06310546990492971,25000.0
+"diff init, same data order",Rerun1234→wc1 (dog) · per-checkpoint,dog,Rerun1234,wc1,2500.0,80,-0.1551690783322231,25000.0
+"diff init, same data order",Rerun1234→wc1 (dog) · per-checkpoint,dog,Rerun1234,wc1,3125.0,80,-0.11791215962265564,25000.0
+"diff init, same data order",Rerun1234→wc1 (dog) · per-checkpoint,dog,Rerun1234,wc1,3750.0,80,-0.1674174494969916,25000.0
+"diff init, same data order",Rerun1234→wc1 (dog) · per-checkpoint,dog,Rerun1234,wc1,6250.0,80,-0.17472038603885715,25000.0
+"diff init, same data order",Rerun1234→wc1 (dog) · per-checkpoint,dog,Rerun1234,wc1,12500.0,80,-0.22408096995147886,25000.0
+"diff init, same data order",Rerun1234→wc1 (dog) · per-checkpoint,dog,Rerun1234,wc1,25000.0,80,-0.34529251622746227,25000.0
+"diff init, same data order",Rerun1234→wc2 (dog) · per-checkpoint,dog,Rerun1234,wc2,625.0,99,0.23871519897971671,25000.0
+"diff init, same data order",Rerun1234→wc2 (dog) · per-checkpoint,dog,Rerun1234,wc2,1250.0,99,0.32880918164145584,25000.0
+"diff init, same data order",Rerun1234→wc2 (dog) · per-checkpoint,dog,Rerun1234,wc2,1875.0,99,0.3368458853281556,25000.0
+"diff init, same data order",Rerun1234→wc2 (dog) · per-checkpoint,dog,Rerun1234,wc2,2500.0,99,0.03557415942433554,25000.0
+"diff init, same data order",Rerun1234→wc2 (dog) · per-checkpoint,dog,Rerun1234,wc2,3125.0,99,-0.011404844815844578,25000.0
+"diff init, same data order",Rerun1234→wc2 (dog) · per-checkpoint,dog,Rerun1234,wc2,3750.0,99,-0.07210537456260789,25000.0
+"diff init, same data order",Rerun1234→wc2 (dog) · per-checkpoint,dog,Rerun1234,wc2,6250.0,99,-0.16617581401486733,25000.0
+"diff init, same data order",Rerun1234→wc2 (dog) · per-checkpoint,dog,Rerun1234,wc2,12500.0,99,0.09240158067969143,25000.0
+"diff init, same data order",Rerun1234→wc2 (dog) · per-checkpoint,dog,Rerun1234,wc2,25000.0,99,-0.11496482565583152,25000.0
+"diff init, same data order",wc1→Rerun1234 (dog) · per-checkpoint,dog,wc1,Rerun1234,625.0,89,0.5002626254596728,25000.0
+"diff init, same data order",wc1→Rerun1234 (dog) · per-checkpoint,dog,wc1,Rerun1234,1250.0,89,0.611568006364457,25000.0
+"diff init, same data order",wc1→Rerun1234 (dog) · per-checkpoint,dog,wc1,Rerun1234,1875.0,89,0.4817333413785523,25000.0
+"diff init, same data order",wc1→Rerun1234 (dog) · per-checkpoint,dog,wc1,Rerun1234,2500.0,89,0.6160361941474718,25000.0
+"diff init, same data order",wc1→Rerun1234 (dog) · per-checkpoint,dog,wc1,Rerun1234,3125.0,89,0.6361556036564129,25000.0
+"diff init, same data order",wc1→Rerun1234 (dog) · per-checkpoint,dog,wc1,Rerun1234,3750.0,89,0.4914521010239944,25000.0
+"diff init, same data order",wc1→Rerun1234 (dog) · per-checkpoint,dog,wc1,Rerun1234,6250.0,89,0.7842264874278682,25000.0
+"diff init, same data order",wc1→Rerun1234 (dog) · per-checkpoint,dog,wc1,Rerun1234,12500.0,89,0.8911432400011227,25000.0
+"diff init, same data order",wc1→Rerun1234 (dog) · per-checkpoint,dog,wc1,Rerun1234,25000.0,89,2.263561748527978,25000.0
+Pythia same-model,wc1→wc1 (dog) · per-checkpoint,dog,wc1,wc1,625.0,84,8.610999951932246,25000.0
+Pythia same-model,wc1→wc1 (dog) · per-checkpoint,dog,wc1,wc1,1250.0,84,28.443590770465278,25000.0
+Pythia same-model,wc1→wc1 (dog) · per-checkpoint,dog,wc1,wc1,1875.0,84,41.705934134859554,25000.0
+Pythia same-model,wc1→wc1 (dog) · per-checkpoint,dog,wc1,wc1,2500.0,84,46.373066211618635,25000.0
+Pythia same-model,wc1→wc1 (dog) · per-checkpoint,dog,wc1,wc1,3125.0,84,54.537124556194925,25000.0
+Pythia same-model,wc1→wc1 (dog) · per-checkpoint,dog,wc1,wc1,3750.0,84,56.7124459678965,25000.0
+Pythia same-model,wc1→wc1 (dog) · per-checkpoint,dog,wc1,wc1,6250.0,84,56.37526403315037,25000.0
+Pythia same-model,wc1→wc1 (dog) · per-checkpoint,dog,wc1,wc1,12500.0,84,70.84655982489991,25000.0
+Pythia same-model,wc1→wc1 (dog) · per-checkpoint,dog,wc1,wc1,25000.0,84,60.39102656942542,25000.0
+"diff init, same data order",wc1→wc2 (dog) · per-checkpoint,dog,wc1,wc2,625.0,99,0.1868785267714308,25000.0
+"diff init, same data order",wc1→wc2 (dog) · per-checkpoint,dog,wc1,wc2,1250.0,99,0.14590912922393523,25000.0
+"diff init, same data order",wc1→wc2 (dog) · per-checkpoint,dog,wc1,wc2,1875.0,99,0.020678442814461902,25000.0
+"diff init, same data order",wc1→wc2 (dog) · per-checkpoint,dog,wc1,wc2,2500.0,99,0.10777865142734477,25000.0
+"diff init, same data order",wc1→wc2 (dog) · per-checkpoint,dog,wc1,wc2,3125.0,99,0.020022685067940624,25000.0
+"diff init, same data order",wc1→wc2 (dog) · per-checkpoint,dog,wc1,wc2,3750.0,99,0.20298076677850027,25000.0
+"diff init, same data order",wc1→wc2 (dog) · per-checkpoint,dog,wc1,wc2,6250.0,99,0.427332746975851,25000.0
+"diff init, same data order",wc1→wc2 (dog) · per-checkpoint,dog,wc1,wc2,12500.0,99,1.1612712910347973,25000.0
+"diff init, same data order",wc1→wc2 (dog) · per-checkpoint,dog,wc1,wc2,25000.0,99,1.3303605088998616,25000.0
+"diff init, same data order",wc2→Rerun1234 (dog) · per-checkpoint,dog,wc2,Rerun1234,625.0,92,0.16255843559893463,25000.0
+"diff init, same data order",wc2→Rerun1234 (dog) · per-checkpoint,dog,wc2,Rerun1234,1250.0,92,0.27467074822749415,25000.0
+"diff init, same data order",wc2→Rerun1234 (dog) · per-checkpoint,dog,wc2,Rerun1234,1875.0,92,0.28480144555396525,25000.0
+"diff init, same data order",wc2→Rerun1234 (dog) · per-checkpoint,dog,wc2,Rerun1234,2500.0,92,0.34427773118417604,25000.0
+"diff init, same data order",wc2→Rerun1234 (dog) · per-checkpoint,dog,wc2,Rerun1234,3125.0,92,0.2660228231756646,25000.0
+"diff init, same data order",wc2→Rerun1234 (dog) · per-checkpoint,dog,wc2,Rerun1234,3750.0,92,0.3381371498871043,25000.0
+"diff init, same data order",wc2→Rerun1234 (dog) · per-checkpoint,dog,wc2,Rerun1234,6250.0,92,0.45195414022456326,25000.0
+"diff init, same data order",wc2→Rerun1234 (dog) · per-checkpoint,dog,wc2,Rerun1234,12500.0,92,1.0261385429384706,25000.0
+"diff init, same data order",wc2→Rerun1234 (dog) · per-checkpoint,dog,wc2,Rerun1234,25000.0,92,1.974090545263398,25000.0
+"diff init, same data order",wc2→wc1 (dog) · per-checkpoint,dog,wc2,wc1,625.0,90,0.23504056385089012,25000.0
+"diff init, same data order",wc2→wc1 (dog) · per-checkpoint,dog,wc2,wc1,1250.0,90,0.10908796319866873,25000.0
+"diff init, same data order",wc2→wc1 (dog) · per-checkpoint,dog,wc2,wc1,1875.0,90,0.07898829587672533,25000.0
+"diff init, same data order",wc2→wc1 (dog) · per-checkpoint,dog,wc2,wc1,2500.0,90,-0.12912298110444959,25000.0
+"diff init, same data order",wc2→wc1 (dog) · per-checkpoint,dog,wc2,wc1,3125.0,90,-0.1266259709172831,25000.0
+"diff init, same data order",wc2→wc1 (dog) · per-checkpoint,dog,wc2,wc1,3750.0,90,-0.07803059630610354,25000.0
+"diff init, same data order",wc2→wc1 (dog) · per-checkpoint,dog,wc2,wc1,6250.0,90,-0.1708574138086209,25000.0
+"diff init, same data order",wc2→wc1 (dog) · per-checkpoint,dog,wc2,wc1,12500.0,90,-0.0987502051095406,25000.0
+"diff init, same data order",wc2→wc1 (dog) · per-checkpoint,dog,wc2,wc1,25000.0,90,0.1641391346975753,25000.0
+Pythia same-model,wc2→wc2 (dog) · per-checkpoint,dog,wc2,wc2,625.0,100,5.157889443343564,25000.0
+Pythia same-model,wc2→wc2 (dog) · per-checkpoint,dog,wc2,wc2,1250.0,100,20.60953946901773,25000.0
+Pythia same-model,wc2→wc2 (dog) · per-checkpoint,dog,wc2,wc2,1875.0,100,33.104851353266625,25000.0
+Pythia same-model,wc2→wc2 (dog) · per-checkpoint,dog,wc2,wc2,2500.0,100,39.90885118167864,25000.0
+Pythia same-model,wc2→wc2 (dog) · per-checkpoint,dog,wc2,wc2,3125.0,100,44.55861682414084,25000.0
+Pythia same-model,wc2→wc2 (dog) · per-checkpoint,dog,wc2,wc2,3750.0,100,46.31138558573108,25000.0
+Pythia same-model,wc2→wc2 (dog) · per-checkpoint,dog,wc2,wc2,6250.0,100,50.985794424181314,25000.0
+Pythia same-model,wc2→wc2 (dog) · per-checkpoint,dog,wc2,wc2,12500.0,100,42.6851871643852,25000.0
+Pythia same-model,wc2→wc2 (dog) · per-checkpoint,dog,wc2,wc2,25000.0,100,17.880047042208638,25000.0

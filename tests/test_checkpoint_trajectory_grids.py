@@ -75,13 +75,88 @@ def test_heatmaps_share_clim():
     assert len(clims) == 1 and next(iter(clims))[0] == 0
 
 
+def test_diagonal_means_and_plot():
+    M1 = np.array([[0.1, 0.9], [0.8, np.nan]])
+    M2 = np.array([[0.3, 0.9], [0.8, 0.4]])
+    d = ctg.diagonal_means({625: M1, 12500: M2}, ckpt_steps=STEPS)
+    assert np.isclose(d.p.iloc[0], 0.1) and np.isnan(d.p.iloc[1]) and np.isclose(d.p.iloc[3], 0.4)
+    assert list(d.ckpt) == [75, 80, 75, 80]
+    fig = ctg.plot_diagonal_trajectories({"orig": d, "fs2": d})
+    axes = [ax for ax in fig.axes if ax.lines]
+    assert len(axes) == 2 and all(len(ax.lines) == 2 for ax in axes)  # one line per saved step
+    leg = axes[0].get_legend()
+    assert not fig.legends and leg is not None and leg.get_title().get_text() == "optimizer step"
+    assert [t.get_text() for t in leg.get_texts()] == ["step 625", "step 12,500"]
+    tab = ctg.diagonal_table({"orig": d, "fs2": d})
+    assert tab.shape == (4, 2) and np.isnan(tab.loc[("orig", 80), 625])
+
+
+def _diag_ctrl(path, pts, end=None):
+    ev = path / "ftseed1" / "eval"
+    ev.mkdir(parents=True)
+    (ev / "pref_traj.json").write_text(json.dumps(
+        {"points": [{"step": st, "test": {"dog": {"p_target": v}}} for st, v in pts.items()]}))
+    if end is not None:
+        (ev / "dog").mkdir()
+        (ev / "dog" / "preference_eval.json").write_text(json.dumps({"sets": {"test": {"p_target": end}}}))
+
+
+def test_diagonal_controls_layouts_and_subtraction(tmp_path):
+    ds = ctg.DATASET_DIR
+    six = {st: 0.01 for st in ctg.TRAJ_STEPS}
+    base = tmp_path / "students/controls/base"
+    # orig 143k: points at ckpt/pythia-160m@step143000/teacher-pythia-160m, endpoint unrevisioned
+    _diag_ctrl(base / "ckpt/pythia-160m@step143000/teacher-pythia-160m" / ds / ctg.ENDPOINT_STUDENT_TAG, six)
+    _diag_ctrl(base / "pythia-160m/teacher-pythia-160m" / ds / ctg.ENDPOINT_STUDENT_TAG, {}, end=0.05)
+    # orig 130k: stop-6250 points + plain endpoint
+    cell = base / "ckpt/pythia-160m@step130000/teacher-pythia-160m@step130000" / ds
+    _diag_ctrl(cell / ctg.STOP_STUDENT_TAG, six)
+    _diag_ctrl(cell / ctg.ENDPOINT_STUDENT_TAG, {}, end=0.02)
+    c = ctg.load_diagonal_controls(tmp_path, "orig", ckpt_steps=[130000, 143000])
+    assert c.attrs["coverage"] == dict(expected=2, found=2)
+    assert np.isclose(c.set_index(["step", "ckpt"]).c[(12500, 143)], 0.05)
+    assert np.isclose(c.set_index(["step", "ckpt"]).c[(625, 130)], 0.01)
+    # fs2: all 7 points in the plain leaf, no @step exception; 143k missing
+    cell = base / "ckpt/pythia-160m-seed2@step130000/teacher-pythia-160m-seed2@step130000" / ds
+    _diag_ctrl(cell / ctg.ENDPOINT_STUDENT_TAG, {**six, 12500: 0.03})
+    c2 = ctg.load_diagonal_controls(tmp_path, "fs2", ckpt_steps=[130000, 143000])
+    assert c2.attrs["coverage"] == dict(expected=2, found=1)
+    g = {st: np.array([[0.5, 0.0], [0.0, 0.4]]) for st in ctg.ALL_SAVED_STEPS}
+    j = ctg.subtract_diagonal_controls(ctg.diagonal_means(g, ckpt_steps=[130000, 143000]), c2).set_index(["step", "ckpt"])
+    assert np.isclose(j.dp[(12500, 130)], 0.5 - 0.03) and np.isnan(j.dp[(625, 143)])
+    assert ctg.diagonal_table({"fs2": j.reset_index()}).loc[("fs2", 130), 12500] == j.dp[(12500, 130)]
+
+
+def test_diagonal_only_lineage_paths_and_display_name(tmp_path):
+    d, ck = ctg.DIAGONAL_LINEAGES["pr1234"]
+    assert d == "pythia-160m-pilerepro-seed1234" and len(ck) == 15 and ck[0] == 25000 and ck[-1] == 143000
+    assert "pr1234" not in ctg.LINEAGE_DIRS
+    leaf = ctg._leaf(tmp_path, "dog", "pr1234", 25000, 25000, "a")
+    assert f"{d}@step25000/teacher-{d}@step25000/a_tseed1" in str(leaf)
+    ev = leaf / ctg.STOP_STUDENT_TAG / "ftseed1" / "eval"
+    ev.mkdir(parents=True)
+    (ev / "pref_traj.json").write_text(json.dumps({"points": [{"step": 625, "test": {"p_target": 0.2}}]}))
+    runs = ctg.load_trajectory_grid_runs(tmp_path, "dog", "pr1234", teacher_tags=["a"])
+    assert runs.attrs["coverage"]["expected"] == 15 * 15 and len(runs) == 1
+    cell = (tmp_path / "students/controls/base/ckpt" / f"{d}@step25000" / f"teacher-{d}@step25000"
+            / ctg.DATASET_DIR / ctg.ENDPOINT_STUDENT_TAG)
+    _diag_ctrl(cell, {st: 0.01 for st in ctg.ALL_SAVED_STEPS})
+    c = ctg.load_diagonal_controls(tmp_path, "pr1234")
+    assert c.attrs["coverage"] == dict(expected=15, found=1) and sorted(c.ckpt.unique())[:2] == [25, 50]
+    fr = ctg.diagonal_means({625: np.diag([0.3, 0.4])}, ckpt_steps=[25000, 50000])
+    fig = ctg.plot_diagonal_trajectories({"orig": fr, "pr1234": fr})
+    titles = [ax.get_title() for ax in fig.axes]
+    assert titles[1].startswith("Modern1234") and not any("pr1234" in x for x in titles)
+    assert ctg.diagonal_table({"pr1234": fr}).index[0][0] == "Modern1234"
+
+
 def test_builder_import_does_not_write():
     mod = importlib.import_module("scripts.build_checkpoint_trajectory_grids_nb")
     before = mod.OUT.stat().st_mtime_ns if mod.OUT.exists() else None
     importlib.reload(mod)
     after = mod.OUT.stat().st_mtime_ns if mod.OUT.exists() else None
     assert before == after
-    assert len(mod.build_notebook().cells) == 21
+    assert len(mod.build_notebook().cells) == 29
 
 
 # ---------------------------------------------------------------- S_all trajectories
@@ -177,3 +252,55 @@ def test_length_share_figure_two_axes(tmp_path, monkeypatch):
     fig = X.length_share_figure(F)
     assert len(fig.axes) == 2
     assert list(tmp_path.iterdir()) == []
+
+
+def _ctrl(root, t, s, base, stop=True):
+    if stop:
+        ev = ctg.control_cell(root, t, s, ctg.STOP_STUDENT_TAG) / "ftseed1" / "eval"
+        ev.mkdir(parents=True)
+        pts = [{"step": st, "test": {"p_target": base}} for st in ctg.TRAJ_STEPS]
+        (ev / "pref_traj.json").write_text(json.dumps({"points": pts}))
+    ev = ctg.control_cell(root, t, s, ctg.ENDPOINT_STUDENT_TAG) / "ftseed1" / "eval" / "dog"
+    ev.mkdir(parents=True)
+    (ev / "preference_eval.json").write_text(json.dumps({"sets": {"test": {"p_target": base}}}))
+
+
+def test_control_trajectories_and_excess_table(tmp_path):
+    assert "controls/base/pythia-160m/teacher-pythia-160m/" in str(
+        ctg.control_cell(tmp_path, 143000, 143000, "x"))
+    assert "pythia-160m@step75000/teacher-pythia-160m/" in str(
+        ctg.control_cell(tmp_path, 143000, 75000, "x"))
+    for t in SALL_STEPS:
+        for s in SALL_STEPS:
+            _ctrl(tmp_path, t, s, 0.01 if t == s else 0.02, stop=(t, s) != (143000, 143000))
+            _sall(tmp_path, t, s, "a", 1, 0.2)
+    C = ctg.load_control_trajectory_runs(tmp_path, steps=SALL_STEPS)
+    cov = C.attrs["coverage"]
+    assert (cov["expected"], cov["found"], cov["endpoints"]) == (4, 3, 4)
+    S = ctg.load_sall_trajectory_runs(tmp_path, steps=SALL_STEPS, ftseeds=(1,), teacher_tags=["a"])
+    R = S.assign(p=S.p * 2)
+    tab = ctg.sall_excess_table(S, R, C, SALL_STEPS, steps=[625, 12500])
+    # step 625: C(143k,143k) missing -> the 143k student column drops out of both arms
+    assert tab.loc[625, ("all cells", "cells")] == 2
+    assert np.isclose(tab.loc[625, ("diagonal (i = j)", "S_all − C(s,s)")], 0.19)
+    assert np.isclose(tab.loc[625, ("all cells", "R − C(t→s)")], (0.39 + 0.38) / 2)
+    assert tab.loc[12500, ("all cells", "cells")] == 4
+    assert np.isclose(tab.loc[12500, ("diagonal (i = j)", "S_all÷R")], 0.69 / 1.39)
+
+
+def test_control_trajectory_ckpt_path_fallback(tmp_path):
+    for t in SALL_STEPS:
+        for s in SALL_STEPS:
+            _ctrl(tmp_path, t, s, 0.02, stop=(t, s) != (143000, 143000))
+    # 143k->143k saves only at the plain ckpt-path leaf; endpoint stays at the unrevisioned leaf
+    ev = (tmp_path / "students/controls/base/ckpt/pythia-160m@step143000/teacher-pythia-160m"
+          / ctg.DATASET_DIR / ctg.ENDPOINT_STUDENT_TAG / "ftseed1" / "eval")
+    ev.mkdir(parents=True)
+    pts = [{"step": st, "test": {"p_target": 0.05}} for st in ctg.TRAJ_STEPS]
+    (ev / "pref_traj.json").write_text(json.dumps({"points": pts}))
+    C = ctg.load_control_trajectory_runs(tmp_path, steps=SALL_STEPS)
+    cov = C.attrs["coverage"]
+    assert (cov["expected"], cov["found"], cov["endpoints"], cov["short"]) == (4, 4, 4, 0)
+    d = C[(C.t == 143000) & (C.s == 143000)].set_index("step").p
+    assert all(np.isclose(d[st], 0.05) for st in ctg.TRAJ_STEPS)
+    assert np.isclose(d[ctg.ENDPOINT_STEP], 0.02)

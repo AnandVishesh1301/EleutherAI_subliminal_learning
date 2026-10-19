@@ -1,0 +1,521 @@
+grid,model,recipe,net
+"Pythia-160m, dog
+diff init, diff data order",orig,ep10_lr1e-4_r32a64,-2.101716250780784
+"Pythia-160m, dog
+diff init, diff data order",orig,ep10_lr1e-4_r64a64,-1.4009419557163494
+"Pythia-160m, dog
+diff init, diff data order",orig,ep20_lr1e-4_r16a32,-5.001455736620517
+"Pythia-160m, dog
+diff init, diff data order",orig,ep20_lr1e-4_r8a16,-5.329669716589858
+"Pythia-160m, dog
+diff init, diff data order",orig,ep2_lr5e-4_r32a64,-1.7637607519935325
+"Pythia-160m, dog
+diff init, diff data order",orig,ep5_lr2e-4_r64a64,-2.315485160510089
+"Pythia-160m, dog
+diff init, diff data order",orig,ep5_lr5e-4_r8a16,-6.219612525620135
+"Pythia-160m, dog
+diff init, diff data order",orig,ep7_lr1e-4_r32a64,-1.7463539341904146
+"Pythia-160m, dog
+diff init, diff data order",orig,ep7_lr2e-4_r32a32,-3.4333896834891386
+"Pythia-160m, dog
+diff init, diff data order",orig,ep7_lr5e-4_r8a8,-4.394444399208195
+"Pythia-160m, dog
+diff init, diff data order",fs1,ep10_lr1e-4_r32a64,0.5840301879210353
+"Pythia-160m, dog
+diff init, diff data order",fs1,ep10_lr1e-4_r64a64,-0.05883985609545328
+"Pythia-160m, dog
+diff init, diff data order",fs1,ep20_lr1e-4_r16a32,1.2739930156361157
+"Pythia-160m, dog
+diff init, diff data order",fs1,ep20_lr1e-4_r8a16,1.5472707201275064
+"Pythia-160m, dog
+diff init, diff data order",fs1,ep2_lr5e-4_r32a64,0.8430303181572345
+"Pythia-160m, dog
+diff init, diff data order",fs1,ep5_lr2e-4_r64a64,0.6216305781711385
+"Pythia-160m, dog
+diff init, diff data order",fs1,ep5_lr5e-4_r8a16,1.156251190946394
+"Pythia-160m, dog
+diff init, diff data order",fs1,ep7_lr1e-4_r32a64,0.9299061905004136
+"Pythia-160m, dog
+diff init, diff data order",fs1,ep7_lr2e-4_r32a32,0.5867492819164388
+"Pythia-160m, dog
+diff init, diff data order",fs1,ep7_lr5e-4_r8a8,1.0403805997157007
+"Pythia-160m, dog
+diff init, diff data order",fs2,ep10_lr1e-4_r32a64,1.2426513747034371
+"Pythia-160m, dog
+diff init, diff data order",fs2,ep10_lr1e-4_r64a64,0.4975631863680867
+"Pythia-160m, dog
+diff init, diff data order",fs2,ep20_lr1e-4_r16a32,1.2294819182726398
+"Pythia-160m, dog
+diff init, diff data order",fs2,ep20_lr1e-4_r8a16,4.188939971557034
+"Pythia-160m, dog
+diff init, diff data order",fs2,ep2_lr5e-4_r32a64,0.5974037830461737
+"Pythia-160m, dog
+diff init, diff data order",fs2,ep5_lr2e-4_r64a64,0.70436060331772
+"Pythia-160m, dog
+diff init, diff data order",fs2,ep5_lr5e-4_r8a16,0.4546573251093333
+"Pythia-160m, dog
+diff init, diff data order",fs2,ep7_lr1e-4_r32a64,0.2901711630666792
+"Pythia-160m, dog
+diff init, diff data order",fs2,ep7_lr2e-4_r32a32,1.8480033697659684
+"Pythia-160m, dog
+diff init, diff data order",fs2,ep7_lr5e-4_r8a8,0.5095062003963303
+"Pythia-160m, dog
+diff init, diff data order",fs3,ep10_lr1e-4_r32a64,0.2750346881563111
+"Pythia-160m, dog
+diff init, diff data order",fs3,ep10_lr1e-4_r64a64,0.9622186254437161
+"Pythia-160m, dog
+diff init, diff data order",fs3,ep20_lr1e-4_r16a32,2.4979808027117616
+"Pythia-160m, dog
+diff init, diff data order",fs3,ep20_lr1e-4_r8a16,-0.4065409750946844
+"Pythia-160m, dog
+diff init, diff data order",fs3,ep2_lr5e-4_r32a64,0.3233266507901244
+"Pythia-160m, dog
+diff init, diff data order",fs3,ep5_lr2e-4_r64a64,0.9894939790212308
+"Pythia-160m, dog
+diff init, diff data order",fs3,ep5_lr5e-4_r8a16,4.6087040095644065
+"Pythia-160m, dog
+diff init, diff data order",fs3,ep7_lr1e-4_r32a64,0.5262765806233218
+"Pythia-160m, dog
+diff init, diff data order",fs3,ep7_lr2e-4_r32a32,0.9986370318067305
+"Pythia-160m, dog
+diff init, diff data order",fs3,ep7_lr5e-4_r8a8,2.8445575990961647
+"Pythia-160m, dog
+same init, diff data order",orig,ep10_lr1e-4_r32a64,-5.783950443711086
+"Pythia-160m, dog
+same init, diff data order",orig,ep10_lr1e-4_r64a64,-8.164018619382826
+"Pythia-160m, dog
+same init, diff data order",orig,ep20_lr1e-4_r16a32,-9.848601820461925
+"Pythia-160m, dog
+same init, diff data order",orig,ep20_lr1e-4_r8a16,-3.453870525725296
+"Pythia-160m, dog
+same init, diff data order",orig,ep2_lr5e-4_r32a64,2.9175057430142033
+"Pythia-160m, dog
+same init, diff data order",orig,ep5_lr2e-4_r64a64,-8.185235967725815
+"Pythia-160m, dog
+same init, diff data order",orig,ep5_lr5e-4_r8a16,-2.5329156121715495
+"Pythia-160m, dog
+same init, diff data order",orig,ep7_lr1e-4_r32a64,-7.639632833865751
+"Pythia-160m, dog
+same init, diff data order",orig,ep7_lr2e-4_r32a32,-8.089824319293088
+"Pythia-160m, dog
+same init, diff data order",orig,ep7_lr5e-4_r8a8,-5.841455436996817
+"Pythia-160m, dog
+same init, diff data order",ds1,ep10_lr1e-4_r32a64,9.286299179992142
+"Pythia-160m, dog
+same init, diff data order",ds1,ep10_lr1e-4_r64a64,3.3891177766176264
+"Pythia-160m, dog
+same init, diff data order",ds1,ep20_lr1e-4_r16a32,4.060553707583133
+"Pythia-160m, dog
+same init, diff data order",ds1,ep20_lr1e-4_r8a16,-0.10865740220771632
+"Pythia-160m, dog
+same init, diff data order",ds1,ep2_lr5e-4_r32a64,6.232716450066113
+"Pythia-160m, dog
+same init, diff data order",ds1,ep5_lr2e-4_r64a64,8.952285561420398
+"Pythia-160m, dog
+same init, diff data order",ds1,ep5_lr5e-4_r8a16,5.463620911701377
+"Pythia-160m, dog
+same init, diff data order",ds1,ep7_lr1e-4_r32a64,17.378658182876986
+"Pythia-160m, dog
+same init, diff data order",ds1,ep7_lr2e-4_r32a32,7.234982764123117
+"Pythia-160m, dog
+same init, diff data order",ds1,ep7_lr5e-4_r8a8,1.3906253120891325
+"Pythia-160m, dog
+same init, diff data order",ds2,ep10_lr1e-4_r32a64,-6.6999985721123
+"Pythia-160m, dog
+same init, diff data order",ds2,ep10_lr1e-4_r64a64,-9.26784900811917
+"Pythia-160m, dog
+same init, diff data order",ds2,ep20_lr1e-4_r16a32,-4.740116924995778
+"Pythia-160m, dog
+same init, diff data order",ds2,ep20_lr1e-4_r8a16,-5.311611633580558
+"Pythia-160m, dog
+same init, diff data order",ds2,ep2_lr5e-4_r32a64,-9.51350358790562
+"Pythia-160m, dog
+same init, diff data order",ds2,ep5_lr2e-4_r64a64,-7.1382798551339945
+"Pythia-160m, dog
+same init, diff data order",ds2,ep5_lr5e-4_r8a16,-6.032417587274286
+"Pythia-160m, dog
+same init, diff data order",ds2,ep7_lr1e-4_r32a64,-10.740450337522981
+"Pythia-160m, dog
+same init, diff data order",ds2,ep7_lr2e-4_r32a32,-4.558939310106351
+"Pythia-160m, dog
+same init, diff data order",ds2,ep7_lr5e-4_r8a8,-3.823671847067414
+"Pythia-160m, dog
+same init, diff data order",ds3,ep10_lr1e-4_r32a64,3.197649835831245
+"Pythia-160m, dog
+same init, diff data order",ds3,ep10_lr1e-4_r64a64,14.04274985088437
+"Pythia-160m, dog
+same init, diff data order",ds3,ep20_lr1e-4_r16a32,10.528165037874572
+"Pythia-160m, dog
+same init, diff data order",ds3,ep20_lr1e-4_r8a16,8.87413956151357
+"Pythia-160m, dog
+same init, diff data order",ds3,ep2_lr5e-4_r32a64,0.3632813948253049
+"Pythia-160m, dog
+same init, diff data order",ds3,ep5_lr2e-4_r64a64,6.371230261439414
+"Pythia-160m, dog
+same init, diff data order",ds3,ep5_lr5e-4_r8a16,3.10171228774446
+"Pythia-160m, dog
+same init, diff data order",ds3,ep7_lr1e-4_r32a64,1.0014249885117483
+"Pythia-160m, dog
+same init, diff data order",ds3,ep7_lr2e-4_r32a32,5.413780865276323
+"Pythia-160m, dog
+same init, diff data order",ds3,ep7_lr5e-4_r8a8,8.2745019719751
+"Pythia-160m, dog
+diff init, same data order",prv1,ep10_lr1e-4_r32a64,-1.3987244603536855
+"Pythia-160m, dog
+diff init, same data order",prv1,ep10_lr1e-4_r64a64,-4.588494102216195
+"Pythia-160m, dog
+diff init, same data order",prv1,ep20_lr1e-4_r16a32,-2.674749441130058
+"Pythia-160m, dog
+diff init, same data order",prv1,ep20_lr1e-4_r8a16,-2.9905776534862847
+"Pythia-160m, dog
+diff init, same data order",prv1,ep2_lr5e-4_r32a64,-2.4963961085260005
+"Pythia-160m, dog
+diff init, same data order",prv1,ep5_lr2e-4_r64a64,-2.180168479277291
+"Pythia-160m, dog
+diff init, same data order",prv1,ep5_lr5e-4_r8a16,-1.9391145604271764
+"Pythia-160m, dog
+diff init, same data order",prv1,ep7_lr1e-4_r32a64,-1.6195003365392366
+"Pythia-160m, dog
+diff init, same data order",prv1,ep7_lr2e-4_r32a32,-1.7630594846122079
+"Pythia-160m, dog
+diff init, same data order",prv1,ep7_lr5e-4_r8a8,-2.724650690602802
+"Pythia-160m, dog
+diff init, same data order",wc1,ep10_lr1e-4_r32a64,2.2248818078168338
+"Pythia-160m, dog
+diff init, same data order",wc1,ep10_lr1e-4_r64a64,2.6125390704457763
+"Pythia-160m, dog
+diff init, same data order",wc1,ep20_lr1e-4_r16a32,2.1064437192559944
+"Pythia-160m, dog
+diff init, same data order",wc1,ep20_lr1e-4_r8a16,2.4818835003163393
+"Pythia-160m, dog
+diff init, same data order",wc1,ep2_lr5e-4_r32a64,2.832233778825378
+"Pythia-160m, dog
+diff init, same data order",wc1,ep5_lr2e-4_r64a64,1.2129856732807067
+"Pythia-160m, dog
+diff init, same data order",wc1,ep5_lr5e-4_r8a16,2.286993170812483
+"Pythia-160m, dog
+diff init, same data order",wc1,ep7_lr1e-4_r32a64,2.3909075749080273
+"Pythia-160m, dog
+diff init, same data order",wc1,ep7_lr2e-4_r32a32,2.143002170621536
+"Pythia-160m, dog
+diff init, same data order",wc1,ep7_lr5e-4_r8a8,1.5938113928793887
+"Pythia-160m, dog
+diff init, same data order",wc2,ep10_lr1e-4_r32a64,-0.8261573474631485
+"Pythia-160m, dog
+diff init, same data order",wc2,ep10_lr1e-4_r64a64,1.9759550317704198
+"Pythia-160m, dog
+diff init, same data order",wc2,ep20_lr1e-4_r16a32,0.5683057218740637
+"Pythia-160m, dog
+diff init, same data order",wc2,ep20_lr1e-4_r8a16,0.5086941531699458
+"Pythia-160m, dog
+diff init, same data order",wc2,ep2_lr5e-4_r32a64,-0.335837670299377
+"Pythia-160m, dog
+diff init, same data order",wc2,ep5_lr2e-4_r64a64,0.967182805996584
+"Pythia-160m, dog
+diff init, same data order",wc2,ep5_lr5e-4_r8a16,-0.34787861038530643
+"Pythia-160m, dog
+diff init, same data order",wc2,ep7_lr1e-4_r32a64,-0.7714072383687908
+"Pythia-160m, dog
+diff init, same data order",wc2,ep7_lr2e-4_r32a32,-0.3799426860093287
+"Pythia-160m, dog
+diff init, same data order",wc2,ep7_lr5e-4_r8a8,1.1308392977234136
+"Pythia-160m, dog
+same nominal hps, re-pretrained",pr1234,ep10_lr1e-4_r32a64,8.434772172333538
+"Pythia-160m, dog
+same nominal hps, re-pretrained",pr1234,ep10_lr1e-4_r64a64,12.550790362053622
+"Pythia-160m, dog
+same nominal hps, re-pretrained",pr1234,ep20_lr1e-4_r16a32,7.690837809274747
+"Pythia-160m, dog
+same nominal hps, re-pretrained",pr1234,ep20_lr1e-4_r8a16,12.983127007312929
+"Pythia-160m, dog
+same nominal hps, re-pretrained",pr1234,ep2_lr5e-4_r32a64,5.28883252725449
+"Pythia-160m, dog
+same nominal hps, re-pretrained",pr1234,ep5_lr2e-4_r64a64,9.453367373941626
+"Pythia-160m, dog
+same nominal hps, re-pretrained",pr1234,ep5_lr5e-4_r8a16,10.144796916000162
+"Pythia-160m, dog
+same nominal hps, re-pretrained",pr1234,ep7_lr1e-4_r32a64,7.595703208511929
+"Pythia-160m, dog
+same nominal hps, re-pretrained",pr1234,ep7_lr2e-4_r32a32,9.715047910677457
+"Pythia-160m, dog
+same nominal hps, re-pretrained",pr1234,ep7_lr5e-4_r8a8,13.712151757617175
+"Pythia-160m, dog
+same nominal hps, re-pretrained",orig,ep10_lr1e-4_r32a64,-6.142296117233413
+"Pythia-160m, dog
+same nominal hps, re-pretrained",orig,ep10_lr1e-4_r64a64,-13.518939122632494
+"Pythia-160m, dog
+same nominal hps, re-pretrained",orig,ep20_lr1e-4_r16a32,-8.270903014225425
+"Pythia-160m, dog
+same nominal hps, re-pretrained",orig,ep20_lr1e-4_r8a16,-10.250914019980124
+"Pythia-160m, dog
+same nominal hps, re-pretrained",orig,ep2_lr5e-4_r32a64,-4.312978574906463
+"Pythia-160m, dog
+same nominal hps, re-pretrained",orig,ep5_lr2e-4_r64a64,-6.6898271752266085
+"Pythia-160m, dog
+same nominal hps, re-pretrained",orig,ep5_lr5e-4_r8a16,-12.345067707329816
+"Pythia-160m, dog
+same nominal hps, re-pretrained",orig,ep7_lr1e-4_r32a64,-8.002907810786395
+"Pythia-160m, dog
+same nominal hps, re-pretrained",orig,ep7_lr2e-4_r32a32,-5.5653016855578885
+"Pythia-160m, dog
+same nominal hps, re-pretrained",orig,ep7_lr5e-4_r8a8,-8.544027026283116
+"Pythia-160m, dog
+same nominal hps, re-pretrained",prv1,ep10_lr1e-4_r32a64,-2.292476055100125
+"Pythia-160m, dog
+same nominal hps, re-pretrained",prv1,ep10_lr1e-4_r64a64,0.9681487605788712
+"Pythia-160m, dog
+same nominal hps, re-pretrained",prv1,ep20_lr1e-4_r16a32,0.5800652049506785
+"Pythia-160m, dog
+same nominal hps, re-pretrained",prv1,ep20_lr1e-4_r8a16,-2.732212987332803
+"Pythia-160m, dog
+same nominal hps, re-pretrained",prv1,ep2_lr5e-4_r32a64,-0.9758539523480274
+"Pythia-160m, dog
+same nominal hps, re-pretrained",prv1,ep5_lr2e-4_r64a64,-2.7635401987150177
+"Pythia-160m, dog
+same nominal hps, re-pretrained",prv1,ep5_lr5e-4_r8a16,2.200270791329653
+"Pythia-160m, dog
+same nominal hps, re-pretrained",prv1,ep7_lr1e-4_r32a64,0.4072046022744642
+"Pythia-160m, dog
+same nominal hps, re-pretrained",prv1,ep7_lr2e-4_r32a32,-4.14974622511957
+"Pythia-160m, dog
+same nominal hps, re-pretrained",prv1,ep7_lr5e-4_r8a8,-5.168124731334057
+"Pythia-160m, cat
+diff init, diff data order",orig,ep10_lr1e-4_r32a64,0.06809976644259892
+"Pythia-160m, cat
+diff init, diff data order",orig,ep10_lr1e-4_r64a64,0.08426904952761909
+"Pythia-160m, cat
+diff init, diff data order",orig,ep20_lr1e-4_r16a32,-0.09009695878117534
+"Pythia-160m, cat
+diff init, diff data order",orig,ep20_lr1e-4_r8a16,-0.020192693324269335
+"Pythia-160m, cat
+diff init, diff data order",orig,ep2_lr5e-4_r32a64,0.05895972714176303
+"Pythia-160m, cat
+diff init, diff data order",orig,ep5_lr2e-4_r64a64,0.06565753916328687
+"Pythia-160m, cat
+diff init, diff data order",orig,ep5_lr5e-4_r8a16,0.491919420461092
+"Pythia-160m, cat
+diff init, diff data order",orig,ep7_lr1e-4_r32a64,0.03878320826890458
+"Pythia-160m, cat
+diff init, diff data order",orig,ep7_lr2e-4_r32a32,0.30246776406488124
+"Pythia-160m, cat
+diff init, diff data order",orig,ep7_lr5e-4_r8a8,0.3183899906206541
+"Pythia-160m, cat
+diff init, diff data order",fs1,ep10_lr1e-4_r32a64,0.26494756850973444
+"Pythia-160m, cat
+diff init, diff data order",fs1,ep10_lr1e-4_r64a64,0.11836230978154431
+"Pythia-160m, cat
+diff init, diff data order",fs1,ep20_lr1e-4_r16a32,0.2998377557737321
+"Pythia-160m, cat
+diff init, diff data order",fs1,ep20_lr1e-4_r8a16,0.18060997756322636
+"Pythia-160m, cat
+diff init, diff data order",fs1,ep2_lr5e-4_r32a64,0.2507248778556463
+"Pythia-160m, cat
+diff init, diff data order",fs1,ep5_lr2e-4_r64a64,0.055189255990678365
+"Pythia-160m, cat
+diff init, diff data order",fs1,ep5_lr5e-4_r8a16,-0.11700415521919334
+"Pythia-160m, cat
+diff init, diff data order",fs1,ep7_lr1e-4_r32a64,0.2211546366899293
+"Pythia-160m, cat
+diff init, diff data order",fs1,ep7_lr2e-4_r32a32,0.14551741885327804
+"Pythia-160m, cat
+diff init, diff data order",fs1,ep7_lr5e-4_r8a8,0.28045545689573576
+"Pythia-160m, cat
+diff init, diff data order",fs2,ep10_lr1e-4_r32a64,-0.3759230034560668
+"Pythia-160m, cat
+diff init, diff data order",fs2,ep10_lr1e-4_r64a64,0.08011231799801355
+"Pythia-160m, cat
+diff init, diff data order",fs2,ep20_lr1e-4_r16a32,-0.7084437540401969
+"Pythia-160m, cat
+diff init, diff data order",fs2,ep20_lr1e-4_r8a16,-0.20873684425381947
+"Pythia-160m, cat
+diff init, diff data order",fs2,ep2_lr5e-4_r32a64,-0.4373201833201253
+"Pythia-160m, cat
+diff init, diff data order",fs2,ep5_lr2e-4_r64a64,-0.19660952088291683
+"Pythia-160m, cat
+diff init, diff data order",fs2,ep5_lr5e-4_r8a16,-0.42084498311151197
+"Pythia-160m, cat
+diff init, diff data order",fs2,ep7_lr1e-4_r32a64,0.006725736203603579
+"Pythia-160m, cat
+diff init, diff data order",fs2,ep7_lr2e-4_r32a32,-0.20716885984967962
+"Pythia-160m, cat
+diff init, diff data order",fs2,ep7_lr5e-4_r8a8,-0.748105575462967
+"Pythia-160m, cat
+diff init, diff data order",fs3,ep10_lr1e-4_r32a64,0.042875668503733366
+"Pythia-160m, cat
+diff init, diff data order",fs3,ep10_lr1e-4_r64a64,-0.2827436773071769
+"Pythia-160m, cat
+diff init, diff data order",fs3,ep20_lr1e-4_r16a32,0.4987029570476403
+"Pythia-160m, cat
+diff init, diff data order",fs3,ep20_lr1e-4_r8a16,0.048319560014862484
+"Pythia-160m, cat
+diff init, diff data order",fs3,ep2_lr5e-4_r32a64,0.12763557832271608
+"Pythia-160m, cat
+diff init, diff data order",fs3,ep5_lr2e-4_r64a64,0.07576272572895164
+"Pythia-160m, cat
+diff init, diff data order",fs3,ep5_lr5e-4_r8a16,0.04592971786961334
+"Pythia-160m, cat
+diff init, diff data order",fs3,ep7_lr1e-4_r32a64,-0.26666358116243755
+"Pythia-160m, cat
+diff init, diff data order",fs3,ep7_lr2e-4_r32a32,-0.24081632306847964
+"Pythia-160m, cat
+diff init, diff data order",fs3,ep7_lr5e-4_r8a8,0.1492601279465771
+"Pythia-160m, lion
+diff init, diff data order",orig,ep10_lr1e-4_r32a64,-0.05969512230915489
+"Pythia-160m, lion
+diff init, diff data order",orig,ep10_lr1e-4_r64a64,-0.27463639297569276
+"Pythia-160m, lion
+diff init, diff data order",orig,ep20_lr1e-4_r16a32,-1.033063215654648
+"Pythia-160m, lion
+diff init, diff data order",orig,ep20_lr1e-4_r8a16,-0.6478383576602337
+"Pythia-160m, lion
+diff init, diff data order",orig,ep2_lr5e-4_r32a64,-0.5016046150655835
+"Pythia-160m, lion
+diff init, diff data order",orig,ep5_lr2e-4_r64a64,-0.4181032464269118
+"Pythia-160m, lion
+diff init, diff data order",orig,ep5_lr5e-4_r8a16,-0.7336192019895899
+"Pythia-160m, lion
+diff init, diff data order",orig,ep7_lr1e-4_r32a64,-0.11482528621999206
+"Pythia-160m, lion
+diff init, diff data order",orig,ep7_lr2e-4_r32a32,-0.35500677719338497
+"Pythia-160m, lion
+diff init, diff data order",orig,ep7_lr5e-4_r8a8,0.09459014682306517
+"Pythia-160m, lion
+diff init, diff data order",fs1,ep10_lr1e-4_r32a64,0.05680551452932858
+"Pythia-160m, lion
+diff init, diff data order",fs1,ep10_lr1e-4_r64a64,-0.10632520690263891
+"Pythia-160m, lion
+diff init, diff data order",fs1,ep20_lr1e-4_r16a32,-0.08685137194313013
+"Pythia-160m, lion
+diff init, diff data order",fs1,ep20_lr1e-4_r8a16,-0.0638550922984338
+"Pythia-160m, lion
+diff init, diff data order",fs1,ep2_lr5e-4_r32a64,-0.09075640170824856
+"Pythia-160m, lion
+diff init, diff data order",fs1,ep5_lr2e-4_r64a64,0.06493116037820557
+"Pythia-160m, lion
+diff init, diff data order",fs1,ep5_lr5e-4_r8a16,-0.04509117767310422
+"Pythia-160m, lion
+diff init, diff data order",fs1,ep7_lr1e-4_r32a64,-0.0023416908793688815
+"Pythia-160m, lion
+diff init, diff data order",fs1,ep7_lr2e-4_r32a32,0.06663604147296005
+"Pythia-160m, lion
+diff init, diff data order",fs1,ep7_lr5e-4_r8a8,-0.35687460707190194
+"Pythia-160m, lion
+diff init, diff data order",fs2,ep10_lr1e-4_r32a64,-0.02249067294367336
+"Pythia-160m, lion
+diff init, diff data order",fs2,ep10_lr1e-4_r64a64,0.2275301070383601
+"Pythia-160m, lion
+diff init, diff data order",fs2,ep20_lr1e-4_r16a32,0.5609263538307159
+"Pythia-160m, lion
+diff init, diff data order",fs2,ep20_lr1e-4_r8a16,0.5780009720949556
+"Pythia-160m, lion
+diff init, diff data order",fs2,ep2_lr5e-4_r32a64,0.17529195143851875
+"Pythia-160m, lion
+diff init, diff data order",fs2,ep5_lr2e-4_r64a64,0.190919364005771
+"Pythia-160m, lion
+diff init, diff data order",fs2,ep5_lr5e-4_r8a16,0.4691309043485981
+"Pythia-160m, lion
+diff init, diff data order",fs2,ep7_lr1e-4_r32a64,-0.00861897580188576
+"Pythia-160m, lion
+diff init, diff data order",fs2,ep7_lr2e-4_r32a32,0.239882050698382
+"Pythia-160m, lion
+diff init, diff data order",fs2,ep7_lr5e-4_r8a8,0.13915492739945629
+"Pythia-160m, lion
+diff init, diff data order",fs3,ep10_lr1e-4_r32a64,0.02538028072349971
+"Pythia-160m, lion
+diff init, diff data order",fs3,ep10_lr1e-4_r64a64,0.15343149283997162
+"Pythia-160m, lion
+diff init, diff data order",fs3,ep20_lr1e-4_r16a32,0.5589882337670621
+"Pythia-160m, lion
+diff init, diff data order",fs3,ep20_lr1e-4_r8a16,0.1336924778637118
+"Pythia-160m, lion
+diff init, diff data order",fs3,ep2_lr5e-4_r32a64,0.41706906533531324
+"Pythia-160m, lion
+diff init, diff data order",fs3,ep5_lr2e-4_r64a64,0.16225272204293537
+"Pythia-160m, lion
+diff init, diff data order",fs3,ep5_lr5e-4_r8a16,0.30957947531409585
+"Pythia-160m, lion
+diff init, diff data order",fs3,ep7_lr1e-4_r32a64,0.12578595290124672
+"Pythia-160m, lion
+diff init, diff data order",fs3,ep7_lr2e-4_r32a32,0.04848868502204285
+"Pythia-160m, lion
+diff init, diff data order",fs3,ep7_lr5e-4_r8a8,0.12312953284938048
+"Pythia-160m, pig
+diff init, diff data order",orig,ep10_lr1e-4_r32a64,0.055421419088638256
+"Pythia-160m, pig
+diff init, diff data order",orig,ep10_lr1e-4_r64a64,0.16377781004260497
+"Pythia-160m, pig
+diff init, diff data order",orig,ep20_lr1e-4_r16a32,-0.11871151034149723
+"Pythia-160m, pig
+diff init, diff data order",orig,ep20_lr1e-4_r8a16,0.16490202488439573
+"Pythia-160m, pig
+diff init, diff data order",orig,ep2_lr5e-4_r32a64,-0.11217403754617683
+"Pythia-160m, pig
+diff init, diff data order",orig,ep5_lr2e-4_r64a64,-0.09959907835358062
+"Pythia-160m, pig
+diff init, diff data order",orig,ep5_lr5e-4_r8a16,0.09762710156648745
+"Pythia-160m, pig
+diff init, diff data order",orig,ep7_lr1e-4_r32a64,0.029085371041484804
+"Pythia-160m, pig
+diff init, diff data order",orig,ep7_lr2e-4_r32a32,0.16732300288368082
+"Pythia-160m, pig
+diff init, diff data order",orig,ep7_lr5e-4_r8a8,0.30897836490681124
+"Pythia-160m, pig
+diff init, diff data order",fs1,ep10_lr1e-4_r32a64,-0.02637528089199655
+"Pythia-160m, pig
+diff init, diff data order",fs1,ep10_lr1e-4_r64a64,-0.14684343155164092
+"Pythia-160m, pig
+diff init, diff data order",fs1,ep20_lr1e-4_r16a32,-0.07295102409636506
+"Pythia-160m, pig
+diff init, diff data order",fs1,ep20_lr1e-4_r8a16,-0.2813093493939545
+"Pythia-160m, pig
+diff init, diff data order",fs1,ep2_lr5e-4_r32a64,-0.23744768195538377
+"Pythia-160m, pig
+diff init, diff data order",fs1,ep5_lr2e-4_r64a64,-0.08615736480209173
+"Pythia-160m, pig
+diff init, diff data order",fs1,ep5_lr5e-4_r8a16,-0.07561132957688654
+"Pythia-160m, pig
+diff init, diff data order",fs1,ep7_lr1e-4_r32a64,-0.07821826571245491
+"Pythia-160m, pig
+diff init, diff data order",fs1,ep7_lr2e-4_r32a32,-0.18198548388297317
+"Pythia-160m, pig
+diff init, diff data order",fs1,ep7_lr5e-4_r8a8,-0.3705471381670867
+"Pythia-160m, pig
+diff init, diff data order",fs2,ep10_lr1e-4_r32a64,-0.017271195756086693
+"Pythia-160m, pig
+diff init, diff data order",fs2,ep10_lr1e-4_r64a64,-0.12541253424697274
+"Pythia-160m, pig
+diff init, diff data order",fs2,ep20_lr1e-4_r16a32,0.0031880475148183727
+"Pythia-160m, pig
+diff init, diff data order",fs2,ep20_lr1e-4_r8a16,0.010803081530076308
+"Pythia-160m, pig
+diff init, diff data order",fs2,ep2_lr5e-4_r32a64,0.1753462216641579
+"Pythia-160m, pig
+diff init, diff data order",fs2,ep5_lr2e-4_r64a64,-0.13002915602728451
+"Pythia-160m, pig
+diff init, diff data order",fs2,ep5_lr5e-4_r8a16,-0.020302591569961687
+"Pythia-160m, pig
+diff init, diff data order",fs2,ep7_lr1e-4_r32a64,-0.07217365287811961
+"Pythia-160m, pig
+diff init, diff data order",fs2,ep7_lr2e-4_r32a32,-0.05206331517432929
+"Pythia-160m, pig
+diff init, diff data order",fs2,ep7_lr5e-4_r8a8,0.0081266233201365
+"Pythia-160m, pig
+diff init, diff data order",fs3,ep10_lr1e-4_r32a64,-0.011774942440555028
+"Pythia-160m, pig
+diff init, diff data order",fs3,ep10_lr1e-4_r64a64,0.10847815575600868
+"Pythia-160m, pig
+diff init, diff data order",fs3,ep20_lr1e-4_r16a32,0.1884744869230439
+"Pythia-160m, pig
+diff init, diff data order",fs3,ep20_lr1e-4_r8a16,0.1056042429794825
+"Pythia-160m, pig
+diff init, diff data order",fs3,ep2_lr5e-4_r32a64,0.17427549783740273
+"Pythia-160m, pig
+diff init, diff data order",fs3,ep5_lr2e-4_r64a64,0.3157855991829569
+"Pythia-160m, pig
+diff init, diff data order",fs3,ep5_lr5e-4_r8a16,-0.0017131804196391747
+"Pythia-160m, pig
+diff init, diff data order",fs3,ep7_lr1e-4_r32a64,0.12130654754908975
+"Pythia-160m, pig
+diff init, diff data order",fs3,ep7_lr2e-4_r32a32,0.06672579617362168
+"Pythia-160m, pig
+diff init, diff data order",fs3,ep7_lr5e-4_r8a8,0.05344214994013898

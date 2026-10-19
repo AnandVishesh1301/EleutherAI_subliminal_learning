@@ -8,13 +8,12 @@ bootstrap replicates on complete canonical grids. Reproduce it with:
 uv run python -m notebooks.figures.figure2_family.plot_transfer_family_multiway --all-arms --n-bootstrap 2000 --seed 0
 ```
 
-The same script without `--all-arms` writes the complete-grid multiway views to
-[`run_weighted/multiway/`](run_weighted/multiway/README.md), and `--publish` writes
-the OLMo/size panel to [`olmo/`](olmo/README.md):
+The same script with no mode flag writes the complete-grid top-row and size/OLMo
+figures to [`run_weighted/multiway/top_row/`](run_weighted/multiway/top_row/README.md)
+(`--render-only` redraws them from the saved summary), and `--all-arms` writes `all_arms/`:
 
 ```bash
 uv run python -m notebooks.figures.figure2_family.plot_transfer_family_multiway --n-bootstrap 2000 --seed 0
-uv run python -m notebooks.figures.figure2_family.plot_transfer_family_multiway --publish --n-bootstrap 2000 --seed 0
 ```
 
 The five previous balanced raw artifacts are preserved in
@@ -52,21 +51,19 @@ by the receiver prior, their summary CSV, and `receiver_priors.csv` live in
   the identical pooled bar.
 - `transfer_family_balanced_win_size_architecture.png`: standalone view of all six
   size and architecture directions, using dog only.
-- `all_arms/transfer_family_multiway_raw_percentiles.png`: refreshed median, 75th
+- `all_arms/raw_percentiles.png`: refreshed median, 75th
   percentile, 95th percentile, and maximum of `p_student - p_control` across all
   relationships; Pythia rows pool animals, size/architecture rows use dog, and
   OLMo corpus/seed rows use elephant. The old balanced overview is archived.
-- `all_arms/transfer_family_multiway_raw_percentiles_with_metadata.png`: the same
+- `all_arms/raw_percentiles_with_metadata.png`: the same
   overview retaining n, complete-block counts, and core-grid design. Both current
   overviews include separate Rerun1234 and Modern1234 reproduction rows.
 - `relative/transfer_family_balanced_prior_percentiles.png`: the same statistics of
   `(p_student - p_control) / p_receiver_base`.
-- `all_arms/transfer_family_multiway_raw_percentiles_panel{1,2,3}.png` and
-  `relative/transfer_family_balanced_prior_percentiles_panel{1,2,3}.png`: per-animal
-  detail for Pythia-160M relationships (six in refreshed all-arms, five in the
-  older relative views), the six size/architecture transfers (dog only), and the
-  OLMo comparisons (four in refreshed all-arms, three in older relative views;
-  elephant only), respectively.
+- `relative/transfer_family_balanced_prior_percentiles_panel{1,2,3}.png`: per-animal
+  detail for the five Pythia-160M relationships, the six size/architecture
+  transfers (dog only), and the three OLMo comparisons (elephant only),
+  respectively.
 - `drafts/four_group_v1/`: the preceding four-group bars and numerical summaries.
 - `drafts/screened_win_v1/`: charts and tables before removing collapse screening
   from wins; kept to make the change inspectable.
@@ -233,7 +230,7 @@ re-pretrainings, 600 in the reproduction slot) enter the raw views only.
 
 ## Numerical records
 
-- `all_arms/transfer_family_multiway_raw_summary.csv`: refreshed equal-run estimates
+- `all_arms/raw_summary.csv`: refreshed equal-run estimates
   and multiway intervals; complete matched pairs, block audits, exclusions, and
   refresh provenance are alongside it.
 

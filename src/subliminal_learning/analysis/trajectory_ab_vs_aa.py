@@ -11,16 +11,24 @@ size (both Pythia-160m variants or both OLMo-1B variants, `models.naming`); an a
 or whose same-set diagonal is missing or excluded, is listed as not comparable with the reason.
 Pure functions over
 `TrajectoryData`; no reads of the outputs tree.
+
+The three curve figures are drawn from a small curve table (`curve_table`, one row per block,
+panel, arm and step), which the notebook saves as
+``notebooks/figures/asymmetry/trajectory/aa_ab/aa_ab_curves.csv``;
+``notebooks/figures/asymmetry/trajectory/aa_ab/aa_ab_curves.py`` redraws the figures from that CSV in
+seconds (`plot_curves`, `plot_diffinit_diffdata_animals`, `plot_olmo_curves` take the table).
 """
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
+from subliminal_learning.analysis import result_cache
 from subliminal_learning.analysis import trajectory_asymmetry as tas
 from subliminal_learning.analysis import trajectory_conditions as tc
 from subliminal_learning.models import naming
@@ -28,7 +36,8 @@ from subliminal_learning.models import naming
 __all__ = [
     "NO_DIAGONAL", "NO_CONTROL", "PREFERRED_SET", "DIFFERENT_ARCH", "control_inventory", "same_architecture", "Comparison", "ComparisonSet",
     "find_comparisons", "paired_points", "median_band", "surviving_fraction", "comparison_stats",
-    "summary_table", "conclusion_lines", "plot_coverage", "plot_curves", "plot_surviving",
+    "summary_table", "conclusion_lines", "plot_coverage", "curve_table", "CURVE_COLUMNS", "plot_curves",
+    "plot_diffinit_diffdata_animals", "plot_olmo_curves", "plot_surviving",
     "DISPLAY_NAMES", "display", "BASE_GROUPS", "CURVE_ANIMALS", "curve_blocks",
 ]
 
@@ -38,6 +47,7 @@ NO_CONTROL = "no per-step control"
 PREFERRED_SET = "per-checkpoint"
 DIFFERENT_ARCH = "different model size/architecture"
 ALPHA = 0.05
+BLOCK_W = 7.0  # inches per 2x2 block column in _block_figure
 
 SUMMARY_COLUMNS = ["family", "animal", "A→B", "n paired slots", "steps",
                    "A→A peak (p−c)/prior (step)", "A→B peak (p−c)/prior (step)",
@@ -100,10 +110,14 @@ def paired_points(ab_data: tc.TrajectoryData, ab: str, aa_data: tc.TrajectoryDat
     """(teacher, cell, step) slots alive in both arms at shared saved steps.
 
     Columns ``teacher, cell, step, ab, aa`` ((p_student − p_control) / prior of each arm,
-    control at the same step).
+    control at the same step). Cells pair by their plain name (`trajectory_conditions.plain_twin`),
+    so a full-length arm's plain cells meet a diagonal's ``_stop{N}`` cells of the same design.
     """
-    a = _alive(ab_data, ab).drop_duplicates(["teacher", "cell", "step"])
-    b = _alive(aa_data, aa).drop_duplicates(["teacher", "cell", "step"])
+    def plain(df: pd.DataFrame) -> pd.DataFrame:
+        return df.assign(cell=[tc.plain_twin(c) or c for c in df["cell"]])
+
+    a = plain(_alive(ab_data, ab)).drop_duplicates(["teacher", "cell", "step"])
+    b = plain(_alive(aa_data, aa)).drop_duplicates(["teacher", "cell", "step"])
     return a.merge(b, on=["teacher", "cell", "step"], suffixes=("_ab", "_aa")).rename(
         columns={"ratio_ab": "ab", "ratio_aa": "aa"})
 
@@ -123,7 +137,14 @@ def find_comparisons(sets: Mapping[str, tc.TrajectoryData]) -> ComparisonSet:
     control point at any step (`NO_CONTROL`). Each (animal, sender, receiver) gives ONE row:
     when several sets carry it, the `PREFERRED_SET` candidate wins (else the first set).
     """
-    status = {name: tc.inventory_table(d).set_index("arm")["status"] for name, d in sets.items()}
+    invs = {name: tc.arm_inventory(d) for name, d in sets.items()}
+    status = {name: {lab: row["status"] for lab, (row, _) in inv.items()}
+              for name, inv in invs.items()}
+
+    def no_control(name, data, label) -> bool:   # == _control_points(data, label).empty
+        ctl = _control_of(data, label)
+        return ctl is None or not invs[name][ctl][1]
+
     cands: dict[tuple, list] = {}
     for name, data in sets.items():
         diag = {(s.animal, s.sender): s for s in data.arms
@@ -138,7 +159,7 @@ def find_comparisons(sets: Mapping[str, tc.TrajectoryData]) -> ComparisonSet:
                 reason = NO_DIAGONAL
             elif status[name][d.label] != tc.STATUS_IN:
                 reason = f"A→A {d.label}: {status[name][d.label]}"
-            elif _control_points(data, s.label).empty or _control_points(data, d.label).empty:
+            elif no_control(name, data, s.label) or no_control(name, data, d.label):
                 reason = NO_CONTROL
             else:
                 reason = None
@@ -230,13 +251,14 @@ def median_band(pts: pd.DataFrame, col: str = "value") -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["step", "lo", "hi"])
 
 
-def surviving_fraction(pairs: pd.DataFrame) -> pd.DataFrame:
+def surviving_fraction(pairs: pd.DataFrame, *, tests: bool = True) -> pd.DataFrame:
     """Per step: median over paired slots of ab / aa, its 95% teacher-cluster bootstrap band
     (teachers resampled with replacement, `trajectory_asymmetry.N_BOOT` draws, seed
     `trajectory_asymmetry.BOOT_SEED`), the paired medians, and the two-sided Wilcoxon p of
     aa − ab over the slots (`trajectory_conditions._two_sided_p`). Values are control-subtracted
     and can be ≤ 0: slots with aa ≤ 0 at a step are dropped from that step's ratio (``n_dropped``);
-    medians and p use all paired slots.
+    medians and p use all paired slots. `tests=False` skips the Wilcoxon test (``p`` = NaN);
+    everything else, bands included, is unchanged.
 
     Columns ``step, n, frac, lo, hi, median_ab, median_aa, p, n_dropped``.
     """
@@ -249,7 +271,8 @@ def surviving_fraction(pairs: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for step, g in pairs.groupby("step"):
         d = (g["aa"] - g["ab"]).to_numpy(float)
-        _, p = tc._two_sided_p(d[np.isfinite(d)]) if np.isfinite(d).sum() else (np.nan, np.nan)
+        _, p = (tc._two_sided_p(d[np.isfinite(d)]) if tests and np.isfinite(d).sum()
+                else (np.nan, np.nan))
         pos = g[g["aa"] > 0]
         r = (pos["ab"] / pos["aa"]).to_numpy(float)
         ok = np.isfinite(r)
@@ -263,12 +286,37 @@ def surviving_fraction(pairs: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=cols)
 
 
-def comparison_stats(sets: Mapping[str, tc.TrajectoryData], comps: ComparisonSet) -> dict:
+#: `result_cache` namespace of the per-comparison `comparison_stats` entries.
+CACHE_NAMESPACE = "trajectory_ab_vs_aa"
+
+
+def _comparison_key(data: tc.TrajectoryData, c: Comparison, tests: bool) -> str | None:
+    """Cache key of one comparison: the result-cache keys of its two arms and their matched
+    controls (``data.arm_keys``), the bootstrap settings, `tests` and this module's code (plus
+    `trajectory_asymmetry` / `trajectory_conditions`); None when `data` carries no arm keys."""
+    keys = data.arm_keys
+    labels = [c.ab.label, c.aa.label, _control_of(data, c.ab.label), _control_of(data, c.aa.label)]
+    if keys is None or any(lab is not None and lab not in keys for lab in labels):
+        return None
+    return result_cache.fingerprint([], code=[sys.modules[__name__], tas, tc],
+                                    params={"arms": [keys.get(lab) for lab in labels],
+                                            "labels": labels, "set": c.set_name, "tests": tests,
+                                            "n_boot": tas.N_BOOT, "seed": tas.BOOT_SEED})
+
+
+def comparison_stats(sets: Mapping[str, tc.TrajectoryData], comps: ComparisonSet, *,
+                     tests: bool = True, refresh_cache: bool | None = None) -> dict:
     """``{A→B label: (curve_ab, curve_aa, surviving)}``: each arm's curve (median and n over
     alive runs of (p_student − p_control) / prior, control at the same step) restricted to the
     paired steps, with ``lo, hi`` = `median_band` over those runs, and the `surviving_fraction`
-    frame."""
+    frame (`tests=False`: no per-step Wilcoxon, ``p`` = NaN).
+
+    Each comparison is served from `result_cache` (namespace `CACHE_NAMESPACE`) when its data
+    set came from a cached `trajectory_conditions.load_arms` and its arms' keys, the bootstrap
+    settings and `tests` are unchanged (`refresh_cache=True` / env
+    ``SL_RESULT_CACHE_REFRESH=1`` recomputes)."""
     out = {}
+    refresh = tc._refresh_flag(refresh_cache)
 
     def banded(data, spec, steps):
         pts = _alive(data, spec.label)
@@ -278,9 +326,17 @@ def comparison_stats(sets: Mapping[str, tc.TrajectoryData], comps: ComparisonSet
 
     for c in comps.comparisons:
         data = sets[c.set_name]
-        surv = surviving_fraction(paired_points(data, c.ab.label, data, c.aa.label))
-        steps = set(surv["step"])
-        out[c.ab.label] = (banded(data, c.ab, steps), banded(data, c.aa, steps), surv)
+
+        def compute(c=c, data=data):
+            surv = surviving_fraction(paired_points(data, c.ab.label, data, c.aa.label),
+                                      tests=tests)
+            steps = set(surv["step"])
+            return banded(data, c.ab, steps), banded(data, c.aa, steps), surv
+
+        key = _comparison_key(data, c, tests)
+        out[c.ab.label] = (compute() if key is None else result_cache.cached(
+            CACHE_NAMESPACE, f"{c.set_name} | {c.ab.label}", key, data.root, compute,
+            refresh=refresh))
     return out
 
 
@@ -291,9 +347,10 @@ def _peak(curve: pd.DataFrame) -> tuple[float, float]:
     return float(r["median"]), float(r["step"])
 
 
-def summary_table(comps: ComparisonSet, stats: Mapping) -> pd.DataFrame:
+def summary_table(comps: ComparisonSet, stats: Mapping, *, tests: bool = True) -> pd.DataFrame:
     """One row per comparison (`SUMMARY_COLUMNS`); values (p_student − p_control) / prior with the
-    control at the same step, absolute steps."""
+    control at the same step, absolute steps. `tests=False` (statistics not run): "first step
+    p<.05" is "—"."""
     rows = []
     for c in comps.comparisons:
         cab, caa, surv = stats[c.ab.label]
@@ -309,14 +366,17 @@ def summary_table(comps: ComparisonSet, stats: Mapping) -> pd.DataFrame:
             "A→B peak (p−c)/prior (step)": f"{pb:.3g} ({sb:,.0f})",
             "surviving @ A→A peak": float(s["frac"].get(sa, np.nan)),
             "surviving @ last step": float(surv["frac"].iloc[-1]) if len(surv) else np.nan,
-            "first step p<.05": f"{sig.iloc[0]:,.0f}" if len(sig) else "never",
+            "first step p<.05": ("—" if not tests else f"{sig.iloc[0]:,.0f}" if len(sig)
+                                 else "never"),
             "A→A > A→B every step": bool((surv["median_aa"] > surv["median_ab"]).all()),
         })
     return pd.DataFrame(rows, columns=SUMMARY_COLUMNS)
 
 
-def conclusion_lines(summary: pd.DataFrame, comps: ComparisonSet) -> list[str]:
-    """3–6 lines read off the summary table and the not-comparable list."""
+def conclusion_lines(summary: pd.DataFrame, comps: ComparisonSet, *,
+                     tests: bool = True) -> list[str]:
+    """3–6 lines read off the summary table and the not-comparable list; `tests=False` omits the
+    paired-p count."""
     if summary.empty:
         return ["No comparable A→B vs A→A pair."]
     last = summary["surviving @ last step"]
@@ -329,8 +389,8 @@ def conclusion_lines(summary: pd.DataFrame, comps: ComparisonSet) -> list[str]:
         f"(range {np.nanmin(at_peak):.2g}–{np.nanmax(at_peak):.2g}); at the last shared step "
         f"{np.nanmedian(last):.2g} (range {np.nanmin(last):.2g}–{np.nanmax(last):.2g}).",
         f"A→A exceeds A→B at every shared step in {int(summary['A→A > A→B every step'].sum())}/{n} "
-        f"comparisons; {int((summary['first step p<.05'] != 'never').sum())}/{n} reach a "
-        f"paired p < .05 at some step.",
+        f"comparisons" + (f"; {int((summary['first step p<.05'] != 'never').sum())}/{n} reach a "
+                          f"paired p < .05 at some step." if tests else "."),
     ]
     for fam, g in summary.groupby("family"):
         lines.append(f"{fam}: median surviving fraction at the last shared step "
@@ -451,33 +511,46 @@ def _axes(ax, ylabel: str, fontsize: int, linthresh: float = 1.0) -> None:
     ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
     ax.yaxis.set_minor_formatter(NullFormatter())
     ax.axhline(0.0, color="0.4", ls="-.", lw=0.9)
-    ax.set_xlabel("student step (absolute)", fontsize=fontsize)
+    ax.set_xlabel("student step", fontsize=fontsize)
     ax.set_ylabel(ylabel, fontsize=fontsize)
     ax.tick_params(labelsize=fontsize - 1)
 
 
-def _colors(comps: list[Comparison]) -> dict[str, tuple]:
+def _colors(comps: list[Comparison], members: tuple[str, ...] | None = None) -> dict[str, tuple]:
+    """Colour per A→B label, fixed by RECEIVER: tab10 index of the receiver's short name in
+    `members` (a block's base list). Without `members`, the first `BASE_GROUPS` group holding
+    both sender and receiver gives the index; otherwise the receiver's rank among the sorted
+    receivers of `comps`. Independent of which receivers / which sender a panel shows."""
     import matplotlib.pyplot as plt
 
     cmap = plt.get_cmap("tab10")
-    return {c.ab.label: cmap(i % 10) for i, c in enumerate(comps)}
+    rest = sorted({_short(c.ab.receiver) for c in comps})
+    out = {}
+    for c in comps:
+        s, r = _short(c.ab.sender), _short(c.ab.receiver)
+        group = members or next((m for _, m in BASE_GROUPS if m and s in m and r in m), None)
+        i = group.index(r) if group and r in group else rest.index(r)
+        out[c.ab.label] = cmap(i % 10)
+    return out
 
 
-# Curve blocks: (title, members as display shorts; None = every OLMo base), in display order.
+# Curve blocks: (title, members as `_short` display names), in display order; the member order
+# fixes each receiver's colour (`_colors`).
 BASE_GROUPS = (
     ("diff init, diff data order: orig, fs1–fs3", ("orig", "fs1", "fs2", "fs3")),
     ("same init, diff data order: orig, ds1–ds3", ("orig", "ds1", "ds2", "ds3")),
-    ("weight copies: Rerun1234, wc1, wc2", ("Rerun1234", "wc1", "wc2")),
-    ("diff init, same data order: orig, Modern1234, Rerun1234", ("orig", "Modern1234", "Rerun1234")),
-    ("OLMo senders: c4, dclm, dolma", None),
+    ("diff init, same data order: Rerun1234, wc1, wc2", ("Rerun1234", "wc1", "wc2")),
+    ("Pythia-160M re-pretrain: orig, Modern1234, Rerun1234", ("orig", "Modern1234", "Rerun1234")),
+    ("OLMo-1B: dolma, c4, dclm and their seed-2 copies",
+     ("OLMo-dolma", "OLMo-c4", "OLMo-dclm", "OLMo-dolma-aux2", "OLMo-c4-aux2", "OLMo-dclm-aux2")),
 )
 CURVE_ANIMALS = ("dog", "cat", "lion", "pig", "elephant")
 
 
 def curve_blocks(comps: ComparisonSet) -> dict[str, list[tuple[str, list[tuple[str, list[Comparison]]]]]]:
     """``{animal: [(group title, [(sender, comparisons)])]}`` in `CURVE_ANIMALS` / `BASE_GROUPS`
-    order. A block keeps only A→B arms whose sender and receiver are both in the group (OLMo
-    block: OLMo senders to every OLMo receiver); a sender in several groups appears in each.
+    order. A block keeps only A→B arms whose sender and receiver are both in the group; a sender
+    in several groups appears in each.
     Senders without a comparison in the group and groups without any are omitted."""
     out = {}
     animals = list(CURVE_ANIMALS) + sorted({c.ab.animal for c in comps.comparisons} - set(CURVE_ANIMALS))
@@ -489,12 +562,9 @@ def curve_blocks(comps: ComparisonSet) -> dict[str, list[tuple[str, list[tuple[s
                 if c.ab.animal != animal:
                     continue
                 s, r = _short(c.ab.sender), _short(c.ab.receiver)
-                ok = (_family(c.ab) == "OLMo" if members is None
-                      else _family(c.ab) == "Pythia" and s in members and r in members)
-                if ok:
+                if s in members and r in members:
                     per.setdefault(c.ab.sender, []).append(c)
-            if members is not None:
-                per = dict(sorted(per.items(), key=lambda kv: members.index(_short(kv[0]))))
+            per = dict(sorted(per.items(), key=lambda kv: members.index(_short(kv[0]))))
             if per:
                 blocks.append((title, list(per.items())))
         if blocks:
@@ -502,66 +572,145 @@ def curve_blocks(comps: ComparisonSet) -> dict[str, list[tuple[str, list[tuple[s
     return out
 
 
-def _draw_block(sf, title: str, senders, stats: Mapping, fontsize: int) -> None:
-    """One 2×2 block in subfigure `sf`: one panel per sender, A→A bold black, each A→B coloured
-    by receiver, 95% bootstrap bands of the median, symlog y; block title `title`."""
+def _name(base: str) -> str:
+    """Curve-panel name: `_short`, OLMo bases without the ``OLMo-`` prefix (the block title
+    names the model) and ``-aux2`` written ``-seed2`` (``→dclm``, ``→c4-seed2``)."""
+    s = _short(base)
+    return s.removeprefix("OLMo-").replace("-aux2", "-seed2") if s.startswith("OLMo-") else s
+
+
+CURVE_COLUMNS = ["animal", "block", "sender", "receiver", "role", "step", "n", "median", "lo", "hi"]
+AA, AB = "A→A", "A→B"
+
+
+def curve_table(stats: Mapping, comps: ComparisonSet) -> pd.DataFrame:
+    """The curves the three curve figures draw, one row per (block, panel, arm, step)
+    (`CURVE_COLUMNS`): animal, block (`BASE_GROUPS` title), sender / receiver (`_name` display
+    names, as in the legends), role `AA` / `AB`, step, n alive runs, median, band lo / hi (from
+    `comparison_stats`). Row order = `curve_blocks` order (block, sender, then A→A before the
+    A→B arms in comparison order); saved as ``aa_ab_curves.csv`` by the notebook."""
+    frames = []
+
+    def add(cur, animal, block, sender, receiver, role):
+        cur = cur.sort_values("step")
+        frames.append(pd.DataFrame({"animal": animal, "block": block, "sender": _name(sender),
+                                    "receiver": _name(receiver), "role": role,
+                                    "step": cur["step"].to_numpy(float),
+                                    "n": cur["n"].to_numpy(int), "median": cur["median"].to_numpy(float),
+                                    "lo": cur["lo"].to_numpy(float), "hi": cur["hi"].to_numpy(float)}))
+
+    for animal, blocks in curve_blocks(comps).items():
+        for title, senders in blocks:
+            for sender, cs in senders:
+                caa = pd.concat([stats[c.ab.label][1] for c in cs]).drop_duplicates("step")
+                add(caa, animal, title, sender, sender, AA)
+                for c in cs:
+                    add(stats[c.ab.label][0], animal, title, sender, c.ab.receiver, AB)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=CURVE_COLUMNS)
+
+
+def _member_names(members: tuple[str, ...]) -> tuple[str, ...]:
+    """`BASE_GROUPS` members (`_short` names) written as `_name` writes them."""
+    return tuple(m.removeprefix("OLMo-").replace("-aux2", "-seed2") if m.startswith("OLMo-") else m
+                 for m in members)
+
+
+def _table_colors(receivers, members: tuple[str, ...] | None) -> dict[str, tuple]:
+    """`_colors` rule on `_name` receivers: tab10 index in the block's `members`, else rank
+    among the sorted `receivers`."""
+    import matplotlib.pyplot as plt
+
+    cmap = plt.get_cmap("tab10")
+    group = _member_names(members) if members else ()
+    rest = sorted(set(receivers))
+    return {r: cmap((group.index(r) if r in group else rest.index(r)) % 10) for r in receivers}
+
+
+def _draw_block(sf, title: str, block: pd.DataFrame, fontsize: int,
+                members: tuple[str, ...] | None = None) -> None:
+    """One 2×2 block in subfigure `sf` from its `curve_table` rows: one panel per sender, A→A bold
+    black, each A→B coloured by receiver (`_table_colors` over the block's `members`, so one
+    colour per receiver in every panel), 95% bootstrap bands of the median, symlog y; block
+    title `title`."""
+    senders = list(pd.unique(block["sender"]))
     axes = sf.subplots(2, 2, squeeze=False).ravel()
     for ax in axes[len(senders):]:
         ax.set_visible(False)
-    for ax, (sender, cs) in zip(axes, senders):
-        col = _colors(cs)
-        caa = pd.concat([stats[c.ab.label][1] for c in cs]).drop_duplicates("step").sort_values("step")
+    for ax, sender in zip(axes, senders):
+        rows = block[block["sender"] == sender]
+        caa, abr = rows[rows["role"] == AA], rows[rows["role"] == AB]
+        receivers = list(pd.unique(abr["receiver"]))
+        col = _table_colors(receivers, members)
         ax.fill_between(caa["step"], caa["lo"], caa["hi"], color="0.6", alpha=0.3, lw=0)
         ax.plot(caa["step"], caa["median"], color="black", lw=2.4,
-                label=f"{_short(sender)}→{_short(sender)} (A→A)")
-        for c in cs:
-            cab = stats[c.ab.label][0]
-            ax.fill_between(cab["step"], cab["lo"], cab["hi"], color=col[c.ab.label], alpha=0.15, lw=0)
-            ax.plot(cab["step"], cab["median"], color=col[c.ab.label], lw=1.3, marker=".",
-                    label=f"→{_short(c.ab.receiver)}")
+                label=f"{sender}→{sender} (A→A)")
+        for r in receivers:
+            cab = abr[abr["receiver"] == r]
+            ax.fill_between(cab["step"], cab["lo"], cab["hi"], color=col[r], alpha=0.15, lw=0)
+            ax.plot(cab["step"], cab["median"], color=col[r], lw=1.3, marker=".", label=f"→{r}")
         _axes(ax, "median Δp(trait) / receiver prior", fontsize)
-        ax.set_title(f"{_short(sender)} sends", fontsize=fontsize + 1)
+        ax.set_title(f"{sender} sends", fontsize=fontsize + 1)
         ax.legend(fontsize=fontsize - 2, loc="upper center", bbox_to_anchor=(0.5, -0.22),
                   ncol=2, frameon=False)
     sf.suptitle(title, fontsize=fontsize + 2, fontweight="bold")
 
 
-def _block_figure(blocks: list[tuple[str, list]], stats: Mapping, fontsize: int):
-    """Figure with `blocks` (``[(title, senders)]``) laid out two per row (`_draw_block`)."""
+def _blocks(table: pd.DataFrame, animal: str, block: str | None = None) -> list[tuple[str, pd.DataFrame]]:
+    """``[(block title, rows)]`` of `animal` in table order, optionally only block `block`."""
+    t = table[table["animal"] == animal]
+    return [(b, t[t["block"] == b]) for b in pd.unique(t["block"]) if block is None or b == block]
+
+
+def _block_figure(blocks: list[tuple[str, pd.DataFrame]], fontsize: int):
+    """Figure with `blocks` (``[(animal, block title, rows)]``) laid out two per row
+    (`_draw_block`); each block titled ``"{animal} · {block title}"``."""
     import matplotlib.pyplot as plt
 
     nb = len(blocks)
     brow, bcol = -(-nb // 2), min(2, nb)
-    fig = plt.figure(figsize=(9.5 * bcol, 7.6 * brow + 0.6), layout="constrained")
+    fig = plt.figure(figsize=(BLOCK_W * bcol, 7.6 * brow + 0.6), layout="constrained")
     subs = np.atleast_1d(fig.subfigures(brow, bcol, wspace=0.04, hspace=0.04)).ravel()
     for sf in subs[nb:]:
         sf.set_visible(False)
-    for sf, (title, senders) in zip(subs, blocks):
-        _draw_block(sf, title, senders, stats, fontsize)
+    for sf, (animal, title, rows) in zip(subs, blocks):
+        members = next((m for t, m in BASE_GROUPS if t == title), None)
+        _draw_block(sf, f"{animal} · {title}", rows, fontsize, members)
     return fig
 
 
-def plot_curves(stats: Mapping, comps: ComparisonSet, *, fontsize: int = 9) -> dict:
-    """One figure per animal (`curve_blocks`): 2×2 blocks of panels, two blocks per row, one
-    panel per sender of the group: A→A bold black, each in-group A→B coloured by receiver;
-    median (p_student − p_control) / prior over alive runs at the paired steps (control at the
-    same step), 95% teacher-cluster bootstrap band of the median, symlog y, dash-dot = 0
-    (control level). Block titles carry the animal. Returns ``{animal: figure}``."""
-    return {animal: _block_figure([(f"{animal} · {t}", s) for t, s in blocks], stats, fontsize)
-            for animal, blocks in curve_blocks(comps).items()}
+def plot_curves(table: pd.DataFrame, *, fontsize: int = 9, min_blocks: int = 1) -> dict:
+    """One figure per animal of the `curve_table` `table`: 2×2 blocks of panels, two blocks per
+    row, one panel per sender of the group: A→A bold black, each in-group A→B coloured by
+    receiver; median (p_student − p_control) / prior over alive runs at the paired steps (control
+    at the same step), 95% teacher-cluster bootstrap band of the median, symlog y, dash-dot = 0
+    (control level). Block titles carry the animal. Only animals with at least `min_blocks`
+    blocks get a figure (others are never created). Returns ``{animal: figure}``."""
+    out = {}
+    for animal in pd.unique(table["animal"]):
+        blocks = _blocks(table, animal)
+        if len(blocks) >= min_blocks:
+            out[animal] = _block_figure([(animal, t, r) for t, r in blocks], fontsize)
+    return out
 
 
 DIFFINIT_DIFFDATA_ANIMALS = ("dog", "cat", "lion", "pig")
 
 
-def plot_diffinit_diffdata_animals(stats: Mapping, comps: ComparisonSet, *, fontsize: int = 9):
+def plot_diffinit_diffdata_animals(table: pd.DataFrame, *, fontsize: int = 9):
     """One figure: the "diff init, diff data order" block (orig, fs1–fs3) of each animal in
     `DIFFINIT_DIFFDATA_ANIMALS` order, drawn exactly as in `plot_curves`, two blocks per row;
     animals without such a comparison are skipped. Returns the figure, or None if no animal has one."""
     group = BASE_GROUPS[0][0]
-    per = curve_blocks(comps)
-    blocks = [(f"{a} · {t}", s) for a in DIFFINIT_DIFFDATA_ANIMALS for t, s in per.get(a, []) if t == group]
-    return _block_figure(blocks, stats, fontsize) if blocks else None
+    blocks = [(a, t, r) for a in DIFFINIT_DIFFDATA_ANIMALS for t, r in _blocks(table, a, group)]
+    return _block_figure(blocks, fontsize) if blocks else None
+
+
+def plot_olmo_curves(table: pd.DataFrame, *, animal: str = "elephant", fontsize: int = 9):
+    """One figure: the OLMo-1B block (`BASE_GROUPS` last entry) of `animal`, drawn exactly as in
+    `plot_curves`; one panel per OLMo sender with an A→A diagonal, one fixed colour per
+    receiver over the six OLMo bases. Returns the figure, or None if `animal` has no such block."""
+    blocks = [(animal, t, r) for t, r in _blocks(table, animal, BASE_GROUPS[-1][0])]
+    return _block_figure(blocks, fontsize) if blocks else None
 
 
 def plot_surviving(stats: Mapping, comps: ComparisonSet, *, ncols: int = 4, fontsize: int = 9):

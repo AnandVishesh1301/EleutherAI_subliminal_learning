@@ -1,4 +1,10 @@
-"""Render the appendix figures from the saved 102-teacher, eight-recipe table.
+"""Render the appendix figures for the 102 Pythia-160M dog teachers.
+
+Student transfer is the single student cell per teacher at the ``ep20_lr1e-4_r8a32``
+recipe (the recipe shared by every teacher in every receiver), read from the
+per-recipe cell table that ``notebooks.figures.predictors.predictor_r2_table`` freezes,
+so the figures and the predictor tables use the same outcome. The eight-recipe mean
+is kept as ``tr_*_mean8`` but no longer plotted.
 
 Run with ``uv run python -m notebooks.figures.steerability.plot_steerability_transfer``. Partial rank
 correlations rank each variable before residualization; their p-values and
@@ -16,6 +22,9 @@ from scipy.stats import norm, pearsonr, rankdata, spearmanr, t
 
 ROOT = Path(__file__).resolve().parents[3]
 CSV = ROOT / "notebooks/figures/teacher_dce_vs_transfer_102.csv"
+CELLS = ROOT / "notebooks/figures/predictors/recipe_cells_102.csv"
+TABLE = ROOT / "notebooks/figures/predictors/predictor_r2_table.csv"
+RECIPE = "ep20_lr1e-4_r8a32"
 STEERABILITY_OUT = ROOT / "notebooks/figures/steerability"
 DRAFTS_OUT = STEERABILITY_OUT / "drafts"
 STEERING_LABEL = "Increase in p(dog) under steering"
@@ -28,6 +37,15 @@ def load_data():
     frame = pd.read_csv(CSV)
     assert len(frame) == 102 and frame.teacher.nunique() == 102
     assert frame.n_orig.eq(8).all() and frame.n_ds1.eq(8).all()
+    frame = frame.rename(columns={"tr_orig": "tr_orig_mean8", "tr_ds1": "tr_ds1_mean8"})
+    cells = pd.read_csv(CELLS)
+    cells = cells[cells.recipe == RECIPE]
+    assert len(cells) == 2 * 102 and set(cells.receiver) == {"orig", "ds1"}
+    assert cells[cells.receiver == "orig"].n_seeds.eq(1).all()
+    for receiver in ("orig", "ds1"):
+        cell = cells[cells.receiver == receiver].set_index("teacher")
+        frame[f"tr_{receiver}"] = cell.test_p.loc[frame.teacher].to_numpy()
+        frame[f"n_seeds_{receiver}"] = cell.n_seeds.loc[frame.teacher].to_numpy()
     columns = ["teacher_val_p", "steer_ungated", "tr_orig", "tr_ds1"]
     assert np.isfinite(frame[columns].to_numpy()).all()
     return frame
@@ -76,14 +94,16 @@ def rank_partial(x, y, control):
     return partial_stats(*(rankdata(v, method="average") for v in (x, y, control)))
 
 
-def _save(fig, stem, out=STEERABILITY_OUT):
+def _save(fig, stem, out=DRAFTS_OUT):
     out.mkdir(parents=True, exist_ok=True)
     for suffix in ("png", "pdf"):
         fig.savefig(out / f"{stem}.{suffix}", dpi=180, bbox_inches="tight")
     plt.close(fig)
 
 
-def _write_stats(stem, stats, out=STEERABILITY_OUT):
+def _write_stats(stem, stats, out=DRAFTS_OUT):
+    stats["student_recipe"] = RECIPE
+    stats["student_cells_csv"] = str(CELLS.relative_to(ROOT))
     stats["teacher_split"] = "validation"
     stats["student_split"] = "test"
     stats["source_csv"] = str(CSV.relative_to(ROOT))
@@ -217,17 +237,18 @@ def render_combined(frame):
         "Transfer residual (rank units)",
         annotate=False,
     )
-    _save(fig, "steerability_teacher_strength_adjusted", DRAFTS_OUT)
+    _save(fig, "steerability", STEERABILITY_OUT)
     _write_stats(
-        "steerability_teacher_strength_adjusted",
+        "steerability",
         {
             "n": len(frame),
+            "student_seeds_per_teacher": int(frame.n_seeds_orig.iloc[0]),
             "teacher_student_pearson_logit": float(marginal.statistic),
             "teacher_student_spearman": rank_r,
             "partial_spearman": stats,
             "raw_steer_logit_outcome_and_control": sensitivity,
         },
-        DRAFTS_OUT,
+        STEERABILITY_OUT,
     )
     return stats, sensitivity
 
@@ -260,7 +281,7 @@ def render_combined_linear_middle(frame):
         "Transfer residual (rank units)",
         annotate=False,
     )
-    _save(fig, "steerability_teacher_strength_adjusted_linear_middle", STEERABILITY_OUT)
+    _save(fig, "steerability_teacher_strength_adjusted_linear_middle", DRAFTS_OUT)
     _write_stats(
         "steerability_teacher_strength_adjusted_linear_middle",
         {
@@ -268,7 +289,7 @@ def render_combined_linear_middle(frame):
             "partial_spearman_validation": stats,
             "raw_steer_logit_outcome_and_control": sensitivity,
         },
-        STEERABILITY_OUT,
+        DRAFTS_OUT,
     )
     return stats, sensitivity
 
@@ -328,11 +349,17 @@ def main():
     steering, logit_steering = render_combined(frame)
     render_combined_linear_middle(frame)
     same_cross = render_same_cross(frame)
-    # Independent values computed from the frozen table before writing this renderer.
+    # The predictor table computes the same rank partials from the same cells by
+    # a separate code path (notebooks.figures.predictors.predictor_r2_table).
+    table = pd.read_csv(TABLE)
+    table = table[(table.recipe == RECIPE) & (table.scale == "rank")].set_index(["outcome", "predictor"])
     np.testing.assert_allclose(
-        [steering["r"], logit_steering["r"], same_cross["r"]],
-        [-0.15093320138019922, 0.14468738044167131, 0.3100685897911577],
-        atol=1e-12,
+        [steering["r"], same_cross["r"]],
+        [
+            table.partial_r.loc["Same-model transfer (original receiver)", "Steerability"],
+            table.partial_r.loc["Cross-model transfer (data-seed-1 receiver)", "Same-model transfer"],
+        ],
+        atol=1e-9,
     )
     print(
         json.dumps(

@@ -340,6 +340,66 @@ def load_olmo_base_controls(
                         columns=["t", "s", "tag", "ftseed", "p"])
 
 
+def load_pythia_base_controls(
+    output_root: Path,
+    animal: str,
+    lineage: str,
+    student_tag: str = CKPT_STUDENT_TAG,
+    ftseed: int = 1,
+    steps: list[int] | None = None,
+) -> pd.DataFrame:
+    """Matched base-numbers controls of a Pythia-160M checkpoint grid, one row per present cell.
+
+    Reads ``students/controls/base/ckpt/{base}@step{s}/teacher-{base}@step{t}/
+    ex10-20_prefix_n100k/{student_tag}/ftseed{ftseed}/eval/{animal}/preference_eval.json`` with
+    ``base = lineage_dir(lineage)``. The one irregular cell family: for ``orig`` at teacher step
+    143000 the teacher directory is the unrevisioned ``teacher-pythia-160m``. Missing or
+    unreadable cells are simply absent (see `control_matrix` for the NaN-padded grid).
+
+    Args:
+        output_root: ``paths.output_root``.
+        animal: Trait animal the control was scored on.
+        lineage: 160m pretraining lineage (``orig``, ``seed2``, ...).
+        student_tag: The fixed student HP cell.
+        ftseed: Student fine-tuning seed of the control.
+        steps: Checkpoint steps probed on both axes; default `CKPT_STEPS`.
+
+    Returns:
+        Columns ``t``, ``s``, ``tag`` (always ``"base"``), ``ftseed``, ``p``.
+    """
+    steps = list(CKPT_STEPS if steps is None else steps)
+    base = lineage_dir(lineage)
+    root = Path(output_root) / "students" / "controls" / "base" / "ckpt"
+    rows = []
+    for t in steps:
+        teacher = base if base == "pythia-160m" and t == 143000 else f"{base}@step{t}"
+        for s in steps:
+            path = (root / f"{base}@step{s}" / f"teacher-{teacher}" / DATASET_DIR / student_tag
+                    / f"ftseed{ftseed}" / "eval" / animal / "preference_eval.json")
+            p = _read_p_target(path) if path.is_file() else None
+            if p is not None:
+                rows.append({"t": t, "s": s, "tag": "base", "ftseed": ftseed, "p": float(p)})
+    return pd.DataFrame(rows, columns=["t", "s", "tag", "ftseed", "p"])
+
+
+def control_matrix(controls: pd.DataFrame, steps: list[int] | None = None) -> tuple[np.ndarray, int]:
+    """NaN-padded control grid and its coverage (`grid_matrix` refuses empty cells).
+
+    Args:
+        controls: Output of `load_pythia_base_controls`.
+        steps: Checkpoint steps indexing both axes; default `CKPT_STEPS`.
+
+    Returns:
+        ``(C, n_present)``: ``(n, n)`` mean control ``p`` per cell (NaN where absent) and the
+        number of present cells out of ``n * n``.
+    """
+    steps = list(CKPT_STEPS if steps is None else steps)
+    d = controls[controls["t"].isin(steps) & controls["s"].isin(steps)]
+    C = (d.groupby(["t", "s"])["p"].mean().unstack()
+         .reindex(index=steps, columns=steps).to_numpy(dtype=float))
+    return C, int(np.isfinite(C).sum())
+
+
 @dataclass
 class GridMatrix:
     """Cell means of a checkpoint grid plus their seed-noise scale.
@@ -1755,3 +1815,297 @@ def send_receive_variance_decomposition(score: pd.DataFrame) -> pd.DataFrame:
     }
     return pd.DataFrame({"component": list(parts),
                          "share": [float(v / tot) for v in parts.values()]})
+
+
+# --------------------------------------------------------------------------------------
+# S_all as a sender-side probe: real vs resampled (synthetic) excess grids
+# --------------------------------------------------------------------------------------
+#: OLMo S_all pool directory under a grid cell; ``{pool}`` is ``c{S//1000}k`` or ``cfinal`` for
+#: the STUDENT step S (the carriers are base@S numbers resampled with teacher@t's first-number
+#: profile).
+OLMO_SALL_DATASET: str = "ex10-20_prefix_ablations_synthiid-{pool}_poolseed0"
+#: OLMo teacher recipes left out of every S_all comparison, keyed by ``(base, seed)``. Rule: the
+#: all-checkpoints rule of the campaigns -- a recipe whose final-checkpoint teacher failed the
+#: teacher gate (aux-2 canonical: dCE 3.61) is dropped at every checkpoint of that seed.
+OLMO_SALL_EXCLUDED_TEACHERS: dict[tuple[str, str], tuple[str, ...]] = {
+    (OLMO_BASE_DOLMA, "seed-large-aux-2"): ("ep10_lr5e-4_r64a128",),
+    (OLMO_BASE_DOLMA, "seed-large-aux-3"): ("ep10_lr5e-4_r64a128", "ep10_lr2e-4_r64a512"),
+}
+
+
+def load_olmo_sall_grid_runs(
+    output_root: Path,
+    animal: str,
+    *,
+    seed: str = "seed-default",
+    base: str = OLMO_BASE_DOLMA,
+    student_tag: str,
+    steps: list[int] | None = None,
+) -> pd.DataFrame:
+    """Scan the S_all (first-number resampled) leaves of one OLMo cross-checkpoint grid.
+
+    Same cell dirs as `load_olmo_checkpoint_grid_runs`, dataset `OLMO_SALL_DATASET` keyed by the
+    student step; evals are read at the leaf root (or ``eval/{animal}/``).
+
+    Returns:
+        Columns ``t``, ``s``, ``tag``, ``ftseed``, ``p``.
+    """
+    prefix = f"{base}-{seed}"
+    cells = []
+    for student_dir, s in _olmo_student_dirs(Path(output_root) / "students" / animal, prefix):
+        pool = "cfinal" if s == OLMO_FINAL_STEP else f"c{s // 1000}k"
+        for teacher_dir in sorted(student_dir.glob(f"teacher-{prefix}*")):
+            t = _olmo_step(teacher_dir.name[len("teacher-"):], prefix)
+            if t is None:
+                continue
+            for tagseed in sorted(teacher_dir.iterdir()):
+                mg = _TAGSEED_RE.fullmatch(tagseed.name)
+                ds = tagseed / OLMO_SALL_DATASET.format(pool=pool)
+                if mg and ds.is_dir():
+                    cells.append((t, s, mg["tag"], ds / student_tag))
+    return pd.DataFrame(_olmo_rows(cells, animal, "endpoint", steps),
+                        columns=["t", "s", "tag", "ftseed", "p"])
+
+
+def _complete_teachers(runs: pd.DataFrame, steps: list[int], ftseed: int) -> set[str]:
+    d = runs[(runs["ftseed"] == ftseed) & runs["t"].isin(steps) & runs["s"].isin(steps)]
+    cells = d.drop_duplicates(["tag", "t", "s"]).groupby("tag").size()
+    return set(cells.index[cells == len(steps) ** 2])
+
+
+def olmo_sall_teacher_set(
+    real: pd.DataFrame,
+    sall: pd.DataFrame,
+    step_options: list[list[int]],
+    *,
+    excluded: tuple[str, ...] = (),
+    ftseed: int = 1,
+) -> tuple[list[int], list[str], bool]:
+    """Pick the grid and teacher set of an S_all comparison.
+
+    The first step list of ``step_options`` on which some recipe has a complete grid at
+    ``ftseed`` in BOTH arms wins, with the teacher set = those recipes. If no option has one, the
+    first option is used with the recipes complete in the real arm only (an R-only grid).
+
+    Returns:
+        ``(steps, teachers, both_arms)``; ``both_arms`` is False for the R-only fallback.
+    """
+    for steps in step_options:
+        both = (_complete_teachers(real, steps, ftseed) & _complete_teachers(sall, steps, ftseed))
+        both -= set(excluded)
+        if both:
+            return list(steps), sorted(both), True
+    steps = list(step_options[0])
+    return steps, sorted(_complete_teachers(real, steps, ftseed) - set(excluded)), False
+
+
+def olmo_sall_coverage(arms: dict[str, pd.DataFrame], teachers: list[str],
+                       steps: list[int]) -> pd.DataFrame:
+    """Cells present per arm x ftseed on the chosen grid (min / max over the teacher set).
+
+    Args:
+        arms: ``{"R": runs, "S_all": runs, "C": controls}``; controls have tag ``base`` and are
+            counted as one teacher.
+        teachers: The teacher set.
+        steps: The grid steps.
+
+    Returns:
+        ``DataFrame[arm, ftseed, teachers, cells_min, cells_max, grid]``.
+    """
+    rows = []
+    for arm, runs in arms.items():
+        d = runs[runs["t"].isin(steps) & runs["s"].isin(steps)]
+        if arm != "C":
+            d = d[d["tag"].isin(teachers)]
+        for ftseed, g in d.groupby("ftseed"):
+            per = g.drop_duplicates(["tag", "t", "s"]).groupby("tag").size()
+            if arm != "C":
+                per = per.reindex(teachers, fill_value=0)
+            rows.append({"arm": arm, "ftseed": int(ftseed), "teachers": int((per > 0).sum()),
+                         "cells_min": int(per.min()), "cells_max": int(per.max()),
+                         "grid": f"{len(steps)}x{len(steps)}"})
+    return pd.DataFrame(rows, columns=["arm", "ftseed", "teachers", "cells_min", "cells_max", "grid"])
+
+
+def teacher_mean_grid(runs: pd.DataFrame, teachers: list[str], steps: list[int],
+                      ftseeds: list[int] | None = None) -> np.ndarray:
+    """Cell = ftseed mean within a recipe, then mean over ``teachers``; NaN unless EVERY teacher
+    of the set has the cell (no recipe-count mixing across cells)."""
+    d = runs[runs["tag"].isin(teachers) & runs["t"].isin(steps) & runs["s"].isin(steps)]
+    if ftseeds is not None:
+        d = d[d["ftseed"].isin(ftseeds)]
+    per = d.groupby(["t", "s", "tag"])["p"].mean()
+    grid = per.groupby(["t", "s"]).mean().unstack().reindex(index=steps, columns=steps)
+    n = per.groupby(["t", "s"]).size().unstack().reindex(index=steps, columns=steps)
+    return grid.where(n == len(teachers)).to_numpy(dtype=float)
+
+
+def olmo_sall_excess(real: pd.DataFrame, sall: pd.DataFrame, controls: pd.DataFrame,
+                     teachers: list[str], steps: list[int]) -> tuple[np.ndarray, np.ndarray]:
+    """Control-subtracted excess grids ``(R - C(t->s), S_all - C(s,s))`` on one teacher set.
+
+    An S_all cell (t, s) is teacher@t's profile on base@s carriers, so its matched control is the
+    diagonal base control C(s, s) (the Pythia convention of
+    `checkpoint_cross_readouts.resampling_excess`); the real arm uses its own C(t->s).
+    """
+    d = controls[controls["t"].isin(steps) & controls["s"].isin(steps)]
+    C = d.groupby(["t", "s"])["p"].mean().unstack().reindex(index=steps, columns=steps)
+    C = C.to_numpy(dtype=float)
+    R = teacher_mean_grid(real, teachers, steps)
+    S = teacher_mean_grid(sall, teachers, steps)
+    return R - C, S - np.diag(C)[None, :]
+
+
+def sall_cell_retention(R_ex: np.ndarray, S_ex: np.ndarray, steps: list[int], *,
+                        min_real: float = 0.10, high: float = 0.30) -> dict:
+    """Per-cell retention ``S_ex / R_ex`` summary for one S_all grid (rows teacher, cols student).
+
+    Best / median / count statistics use only cells with real excess ``R_ex >= min_real``; pooled
+    ratios and the largest S_all excess use every cell. Steps are labelled "60k" / "final".
+    """
+    R_ex, S_ex = np.asarray(R_ex, dtype=float), np.asarray(S_ex, dtype=float)
+    lab = [f"{s // 1000}k" if s < 10**6 else "final" for s in steps]
+    ok = R_ex >= min_real
+    ret = np.where(ok, S_ex / np.where(ok, R_ex, 1.0), np.nan)
+    dret = np.diag(ret)
+    has_d, has_any = bool(np.isfinite(dret).any()), bool(ok.any())
+    di = int(np.nanargmax(dret)) if has_d else None
+    ai = np.unravel_index(int(np.nanargmax(ret)), ret.shape) if has_any else None
+    si = np.unravel_index(int(np.argmax(S_ex)), S_ex.shape)
+    return {
+        "pooled all": S_ex.sum() / R_ex.sum(),
+        "pooled diagonal": np.diag(S_ex).sum() / np.diag(R_ex).sum(),
+        "best diagonal": dret[di] if has_d else np.nan,
+        "best diagonal step": lab[di] if has_d else None,
+        "median diagonal": float(np.nanmedian(dret)) if has_d else np.nan,
+        "best cell": ret[ai] if has_any else np.nan,
+        "best cell (teacher, student)": f"({lab[ai[0]]}, {lab[ai[1]]})" if has_any else None,
+        f"cells R − C ≥ {min_real:.2f}": int(ok.sum()),
+        f"of those ≥ {high:.2f}": int((ok & (np.nan_to_num(ret) >= high)).sum()),
+        "max S_all − C": S_ex[si],
+        "max S_all − C (teacher, student)": f"({lab[si[0]]}, {lab[si[1]]})",
+    }
+
+
+def seed_stability(runs: pd.DataFrame, teachers: list[str], steps: list[int]) -> dict:
+    """Agreement of the per-ftseed teacher-mean grids: lowest pairwise Pearson over shared cells
+    and the mean across-seed SD of a cell."""
+    seeds = sorted(runs["ftseed"].unique())
+    grids = [teacher_mean_grid(runs, teachers, steps, [k]) for k in seeds]
+    rs = []
+    for x, y in itertools.combinations(grids, 2):
+        m = ~(np.isnan(x) | np.isnan(y))
+        if m.sum() >= 3:
+            rs.append(float(np.corrcoef(x[m], y[m])[0, 1]))
+    sd = np.nanstd(np.stack(grids), 0, ddof=1) if len(grids) > 1 else np.full((1,), np.nan)
+    return {"ftseeds": len(seeds), "min_pearson": min(rs) if rs else float("nan"),
+            "mean_cell_sd": float(np.nanmean(sd))}
+
+
+def _masked_r2(M: np.ndarray, P: np.ndarray, m: np.ndarray) -> float:
+    return float(1 - ((M - P)[m] ** 2).sum() / ((M[m] - M[m].mean()) ** 2).sum())
+
+
+def _log_shares(M: np.ndarray, clip: float = 0.005) -> tuple[float, float, float]:
+    """Share of the log-excess sum of squares explained by teacher-only and student-only offsets,
+    and the additive residual (interaction). On a full grid these are the 2-way decomposition and
+    sum to one."""
+    m = ~np.isnan(M)
+    L = np.where(m, np.log(np.clip(np.where(m, M, clip), clip, None)), np.nan)
+    mu = np.nanmean(L)
+    tot = np.nansum((L - mu) ** 2)
+    teacher = 1 - np.nansum((L - np.nanmean(L, 1)[:, None]) ** 2) / tot
+    student = 1 - np.nansum((L - np.nanmean(L, 0)[None, :]) ** 2) / tot
+    u, v = np.zeros(M.shape[0]), np.zeros(M.shape[1])
+    for _ in range(200):
+        u = np.nanmean(L - v[None, :], 1)
+        v = np.nanmean(L - u[:, None], 0)
+    return float(teacher), float(student), float(np.nansum((L - u[:, None] - v[None, :]) ** 2) / tot)
+
+
+def _spearman(x: np.ndarray, y: np.ndarray) -> float:
+    m = ~(np.isnan(x) | np.isnan(y))
+    if m.sum() < 3:
+        return float("nan")
+    return float(pd.Series(x[m]).corr(pd.Series(y[m]), method="spearman"))
+
+
+def arm_factor_comparison(R: np.ndarray, S: np.ndarray, steps: list[int], *,
+                          ref_step: int | None = None) -> dict[str, pd.DataFrame]:
+    """Compare the rank-one factors of a real (``R``) and a synthetic (``S``) excess grid.
+
+    Both grids are teacher step x student step, already control-subtracted. Missing cells are NaN
+    and are masked out of every statistic (never imputed); retention uses only the cells both
+    grids have. Factors are in the `fit_rank1` gauge (receiver curve ``b`` max 1, sender curve
+    ``a`` in excess units); with ``ref_step`` the two sender curves are also shown divided by
+    their value at that step.
+
+    Args:
+        R: Real-number excess grid.
+        S: Synthetic (S_all) excess grid on the same steps.
+        steps: Checkpoint steps indexing both axes.
+        ref_step: Optional step at which each normalised sender curve is set to 1.
+
+    Returns:
+        ``summary``: one row -- per arm the rank-one R^2, the same-checkpoint bonus ``c`` of the
+        product + diagonal fit and its R^2 gain (full grids only), the variance of the teacher-row
+        and student-column means and their ratio, the teacher / student / interaction shares of
+        the log excess; across arms the Spearman correlation of the sender and of the receiver
+        curves, the share of off-diagonal send/receive leans with the same sign, and retention
+        ``sum(S) / sum(R)`` overall, on the diagonal and off it.
+        ``by_step``: per step the two sender and receiver curves and their ratios, and retention
+        by teacher row and by student column.
+    """
+    n = len(steps)
+    eye = np.eye(n, dtype=bool)
+    row: dict[str, float] = {}
+    curves: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for arm, M in (("real", R), ("synthetic", S)):
+        m = ~np.isnan(M)
+        a = b = np.full(n, np.nan)
+        r2 = c = gain = float("nan")
+        if m.sum() >= 3 and m.any(0).all() and m.any(1).all():
+            a, b = fit_rank1(np.where(m, M, 0.0), mask=m)
+            r2 = _masked_r2(M, np.outer(a, b), m)
+            if m.all():
+                a_d, b_d, c = _fit_rank1_plus(M, eye.astype(float))
+                gain = _r2(M, np.outer(a_d, b_d) + c * eye) - r2
+        curves[arm] = (a, b)
+        rows_mean, cols_mean = np.nanmean(M, 1), np.nanmean(M, 0)
+        shares = _log_shares(M)
+        row |= {f"rank-1 R² {arm}": r2, f"diagonal bonus c {arm}": c,
+                f"R² gain from diagonal {arm}": gain,
+                f"var teacher-row means {arm}": float(np.nanvar(rows_mean)),
+                f"var student-column means {arm}": float(np.nanvar(cols_mean)),
+                f"row/column variance ratio {arm}": float(np.nanvar(rows_mean) / np.nanvar(cols_mean)),
+                f"log share teacher {arm}": shares[0], f"log share student {arm}": shares[1],
+                f"log share interaction {arm}": shares[2]}
+    (aR, bR), (aS, bS) = curves["real"], curves["synthetic"]
+
+    def _lean(M):
+        H = np.where(eye, np.nan, M)
+        return np.nanmean(H, 1) - np.nanmean(H, 0)
+
+    leans = _lean(R), _lean(S)
+    ok = ~(np.isnan(leans[0]) | np.isnan(leans[1]))
+    both = ~(np.isnan(R) | np.isnan(S))
+    Rb, Sb = np.where(both, R, 0.0), np.where(both, S, 0.0)
+    row |= {"sender Spearman": _spearman(aS, aR), "receiver Spearman": _spearman(bS, bR),
+            "lean sign agreement": float(np.mean(np.sign(leans[0][ok]) == np.sign(leans[1][ok])))
+            if ok.any() else float("nan"),
+            "cells in both": int(both.sum()),
+            "retention all": float(Sb.sum() / Rb.sum()),
+            "retention diagonal": float(Sb[eye].sum() / Rb[eye].sum()),
+            "retention off-diagonal": float(Sb[~eye].sum() / Rb[~eye].sum())}
+    with np.errstate(invalid="ignore", divide="ignore"):
+        by_step = {"a real": aR, "a synthetic": aS, "a synthetic / a real": aS / aR}
+        if ref_step is not None:
+            k = steps.index(ref_step)
+            by_step |= {f"a real / a real({ref_step // 1000}k)": aR / aR[k],
+                        f"a synthetic / a synthetic({ref_step // 1000}k)": aS / aS[k]}
+        by_step |= {"b real": bR, "b synthetic": bS, "b synthetic / b real": bS / bR,
+                    "retention by teacher row": Sb.sum(1) / Rb.sum(1),
+                    "retention by student column": Sb.sum(0) / Rb.sum(0)}
+    labels = ["final" if s == OLMO_FINAL_STEP else f"{s // 1000}k" for s in steps]
+    return {"summary": pd.DataFrame([row]),
+            "by_step": pd.DataFrame(by_step, index=labels).T}

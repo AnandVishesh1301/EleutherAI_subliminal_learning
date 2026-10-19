@@ -86,6 +86,40 @@ DEFAULT_LAYER_SWEEP: tuple[LayerChoice, ...] = (
 )
 DEFAULT_ALPHAS: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0)
 
+# Extraction batch for `mean_last_activations` on the batched path (exact mean; only the fp32
+# summation order differs from the legacy batch of 16, kept when ``score_batch_size`` is None).
+EXTRACT_BATCH_SIZE = 64
+LEGACY_EXTRACT_BATCH_SIZE = 16
+
+# Worker-process caches (the sweep calls ``run()`` once per cell in one process). Clean models
+# keyed by (role, spec label, device) -- role "clean" = pristine source/steer base, "teacher" =
+# the separate base the LoRA adapters mount on (always unload()-ed back to clean) -- and the
+# seed-independent base work (base_act + clean control scores) keyed by the cell's inputs.
+_MODEL_CACHE: dict[tuple[str, str, str], object] = {}
+_BASE_WORK_CACHE: dict[tuple, dict] = {}
+
+
+def clear_model_cache() -> None:
+    """Drop every cached model and base-work entry (call at the end of a sweep)."""
+    _MODEL_CACHE.clear()
+    _BASE_WORK_CACHE.clear()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _cached_model(role: str, spec: PythiaModelSpec, cfg: "SteerabilityScreenConfig"):
+    """``load_model`` memoized per (role, spec label, device)."""
+    key = (role, spec_label(spec), cfg.device)
+    if key not in _MODEL_CACHE:
+        _MODEL_CACHE[key] = load_model(spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device)
+    return _MODEL_CACHE[key]
+
+
+def _evict_models_except(keep: set[tuple[str, str, str]]) -> None:
+    """Bound the model cache to the current cell's models (<= 3 resident)."""
+    for key in [k for k in _MODEL_CACHE if k not in keep]:
+        del _MODEL_CACHE[key]
+
 
 @dataclass(frozen=True)
 class SteerabilityScreenConfig:
@@ -138,6 +172,11 @@ class SteerabilityScreenConfig:
             0.10 threshold onto our probability metric (kept configurable).
         device: Torch device.
         force: Recompute every requested seed even if its ``ft{seed}.json`` is already current.
+        score_batch_size: Prompts per left-padded forward when scoring ``p(target)`` (and the
+            extraction batch is raised to ``EXTRACT_BATCH_SIZE``). ``None`` = the legacy path:
+            one forward pass per prompt and extraction batch 16, reproducing old numbers
+            exactly. Deliberately NOT in ``_screen_params``: batched values agree to ~1e-6, so
+            existing screens stay valid.
     """
 
     paths: PathsConfig
@@ -161,6 +200,7 @@ class SteerabilityScreenConfig:
     off_thresh: float = 0.10
     device: str = "cuda:0"
     force: bool = False
+    score_batch_size: int | None = 64
 
 
 def _mean_p_rank(pr: dict[str, tuple[float, int]]) -> tuple[float, float, float]:
@@ -403,11 +443,18 @@ def _score_sets(
     device: str,
     prompt_by_set: dict[str, tuple[str, ...]],
     target_id: int,
+    batch_size: int | None = None,
 ) -> dict[str, dict]:
-    """Exact ``p(target)`` summary per set for one (optionally hooked) model."""
+    """Exact ``p(target)`` summary per set for one (optionally hooked) model.
+
+    ``batch_size`` is forwarded to `target_prob_and_rank_per_prompt` (``None`` = one forward
+    pass per prompt; an int = left-padded batches).
+    """
     out: dict[str, dict] = {}
     for name, prompts in prompt_by_set.items():
-        pr = target_prob_and_rank_per_prompt(model, tokenizer, device, prompts, target_id)
+        pr = target_prob_and_rank_per_prompt(
+            model, tokenizer, device, prompts, target_id, batch_size=batch_size
+        )
         mean_p, mean_rank, rank1 = _mean_p_rank(pr)
         out[name] = {"p_target": mean_p, "rank_mean": mean_rank, "rank1_frac": rank1}
     return out
@@ -812,48 +859,77 @@ def run(cfg: SteerabilityScreenConfig) -> dict:
             "off_thresh": cfg.off_thresh,
         }
 
-        # Two clean bases (identical object within-model):
+        bs = cfg.score_batch_size
+        extract_bs = LEGACY_EXTRACT_BATCH_SIZE if bs is None else EXTRACT_BATCH_SIZE
+
+        # Two clean bases (identical object within-model), cached across cells in-process:
         #   source_base (A): where ``v`` and A's control scores are read (base_source_*).
         #   steer_base  (B): the model every steered forward hooks + B's control scores.
-        source_base = load_model(cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device)
-        base_act = mean_last_activations(source_base, src_tokenizer, extract_prompts, cfg.device)
-        base_source_scores = _score_sets(
-            source_base, src_tokenizer, cfg.device, prompt_by_set, src_target_id
-        )
-        base_source_val_p = base_source_scores[cfg.val_set]["p_target"]
+        keep = {("clean", spec_label(cfg.spec), cfg.device),
+                ("teacher", spec_label(cfg.spec), cfg.device)}
         if cross_seed:
-            steer_base = load_model(
-                cfg.steer_spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device
-            )
+            keep.add(("clean", spec_label(cfg.steer_spec), cfg.device))
+        _evict_models_except(keep)
+        source_base = _cached_model("clean", cfg.spec, cfg)
+        if cross_seed:
+            steer_base = _cached_model("clean", cfg.steer_spec, cfg)
             _assert_compatible(source_base, steer_base)
-            # B's clean control scores (the model being steered).
-            base_scores = _score_sets(
-                steer_base, tgt_tokenizer, cfg.device, prompt_by_set, tgt_target_id
-            )
         else:
             steer_base = source_base  # within-model: A == B, one object.
-            base_scores = base_source_scores
+
+        # Seed-independent base work (base_act + clean control scores), memoized per cell
+        # inputs: `params` carries source/target identity, extraction + prompt-set hashes and
+        # the target animal; the batch sizes are added since they change summation order.
+        work_key = (
+            spec_label(cfg.spec),
+            spec_label(cfg.steer_spec) if cross_seed else None,
+            cfg.device, bs, extract_bs, json.dumps(params, sort_keys=True),
+        )
+        work = _BASE_WORK_CACHE.get(work_key)
+        if work is None:
+            base_act = mean_last_activations(
+                source_base, src_tokenizer, extract_prompts, cfg.device, batch_size=extract_bs
+            )
+            base_source_scores = _score_sets(
+                source_base, src_tokenizer, cfg.device, prompt_by_set, src_target_id, bs
+            )
+            if cross_seed:
+                # B's clean control scores (the model being steered).
+                base_scores = _score_sets(
+                    steer_base, tgt_tokenizer, cfg.device, prompt_by_set, tgt_target_id, bs
+                )
+            else:
+                base_scores = base_source_scores
+            work = {"base_act": base_act, "base_source_scores": base_source_scores,
+                    "base_scores": base_scores}
+            _BASE_WORK_CACHE[work_key] = work
+        base_act = work["base_act"]
+        base_source_scores = work["base_source_scores"]
+        base_scores = work["base_scores"]
+        base_source_val_p = base_source_scores[cfg.val_set]["p_target"]
         base_val_p = base_scores[cfg.val_set]["p_target"]
 
         # One dedicated SOURCE base for the teachers (source_base/steer_base stay pristine);
-        # unload() after each seed returns it unwrapped instead of re-loading per seed.
-        teacher_base = None
+        # unload() after each seed returns it unwrapped instead of re-loading per seed/cell.
+        teacher_key = ("teacher", spec_label(cfg.spec), cfg.device)
         for seed, ckpt in to_compute:
-            if teacher_base is None:
-                teacher_base = load_model(
-                    cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org, cfg.device)
+            teacher_base = _cached_model("teacher", cfg.spec, cfg)
+            # Drop the cached teacher base until unload() succeeds, so a failure mid-seed can
+            # never leave an adapter-wrapped model in the cache.
+            del _MODEL_CACHE[teacher_key]
             teacher = PeftModel.from_pretrained(teacher_base, str(ckpt))
             teacher.eval()
             teacher_act = mean_last_activations(
-                teacher, src_tokenizer, extract_prompts, cfg.device
+                teacher, src_tokenizer, extract_prompts, cfg.device, batch_size=extract_bs
             )
             teacher_scores = _score_sets(
-                teacher, src_tokenizer, cfg.device, prompt_by_set, src_target_id
+                teacher, src_tokenizer, cfg.device, prompt_by_set, src_target_id, bs
             )
             teacher_base = teacher.unload()
             if hasattr(teacher_base, "peft_config"):
                 del teacher_base.peft_config
-            del teacher
+            _MODEL_CACHE[teacher_key] = teacher_base
+            del teacher, teacher_base
             if cfg.device.startswith("cuda"):
                 torch.cuda.empty_cache()
 
@@ -879,19 +955,19 @@ def run(cfg: SteerabilityScreenConfig) -> dict:
                     ):
                         pos = target_prob_and_rank_per_prompt(
                             steer_base, tgt_tokenizer, cfg.device,
-                            prompt_by_set[cfg.pos_set], tgt_target_id,
+                            prompt_by_set[cfg.pos_set], tgt_target_id, batch_size=bs,
                         )
                         val = target_prob_and_rank_per_prompt(
                             steer_base, tgt_tokenizer, cfg.device,
-                            prompt_by_set[cfg.val_set], tgt_target_id,
+                            prompt_by_set[cfg.val_set], tgt_target_id, batch_size=bs,
                         )
                         neg = target_prob_and_rank_per_prompt(
                             steer_base, tgt_tokenizer, cfg.device,
-                            prompt_by_set[cfg.neg_set], tgt_target_id,
+                            prompt_by_set[cfg.neg_set], tgt_target_id, batch_size=bs,
                         )
                         off = target_prob_and_rank_per_prompt(
                             steer_base, tgt_tokenizer, cfg.device,
-                            prompt_by_set[cfg.off_set], tgt_target_id,
+                            prompt_by_set[cfg.off_set], tgt_target_id, batch_size=bs,
                         )
                     pos_p = _mean_p_rank(pos)[0]
                     val_p = _mean_p_rank(val)[0]
@@ -963,9 +1039,8 @@ def run(cfg: SteerabilityScreenConfig) -> dict:
                 p_un["layers"], p_un["alpha"], p_un["val_p"],
             )
 
-        if steer_base is not source_base:
-            del steer_base
-        del source_base
+        # The bases stay in the module cache (clear_model_cache() releases them).
+        del steer_base, source_base
         if cfg.device.startswith("cuda"):
             torch.cuda.empty_cache()
 

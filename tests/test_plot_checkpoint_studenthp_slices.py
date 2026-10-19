@@ -7,6 +7,8 @@ import pytest
 
 from scripts import plot_checkpoint_studenthp_slices as chart
 
+real_attach_controls = chart.attach_controls
+
 
 def row(teacher, hp, seed, p, step=50000):
     return dict(
@@ -16,6 +18,7 @@ def row(teacher, hp, seed, p, step=50000):
         student_tag=hp,
         student_seed=seed,
         p_dog=p,
+        delta_p=p,
     )
 
 
@@ -260,17 +263,24 @@ def _full_rows():
             for i, hp in enumerate(chart.HPS):
                 full.append(
                     {**base, "student_tag": hp, "student_seed": 1, "kind": "hp",
-                     "p_dog": i / 10 + k / 20}
+                     "p_dog": i / 10 + k / 20, "delta_p": i / 10 + k / 20}
                 )
             for seed in (1, 2, 3):
                 full.append(
                     {**base, "student_tag": chart.REFERENCE_TAG, "student_seed": seed,
-                     "kind": "reference", "p_dog": seed / 10 + k / 50}
+                     "kind": "reference", "p_dog": seed / 10 + k / 50,
+                     "delta_p": seed / 10 + k / 50}
                 )
     return full
 
 
 TABLES = ("cells", "per_hp", "runs", "variance_sources")
+
+
+@pytest.fixture(autouse=True)
+def no_real_controls(monkeypatch):
+    # main() attaches controls from output_root; synthetic rows already carry delta_p.
+    monkeypatch.setattr(chart, "attach_controls", lambda rows, root: rows)
 
 
 def test_default_by_hp_render_writes_shared_tables(tmp_path, monkeypatch):
@@ -352,7 +362,8 @@ def _seeded_rows(seeds):
     for r in [r for r in full if r["kind"] == "hp"]:
         for seed in seeds:
             if seed != 1:
-                full.append(r | {"student_seed": seed, "p_dog": r["p_dog"] + seed / 100})
+                p = r["p_dog"] + seed / 100
+                full.append(r | {"student_seed": seed, "p_dog": p, "delta_p": p})
     return full
 
 
@@ -446,6 +457,7 @@ def _mixed_campaign(tmp_path, monkeypatch, extra=()):
 
     def fake(rd, key, h):
         return dict(zip(chart.KEY_FIELDS, key), p_dog=0.1 + key[4] / 100,
+                    delta_p=0.1 + key[4] / 100,
                     pool_sha256=h, prompts_hash="x", run_dir=str(rd),
                     train_manifest_sha256="", eval_sha256="")
 
@@ -489,3 +501,65 @@ def test_collect_pools_extra_seeds_of_non_seed_teacher(tmp_path, monkeypatch):
     assert extra == {1, 2, 3}
     stat = chart.aggregate(rows, fixed=75000, varying="teacher")[0]
     assert stat["n_entries_with_seed_sd"] == 10
+
+
+def _control(root, t, s, hp, p):
+    teacher = "pythia-160m" if t == 143000 else f"pythia-160m@step{t}"
+    leaf = root / (f"students/controls/base/ckpt/pythia-160m@step{s}/teacher-{teacher}/"
+                   f"ex10-20_prefix_n100k/{hp}/ftseed1/eval/dog")
+    leaf.mkdir(parents=True)
+    (leaf / "preference_eval.json").write_text(json.dumps(dict(
+        target_animal="dog", sets={"test": dict(scoring="prob", p_target=p)})))
+
+
+def test_attach_controls_subtracts_matched_control_and_marks_missing(tmp_path):
+    _control(tmp_path, 143000, 75000, chart.HPS[0], 0.05)
+    rows = [
+        dict(teacher_step=143000, student_step=75000, student_tag=chart.HPS[0],
+             student_seed=seed, p_dog=0.3)
+        for seed in (1, 2)
+    ] + [dict(teacher_step=50000, student_step=75000, student_tag=chart.REFERENCE_TAG,
+              student_seed=1, p_dog=0.3)]
+    real_attach_controls(rows, tmp_path)
+    assert [r["delta_p"] for r in rows[:2]] == pytest.approx([0.25, 0.25])
+    assert rows[0]["control_status"] == "verified"
+    assert "teacher-pythia-160m/" in rows[0]["control_leaf"]
+    assert rows[0]["control_eval_sha256"]
+    assert rows[2]["delta_p"] is None and rows[2]["control_status"] == "missing_test_eval"
+
+
+def test_reference_without_control_is_a_gap(rows):
+    for r in rows:
+        if r["student_tag"] == chart.REFERENCE_TAG and r["student_step"] == 50000:
+            r["delta_p"] = None
+    stats = chart.aggregate(rows, fixed=75000)
+    assert np.isnan(stats[0]["reference_mean"]) and np.isnan(stats[0]["reference_sd"])
+    assert np.isfinite(stats[0]["mean"])
+    assert np.isfinite(stats[1]["reference_mean"])
+
+
+def test_default_render_uses_delta_label_and_slice_student_prefix(tmp_path, monkeypatch):
+    full = _full_rows()
+    for r in full:
+        r["p_control"] = None if r["kind"] == "reference" and r["teacher_step"] == 50000 else 0.0
+        if r["p_control"] is None:
+            r["delta_p"] = None
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(chart, "collect", lambda **kw: (full, {}))
+    monkeypatch.setattr("sys.argv", ["prog"])
+    figs = []
+    real_close = chart.plt.close
+    monkeypatch.setattr(chart.plt, "close", lambda f: figs.append(f) or real_close(f))
+    chart.main()
+    assert chart.CLEAN_OUT.name == "slice_student"
+    assert chart.DEFAULT_OUT.name == "slice_student_legend"
+    (fig,) = figs
+    assert {ax.get_ylabel() for ax in fig.axes} == {"Mean Δp(dog), held-out test"}
+    assert all(ax.get_ylim() == (0, 1) for ax in fig.axes)
+    out = chart.DEFAULT_OUT
+    provenance = json.loads(out.with_name(out.name + "_provenance.json").read_text())
+    controls = provenance["controls"]
+    assert controls["control_seed"] == 1
+    assert controls["n_runs_missing_control"] == 5 * 3 * 2
+    assert [50000, 75000, chart.REFERENCE_TAG] in controls["missing_control_cells"]
+    assert (chart.FIG_DIR / "slice_student_runs.csv").exists()

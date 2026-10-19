@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -133,6 +134,25 @@ def _registry_documents(repo: Path, *, include_olmo_same_model: bool = False):
     return documents
 
 
+# ``pythia-160m`` / ``pythia-410m`` with an optional plain ``-seed<N>`` (full-seed) label; other
+# 160m variants (``-data-seed``, ``-weight-seed``, ``-weightc-seed``, ``-pilerepro*``) do not match.
+_PYTHIA_WIDTH_SEED = re.compile(r"pythia-(160m|410m)(?:-seed(\d+))?")
+
+
+def pythia_width_relation(sender: str, receiver: str) -> tuple[str, str] | None:
+    """``(data order, direction)`` of a Pythia 160m ↔ 410m size arm, else ``None``.
+
+    Direction by width (``"up"`` iff the sender is 160m); data order ``"same"`` iff the seed
+    labels match (orig = no label), else ``"different"``. `sender` / `receiver` are base names
+    (`tio.base_name`); non-full-seed 160m variants never match `_PYTHIA_WIDTH_SEED`.
+    """
+    s_m, r_m = _PYTHIA_WIDTH_SEED.fullmatch(sender), _PYTHIA_WIDTH_SEED.fullmatch(receiver)
+    if not (s_m and r_m) or s_m.group(1) == r_m.group(1):
+        return None
+    return ("same" if s_m.group(2) == r_m.group(2) else "different",
+            "up" if s_m.group(1) == "160m" else "down")
+
+
 def _category(arm: dict, *, include_olmo_same_model: bool = False) -> str | None:
     sender, receiver = (tio.base_name(arm[k]) for k in ("sender", "receiver"))
     s_olmo, r_olmo = (
@@ -151,12 +171,11 @@ def _category(arm: dict, *, include_olmo_same_model: bool = False) -> str | None
         return EXTRA_RELATIONS[4]
     if s_olmo and receiver.startswith("pythia-"):
         return EXTRA_RELATIONS[5]
-    return {
-        ("pythia-160m", "pythia-410m"): EXTRA_RELATIONS[0],
-        ("pythia-410m", "pythia-160m"): EXTRA_RELATIONS[1],
-        ("pythia-160m", "pythia-410m-seed1"): EXTRA_RELATIONS[2],
-        ("pythia-410m-seed1", "pythia-160m"): EXTRA_RELATIONS[3],
-    }.get((sender, receiver))
+    width = pythia_width_relation(sender, receiver)
+    if width is None:
+        return None
+    order, direction = width
+    return EXTRA_RELATIONS[(0 if direction == "up" else 1) + (0 if order == "same" else 2)]
 
 
 def registry_pairs(

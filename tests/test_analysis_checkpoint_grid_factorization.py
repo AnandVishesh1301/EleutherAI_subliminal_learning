@@ -706,3 +706,161 @@ def test_discover_olmo_reports_base_column_and_keys(tmp_path):
     cov0, runs0 = discover_olmo_checkpoint_grids(
         tmp_path, "elephant", ["seed-default"], student_tag=OLMO_STUDENT_TAGS[0], steps=steps)
     assert cov0["base"].tolist() == [OLMO_BASE_DOLMA] and runs0 == {}
+
+
+# --------------------------------------------------------------------------------------
+# S_all as a sender-side probe
+# --------------------------------------------------------------------------------------
+from subliminal_learning.analysis.checkpoint_grid_factorization import (  # noqa: E402
+    arm_factor_comparison,
+    load_olmo_sall_grid_runs,
+    olmo_sall_coverage,
+    olmo_sall_excess,
+    olmo_sall_teacher_set,
+)
+
+_STEPS5 = [10000, 20000, 30000, 40000, 50000]
+
+
+def test_arm_comparison_exact_products_give_r2_one_and_matching_curves():
+    R = np.outer(A_PLANTED, B_PLANTED)
+    S = 0.4 * np.outer(A_PLANTED ** 0.5, B_PLANTED)
+    out = arm_factor_comparison(R, S, _STEPS5, ref_step=40000)
+    row, by = out["summary"].iloc[0], out["by_step"]
+    assert row["rank-1 R² real"] == pytest.approx(1.0)
+    assert row["rank-1 R² synthetic"] == pytest.approx(1.0)
+    assert row["receiver Spearman"] == pytest.approx(1.0)
+    assert row["sender Spearman"] == pytest.approx(1.0)
+    assert by.loc["b synthetic / b real"].to_numpy() == pytest.approx(np.ones(5))
+    assert by.loc["a real / a real(40k)"].iloc[3] == pytest.approx(1.0)
+    assert row["diagonal bonus c real"] == pytest.approx(0.0, abs=1e-8)
+
+
+def test_arm_comparison_diagonal_bump_gives_positive_c_and_low_diag_retention():
+    R = np.outer(A_PLANTED, B_PLANTED) + 0.3 * np.eye(5)
+    S = 0.5 * np.outer(A_PLANTED, B_PLANTED)
+    row = arm_factor_comparison(R, S, _STEPS5)["summary"].iloc[0]
+    assert row["diagonal bonus c real"] > 0.1
+    assert row["R² gain from diagonal real"] > 0
+    assert row["diagonal bonus c synthetic"] == pytest.approx(0.0, abs=1e-8)
+    assert row["retention diagonal"] < row["retention off-diagonal"]
+
+
+def test_arm_comparison_masks_nan_cells():
+    R = np.outer(A_PLANTED, B_PLANTED)
+    S = 0.5 * R.copy()
+    S[0, 3] = np.nan
+    R2 = R.copy()
+    R2[0, 3] = 99.0  # only cells both grids have enter retention
+    out = arm_factor_comparison(R2, S, _STEPS5)
+    row = out["summary"].iloc[0]
+    assert row["rank-1 R² synthetic"] == pytest.approx(1.0)
+    assert row["retention all"] == pytest.approx(0.5)
+    assert row["cells in both"] == 24
+    assert np.isnan(row["diagonal bonus c synthetic"])  # bonus fit needs a full grid
+    assert out["by_step"].loc["retention by teacher row"].to_numpy() == pytest.approx(np.full(5, .5))
+
+
+def test_arm_comparison_log_shares_sum_to_one():
+    rng = np.random.default_rng(3)
+    R = rng.random((5, 5)) + 0.05
+    row = arm_factor_comparison(R, R * 0.3, _STEPS5)["summary"].iloc[0]
+    for arm in ("real", "synthetic"):
+        total = sum(row[f"log share {k} {arm}"] for k in ("teacher", "student", "interaction"))
+        assert total == pytest.approx(1.0)
+
+
+def _sall_leaf(root, t, s, *, tag, ftseed=1, controls=False):
+    leaf = _olmo_leaf(root, t, s, tag=tag, controls=controls,
+                      dataset=("ex10-20_prefix_n100k" if controls else
+                               "ex10-20_prefix_ablations_synthiid-"
+                               + ("cfinal" if s == OLMO_FINAL_STEP else f"c{s // 1000}k")
+                               + "_poolseed0"))
+    return leaf.parent / f"ftseed{ftseed}"
+
+
+def test_olmo_sall_loader_reads_student_keyed_pool(tmp_path):
+    _pe(_sall_leaf(tmp_path, 30000, OLMO_FINAL_STEP, tag="ta") / "preference_eval.json", 0.3)
+    _pe(_sall_leaf(tmp_path, 30000, 40000, tag="ta") / "preference_eval.json", 0.2)
+    # a pool keyed by the TEACHER step is not this grid's S_all
+    wrong = _olmo_leaf(tmp_path, 40000, 30000, tag="ta",
+                       dataset="ex10-20_prefix_ablations_synthiid-c40k_poolseed0")
+    _pe(wrong / "preference_eval.json", 0.9)
+    runs = load_olmo_sall_grid_runs(tmp_path, "elephant", student_tag=OLMO_STUDENT_TAGS[0])
+    assert sorted(zip(runs.t, runs.s, runs.p)) == [(30000, 40000, 0.2), (30000, OLMO_FINAL_STEP, 0.3)]
+
+
+def test_olmo_sall_teacher_set_coverage_and_excess(tmp_path):
+    steps = [30000, OLMO_FINAL_STEP]
+    for t in steps:
+        for s in steps:
+            for tag in ("ta", "tb"):
+                _pe(_olmo_leaf(tmp_path, t, s, tag=tag) / "preference_eval.json", 0.5)
+            _pe(_sall_leaf(tmp_path, t, s, controls=True, tag="") / "eval" / "elephant"
+                / "preference_eval.json", 0.1 if t == s else 0.2)
+            if (t, s) != (30000, OLMO_FINAL_STEP):  # tb lacks one S_all cell
+                _pe(_sall_leaf(tmp_path, t, s, tag="tb") / "preference_eval.json", 0.3)
+            _pe(_sall_leaf(tmp_path, t, s, tag="ta") / "preference_eval.json", 0.3)
+    kw = dict(student_tag=OLMO_STUDENT_TAGS[0])
+    R = load_olmo_checkpoint_grid_runs(tmp_path, "elephant", **kw)
+    S = load_olmo_sall_grid_runs(tmp_path, "elephant", **kw)
+    C = load_olmo_base_controls(tmp_path, "elephant", **kw)
+    got_steps, teachers, both = olmo_sall_teacher_set(R, S, [steps])
+    assert (got_steps, teachers, both) == (steps, ["ta"], True)
+    assert olmo_sall_teacher_set(R, S, [steps], excluded=("ta",)) == (steps, ["tb"], False)
+    cov = olmo_sall_coverage({"R": R, "S_all": S, "C": C}, ["ta", "tb"], steps)
+    assert cov.set_index("arm").loc["S_all", ["cells_min", "cells_max"]].tolist() == [3, 4]
+    Rex, Sex = olmo_sall_excess(R, S, C, ["ta", "tb"], steps)
+    assert Rex == pytest.approx(np.array([[0.4, 0.3], [0.3, 0.4]]))
+    # S_all minus C(s, s); the cell tb lacks is NaN, not a one-teacher mean
+    assert np.isnan(Sex[0, 1]) and Sex[1, 0] == pytest.approx(0.2) and Sex[0, 0] == pytest.approx(0.2)
+
+
+from subliminal_learning.analysis.checkpoint_grid_factorization import (  # noqa: E402
+    control_matrix,
+    load_pythia_base_controls,
+)
+
+
+def _write_control(root, student, teacher, p, animal="dog"):
+    d = (root / "students" / "controls" / "base" / "ckpt" / student / f"teacher-{teacher}"
+         / "ex10-20_prefix_n100k" / CKPT_STUDENT_TAG / "ftseed1" / "eval" / animal)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "preference_eval.json").write_text(json.dumps({"sets": {"test": {"p_target": p}}}))
+
+
+def test_load_pythia_base_controls_orig_final_teacher_and_missing_cell(tmp_path):
+    steps = [125000, 143000]
+    _write_control(tmp_path, "pythia-160m@step125000", "pythia-160m@step125000", 0.1)
+    _write_control(tmp_path, "pythia-160m@step125000", "pythia-160m", 0.2)  # orig 143k teacher
+    _write_control(tmp_path, "pythia-160m@step143000", "pythia-160m", 0.3)
+    # a revisioned 143k orig teacher is NOT the control and must be ignored
+    _write_control(tmp_path, "pythia-160m@step143000", "pythia-160m@step143000", 9.0)
+    _write_control(tmp_path, "pythia-160m-seed2@step143000", "pythia-160m-seed2@step143000", 0.5)
+    ctl = load_pythia_base_controls(tmp_path, "dog", "orig", steps=steps)
+    C, n = control_matrix(ctl, steps)
+    assert n == 3 and np.isnan(C[0, 1])  # teacher 125k -> student 143k is missing
+    assert C[0, 0] == pytest.approx(0.1) and C[1, 0] == pytest.approx(0.2)
+    assert C[1, 1] == pytest.approx(0.3)
+    C2, n2 = control_matrix(load_pythia_base_controls(tmp_path, "dog", "seed2", steps=steps), steps)
+    assert n2 == 1 and C2[1, 1] == pytest.approx(0.5)
+    assert control_matrix(load_pythia_base_controls(tmp_path, "cat", "orig", steps=steps), steps)[1] == 0
+
+
+from subliminal_learning.analysis.checkpoint_grid_factorization import sall_cell_retention  # noqa: E402
+
+
+def test_sall_cell_retention_masks_and_labels():
+    steps = [10000, 60000, 2_000_000]
+    R = np.array([[0.20, 0.05, 0.10], [0.40, 0.50, 0.02], [0.10, 0.30, 0.20]])
+    S = np.array([[0.02, 0.05, 0.04], [0.20, 0.10, 0.01], [0.01, 0.06, 0.08]])
+    row = sall_cell_retention(R, S, steps)
+    assert row["cells R − C ≥ 0.10"] == 7  # 0.05 and 0.02 masked (the 1.0 ratio at (0,1) ignored)
+    assert row["of those ≥ 0.30"] == 3  # 0.4, 0.5, 0.4
+    assert row["best cell"] == pytest.approx(0.5)
+    assert row["best cell (teacher, student)"] == "(60k, 10k)"
+    assert row["best diagonal"] == pytest.approx(0.4) and row["best diagonal step"] == "final"
+    assert row["median diagonal"] == pytest.approx(0.2)
+    assert row["max S_all − C"] == pytest.approx(0.20)
+    assert row["max S_all − C (teacher, student)"] == "(60k, 10k)"
+    assert row["pooled all"] == pytest.approx(S.sum() / R.sum())

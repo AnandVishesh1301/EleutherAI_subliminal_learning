@@ -30,11 +30,9 @@ DIRECTION = "transfer_direction_table"
 
 #: The text columns whose widest single-line cell is reported, per table.
 WIDTH_COLUMNS = {EXISTENCE: ["Model Family", "Pretraining Condition", "Arms"],
-                 COMPARISON: ["Model Family", "Pretraining Condition A",
-                              "Pretraining Condition B", "Arms A", "Arms B",
+                 COMPARISON: ["Model Family", "Comparison", "Arms A", "Arms B",
                               "Treatment Effect Mode"],
-                 DIRECTION: ["Model Family", "Pretraining Condition A",
-                             "Pretraining Condition B", "Arms A", "Arms B"]}
+                 DIRECTION: ["Model Family", "Comparison", "Arms A", "Arms B"]}
 
 
 def load_frame(path: Path) -> pd.DataFrame:

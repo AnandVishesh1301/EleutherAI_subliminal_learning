@@ -1,0 +1,74 @@
+{
+  "step": 143000,
+  "transfer_metric": "delta_p",
+  "associations": [
+    {
+      "population": "primary_nine",
+      "metric": "all_entropy_bits",
+      "transfer_metric": "delta_p",
+      "step": 143000,
+      "n_models": 9,
+      "pearson": -0.7881716298015295,
+      "spearman": -0.6833333333333333,
+      "leave_one_model_out_spearman_min": -0.8333333333333335,
+      "leave_one_model_out_spearman_max": -0.5476190476190477
+    },
+    {
+      "population": "primary_nine",
+      "metric": "first_entropy_nats",
+      "transfer_metric": "delta_p",
+      "step": 143000,
+      "n_models": 9,
+      "pearson": -0.7885280337204904,
+      "spearman": -0.6833333333333333,
+      "leave_one_model_out_spearman_min": -0.8333333333333335,
+      "leave_one_model_out_spearman_max": -0.5476190476190477
+    },
+    {
+      "population": "primary_nine_plus_pr1234",
+      "metric": "all_entropy_bits",
+      "transfer_metric": "delta_p",
+      "step": 143000,
+      "n_models": 10,
+      "pearson": -0.826352098986504,
+      "spearman": -0.7696969696969697,
+      "leave_one_model_out_spearman_min": -0.8833333333333333,
+      "leave_one_model_out_spearman_max": -0.6833333333333333
+    },
+    {
+      "population": "primary_nine_plus_pr1234",
+      "metric": "first_entropy_nats",
+      "transfer_metric": "delta_p",
+      "step": 143000,
+      "n_models": 10,
+      "pearson": -0.8098933857820233,
+      "spearman": -0.7696969696969697,
+      "leave_one_model_out_spearman_min": -0.8833333333333333,
+      "leave_one_model_out_spearman_max": -0.6833333333333333
+    },
+    {
+      "population": "primary_nine_plus_pr1234_plus_prv1_1234",
+      "metric": "all_entropy_bits",
+      "transfer_metric": "delta_p",
+      "step": 143000,
+      "n_models": 11,
+      "pearson": -0.8218570000906906,
+      "spearman": -0.790909090909091,
+      "leave_one_model_out_spearman_min": -0.8787878787878788,
+      "leave_one_model_out_spearman_max": -0.7212121212121211
+    },
+    {
+      "population": "primary_nine_plus_pr1234_plus_prv1_1234",
+      "metric": "first_entropy_nats",
+      "transfer_metric": "delta_p",
+      "step": 143000,
+      "n_models": 11,
+      "pearson": -0.8021937030276948,
+      "spearman": -0.790909090909091,
+      "leave_one_model_out_spearman_min": -0.8787878787878788,
+      "leave_one_model_out_spearman_max": -0.7212121212121211
+    }
+  ],
+  "interpretation": "Descriptive across-model endpoint associations between teacher entropy and control-subtracted same-checkpoint transfer; selected dependent models, no iid significance test or causal claim.",
+  "csv_path": "/home/angela/EleutherAI_subliminal_learning/notebooks/figures/checkpoint_entropy_transfer/entropy_transfer_highlight_endpoint_ranks.csv"
+}

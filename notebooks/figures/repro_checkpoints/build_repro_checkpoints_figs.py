@@ -49,6 +49,7 @@ for r in runs:
 print("namespace-only fixes", fixed, "status", Counter(r["join_status"] for r in runs), flush=True)
 recipes = T.aggregate_recipes(runs)
 cells = T.aggregate_cells(recipes, expected)
+T.attach_controls(root, cells)
 shared.write_csv(OUT / "repro_checkpoints_recipes.csv", recipes)
 shared.write_csv(OUT / "repro_checkpoints_cells.csv", cells)
 
@@ -60,7 +61,10 @@ def save(fig, name):
         fig.savefig(OUT / f"{name}.{ext}", dpi=240, facecolor="white", bbox_inches="tight")
     plt.close(fig); print("wrote", OUT / f"{name}.png")
 
-# ---- diagonal takeoff with 95% CI bands (student seeds, recipes fixed)
+# ---- diagonal takeoff, Δp = treated mean − matched base-numbers control (single ftseed-1 run, so the
+# 95% CI band from student seeds shifts with the mean; its width is unchanged)
+p_control = {(c["lineage"], c["student_step"]): c.get("p_control") for c in cells if c["teacher_step"] == c["student_step"]}
+skipped = []
 def summarize(lin):
     by_step = defaultdict(dict)
     for r in recipes:
@@ -71,7 +75,12 @@ def summarize(lin):
         recs = by_step[s]; rm = np.array([np.mean(v) for v in recs.values()]); m = rm.mean()
         df = sum(len(v) - 1 for v in recs.values())
         se = np.sqrt(sum(np.var(v, ddof=1) / len(v) for v in recs.values() if len(v) > 1)) / 5
-        out.append((s / 1000, m, stats.t.ppf(0.975, df) * se, sum(len(v) for v in recs.values())))
+        pc = p_control.get((lin, s))
+        if pc is None or not np.isfinite(pc):
+            print(f"WARNING: no control for ({lin}, {s}); point skipped")
+            skipped.append((lin, s))
+            continue
+        out.append((s / 1000, m - pc, stats.t.ppf(0.975, df) * se, sum(len(v) for v in recs.values())))
     return out
 summ = {k: summarize(k) for k in LIN}
 fig, ax = plt.subplots(figsize=(7.6, 6.2))
@@ -80,12 +89,13 @@ for lin, (label, color, marker) in LIN.items():
     ax.fill_between(x, m - h, m + h, color=color, alpha=0.16, linewidth=0)
     ax.plot(x, m, marker=marker, color=color, label=label, ms=5.0, lw=1.8, alpha=0.95,
             markeredgewidth=0.65, markeredgecolor="white")
-ax.set(xlabel="Teacher = student pretraining checkpoint (k steps)", ylabel="p(dog), held-out test",
+ax.set(xlabel="Teacher = student pretraining checkpoint (k steps)", ylabel="Mean Δp(dog), held-out test",
        xlim=(22, 146), ylim=(0, 1), xticks=[25, 50, 75, 100, 125, 143], yticks=np.arange(0, 1.01, 0.2))
 ax.grid(alpha=0.18, lw=0.7)
 ax.legend(loc="upper left", fontsize=9.5, frameon=True, framealpha=0.93, edgecolor="none")
-save(fig, "ckpt_takeoff_orig_pr1234_prv1")
-print("\nstep_k  orig  pr1234  prv1   (mean ± CI half-width, n runs)")
+save(fig, "repro_diagonal")
+print("\nskipped points:", len(skipped), skipped)
+print("\nstep_k  orig  pr1234  prv1   (Δp mean = treated − control ± CI half-width, n runs)")
 for i, s in enumerate(summ["orig"]):
     print(f"{s[0]:g}  " + "  ".join(f"{r[1]:.2f}±{r[2]:.2f} n{r[3]}" for r in (summ[l][i] for l in LIN)))
 

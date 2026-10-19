@@ -44,7 +44,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -236,16 +236,58 @@ def _index_of(node: str) -> int:
     return int(_INDEXED.match(node).group("index"))
 
 
-def _set_notation(nodes: Sequence[str]) -> list[str]:
-    """`nodes` with every run of three or more consecutive family members folded into an index
-    range, in first-appearance order.
+#: The seed-labelled families: ``(prefix, the default model counting as seed 1 or None)``
+#: (the DataDecide corpora and the Pythia full-seed / 410M seed lineages).
+_SEED_FAMILY = re.compile(r"^(?P<prefix>(?:Dolma1\.7|DCLM|C4) seed|fs|410M-seed)(?P<index>\d+)$")
+_SEED_DEFAULTS = {"Dolma1.7": "Dolma1.7 seed", "DCLM": "DCLM seed", "C4": "C4 seed"}
 
-    ``["160M", "fs1", "fs2", "fs3"]`` -> ``["160M", "fs1–3"]``; a two-member or non-contiguous
-    family is left written out (``["wc1", "wc2"]``, ``["fs1", "fs3"]``).
+
+def _seed_member(node: str) -> tuple[str, int] | None:
+    """``(family prefix, seed)`` of a seed-labelled name; an OLMo default model is seed 1
+    (``Dolma1.7`` -> ``("Dolma1.7 seed", 1)``), a Pythia unlabelled model (``160M``) is none."""
+    if node in _SEED_DEFAULTS:
+        return _SEED_DEFAULTS[node], 1
+    m = _SEED_FAMILY.match(node)
+    return (m.group("prefix"), int(m.group("index"))) if m else None
+
+
+def _index_runs(idx: Sequence[int]) -> str:
+    """``[1, 2, 3]`` -> ``"1–3"``, ``[1, 2]`` -> ``"1,2"``, ``[1, 3]`` -> ``"1,3"``: a range only
+    for three or more consecutive seeds, else a comma list."""
+    runs: list[list[int]] = []
+    for i in idx:
+        if runs and i == runs[-1][-1] + 1:
+            runs[-1].append(i)
+        else:
+            runs.append([i])
+    return ",".join(f"{r[0]}–{r[-1]}" if len(r) >= 3 else ",".join(map(str, r)) for r in runs)
+
+
+def _set_notation(nodes: Sequence[str]) -> list[str]:
+    """`nodes` with index families folded, in first-appearance order.
+
+    A seed-labelled family (`_SEED_FAMILY`: the OLMo corpora, ``fsN``, ``410M-seedN``) folds at
+    two or more members, consecutive seeds as a range and gaps as a comma list; only an OLMo
+    default model counts as seed 1 (``["Dolma1.7", "Dolma1.7 seed2"]`` -> ``["Dolma1.7
+    seed1,2"]``), a Pythia unlabelled model stays its own member (``["160M", "fs1", "fs3"]`` ->
+    ``["160M", "fs1,3"]``). Any other family folds only runs of three or more consecutive members
+    (``["ds1", "ds2", "ds3"]`` -> ``["ds1–3"]``; ``["wc1", "wc2"]`` is left written out).
     """
     seq = list(dict.fromkeys(nodes))
     label, skip = {}, set()
-    for prefix, members in _families(seq).items():
+    seeds: dict[str, list[str]] = {}
+    for n in seq:
+        member = _seed_member(n)
+        if member:
+            seeds.setdefault(member[0], []).append(n)
+    for prefix, members in seeds.items():
+        if len(members) < 2:
+            continue
+        idx = sorted({_seed_member(n)[1] for n in members})
+        label[members[0]] = f"{prefix}{_index_runs(idx)}"
+        skip.update(members[1:])
+    rest = [n for n in seq if not _seed_member(n)]
+    for prefix, members in _families(rest).items():
         idx = sorted(members, key=_index_of)
         runs, run = [], [idx[0]]
         for n in idx[1:]:
@@ -262,9 +304,13 @@ def _set_notation(nodes: Sequence[str]) -> list[str]:
     return [label.get(n, n) for n in seq if n not in skip]
 
 
-def _set_text(nodes: Sequence[str]) -> str:
-    """``"{160M, fs1–3}"`` -- the braced member list of a set, index ranges folded."""
-    return "{" + ", ".join(_set_notation(nodes)) + "}"
+def _set_text(nodes: Sequence[str], *, bare: bool = False) -> str:
+    """``"{160M, fs1–3}"`` -- the braced member list of a set, index ranges folded; with `bare`,
+    a set folding to ONE seed range is written unbraced (``Dolma1.7 seed1–3``)."""
+    names = _set_notation(nodes)
+    if bare and len(names) == 1 and len(nodes) > 1:
+        return names[0]
+    return "{" + ", ".join(names) + "}"
 
 
 def _ordered_pairs(nodes: Sequence[str]) -> list[tuple[str, str]]:
@@ -370,7 +416,7 @@ def _edge_segments(edges: dict[tuple[str, str], int]) -> list[tuple[int, str]]:
     if (len(senders) >= 2 and len(receivers) >= 2 and not set(senders) & set(receivers)
             and len(edges) == len(senders) * len(receivers)):
         # a complete sender × receiver grid (a seed grid across families): one product term
-        return [(first, f"{_set_text(senders)} → {_set_text(receivers)}")]
+        return [(first, f"{_set_text(senders, bare=True)} → {_set_text(receivers, bare=True)}")]
     left = dict(edges)
     segments = _hub_segments(left, nodes)
     if not left:
@@ -389,6 +435,60 @@ def _edge_segments(edges: dict[tuple[str, str], int]) -> list[tuple[int, str]]:
         else:
             segments.append((i, f"{a} → {b}"))
     return segments
+
+
+_OLMO_SEEDED = re.compile(r"^(?P<corpus>Dolma1\.7|DCLM|C4) seed(?P<index>\d+)$")
+_SAME_CORPUS = re.compile(r"^(?P<c>Dolma1\.7|DCLM|C4) → \{?(?P=c) (?P<seed>seed[\d–,]+)\}?$")
+
+#: The notes line explaining the receiver-seed factoring of `_seed_factored`.
+SEED_FACTOR_NOTE = ("{S} → seed k: each corpus of S to its own seed-k model; {S}² → seed k: "
+                    "every cross-corpus pair of S, receivers at seed k; {S} → {R} seed k: every "
+                    "sender of S into every receiver of R at seed k; X → seed k: corpus X to its "
+                    "own seed-k model")
+
+
+def _seed_factored(edges: Sequence[tuple[str, str]]) -> str | None:
+    """The OLMo receiver-seed factoring of non-diagonal arms (`SEED_FACTOR_NOTE`), or ``None``.
+
+    Applies only when every sender is a default-seed OLMo corpus and every receiver is an OLMo
+    corpus at one shared seed k: arms each into their own corpus are ``{S} → seed k``, the
+    off-diagonal square of a corpus set S is ``{S}² → seed k``,
+    a complete sender × receiver grid is ``{S} → {R} seed k``; anything else is ``None``.
+    """
+    if len(edges) < 2:
+        return None
+    seeds, stripped = set(), []
+    for a, b in edges:
+        m = _OLMO_SEEDED.match(b)
+        if a not in _SEED_DEFAULTS or not m:
+            return None
+        seeds.add(m.group("index"))
+        stripped.append((a, m.group("corpus")))
+    if len(seeds) != 1:
+        return None
+    k = seeds.pop()
+    senders = list(dict.fromkeys(a for a, _ in stripped))
+    receivers = list(dict.fromkeys(b for _, b in stripped))
+    if all(a == b for a, b in stripped):
+        return f"{{{', '.join(senders)}}} → seed{k}"
+    if set(senders) == set(receivers) and sorted(stripped) == sorted(_ordered_pairs(senders)):
+        return f"{{{', '.join(senders)}}}² → seed{k}"
+    if sorted(stripped) == sorted((a, b) for a in senders for b in receivers):
+        return f"{{{', '.join(senders)}}} → {{{', '.join(receivers)}}} seed{k}"
+    return None
+
+
+def seed_factor_notes(texts: Iterable[str]) -> list[str]:
+    """``[SEED_FACTOR_NOTE]`` when any arm text in `texts` uses the receiver-seed notation."""
+    pat = re.compile(r"(\}²? → seed\d|\} seed\d|(?:Dolma1\.7|DCLM|C4) → seed)")
+    return [SEED_FACTOR_NOTE] if any(pat.search(str(t)) for t in texts) else []
+
+
+def _same_corpus_short(segment: str) -> str:
+    """``Dolma1.7 → Dolma1.7 seed2`` -> ``Dolma1.7 → seed2`` (also a braced / ranged
+    receiver, ``Dolma1.7 → {Dolma1.7 seed2,3}`` -> ``Dolma1.7 → seed2,3``)."""
+    m = _SAME_CORPUS.match(segment)
+    return f"{m.group('c')} → {m.group('seed')}" if m else segment
 
 
 def compress_arms(pairs: Sequence[tuple[str, str]]) -> str:
@@ -416,8 +516,10 @@ def compress_arms(pairs: Sequence[tuple[str, str]]) -> str:
         names = _set_notation([n for _, n in diagonals])
         text = names[0] if len(names) == 1 else _set_text([n for _, n in diagonals])
         segments.append((diagonals[0][0], text))
-    segments += _edge_segments({p: i for i, p in enumerate(order) if p[0] != p[1]})
-    return "; ".join(s for _, s in sorted(segments))
+    edges = {p: i for i, p in enumerate(order) if p[0] != p[1]}
+    factored = _seed_factored(list(edges))
+    segments += ([(min(edges.values()), factored)] if factored else _edge_segments(edges))
+    return "; ".join(_same_corpus_short(s) for _, s in sorted(segments))
 
 
 def arms_text(arms: Sequence[th.HeadlineArm], names: Mapping[str, str] | None = None) -> str:
@@ -662,7 +764,8 @@ def condition_notes(conditions: Sequence[Condition]) -> list[str]:
         label = (f"{cond.family}, {cond.condition}" if cond.condition in shared
                  else cond.condition)
         out.append(f"{label} — " + "; ".join(bits))
-    return out
+    return out + seed_factor_notes(arms_text([a for a in c.arms if a.matrix is not None],
+                                             c.names) for c in conditions)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -738,6 +841,7 @@ def condition_blocks(repo: Path, teachers_by_animal: Mapping[str, Sequence[str]]
                         "c4 → c4-seed2 (elephant), core35"]
 
     xcross = "Pythia/OLMo Cross Arch."
+    w = th.xwidth_arms(xarch, output_root=output_root)
     return [
         Condition("Pythia", "Same-model", "core30" if use30 else "focus20", same_arms),
         Condition("Pythia", "Same init, diff. data order", "core56 (dog) / core30 (cat, lion, "
@@ -750,13 +854,13 @@ def condition_blocks(repo: Path, teachers_by_animal: Mapping[str, Sequence[str]]
         Condition("Pythia", "Diff. init, diff. data order", "core56",
                   fam(tio.family_arm_set("cross-seed"), pythia, core56)),
         Condition("Pythia", "Diff. model size, same data order, small to large", "core30",
-                  reg(xarch, list(th.XWIDTH_ARMS["same", "up"]))),
+                  reg(xarch, list(w["same", "up"]))),
         Condition("Pythia", "Diff. model size, same data order, large to small", "core30",
-                  reg(xarch, list(th.XWIDTH_ARMS["same", "down"]))),
+                  reg(xarch, list(w["same", "down"]))),
         Condition("Pythia", "Diff. model size, diff. data order, small to large",
-                  "core30", reg(xarch, list(th.XWIDTH_ARMS["different", "up"]))),
+                  "core30", reg(xarch, list(w["different", "up"]))),
         Condition("Pythia", "Diff. model size, diff. data order, large to small",
-                  "core30", reg(xarch, list(th.XWIDTH_ARMS["different", "down"]))),
+                  "core30", reg(xarch, list(w["different", "down"]))),
         Condition(xcross, "Diff. model arch., diff. data corpus, small to large",
                   "core35", reg(xarch, list(th.XARCH_DIRECTION_ARMS[0])),
                   note="the 3×3 Pythia-160M seed × Dolma1.7 seed grid; 160M → Dolma1.7 is the "
@@ -837,6 +941,10 @@ _TEX_HEADER_BREAKS = {
 }
 
 
+#: The run-count sub-labels stacked over two lines (the totals column's values are, too).
+_HP_SUBLABEL_BREAKS = {"# Total HP A vs B": ["Total", "A vs B"]}
+
+
 #: Scoped to the table environment: tighter inter-column space, and a resizebox that only ever
 #: SHRINKS (a table narrower than the text is left at its natural width).
 _TABCOLSEP = r"\setlength{\tabcolsep}{3pt}"
@@ -844,7 +952,7 @@ _RESIZEBOX = r"\resizebox{\ifdim\width>\textwidth\textwidth\else\width\fi}{!}{%"
 
 
 #: The columns whose numbers are right-aligned (their stacked header is right-aligned too).
-_TEX_RIGHT = {"Null 95th Perc. Exceedances", "Diff. in Means", "Mean P-value", "Win Prob.",
+_TEX_RIGHT = {"# Total HP A vs B", "Null 95th Perc. Exceedances", "Diff. in Means", "Mean P-value", "Win Prob.",
               "Win P-value"}
 
 #: The text columns whose stacked header is left-aligned, over their left-aligned body cells.
@@ -860,6 +968,9 @@ def _tex_header(column: str, align: str = "c") -> str:
     stack is centre-aligned (``[c]``), so its centre sits on the baseline the single-line
     labels sit on and every label in the row is vertically centred.
     """
+    if column in _HP_SUBLABEL_BREAKS:
+        body = r" \\ ".join(_tex(x) for x in _HP_SUBLABEL_BREAKS[column])
+        return rf"\begin{{tabular}}[c]{{@{{}}{align}@{{}}}}{body}\end{{tabular}}"
     if column in HP_SUBLABELS:
         return _tex(HP_SUBLABELS[column])
     parts = _TEX_HEADER_BREAKS.get(column)
@@ -929,14 +1040,15 @@ def _split_set(term: str) -> list[str]:
     When that split still leaves a first part wider than `_ARMS_WIDTH` -- a long member list whose
     last member is short, ``"{160M, fs1–3, ds1, ds2, rerun 160M}"`` -- the term is split at the
     top-level comma nearest its MIDDLE instead (``["{160M, fs1–3, ds1,", "ds2, rerun 160M}"]``),
-    so neither row overflows the column.
+    so neither row overflows the column. Only a member separator ``", "`` is a cut; the comma of a
+    folded seed list (``410M-seed2,3``, ``fs1,2``) never is.
     """
     if len(term) <= _SET_WIDTH or not term.startswith("{"):
         return [term]
     depth, cuts = 0, []
     for i, ch in enumerate(term):
         depth += (ch == "{") - (ch == "}")
-        if ch == "," and depth == 1:
+        if ch == "," and depth == 1 and term[i + 1:i + 2] == " ":  # not a folded ``seed2,3``
             cuts.append(i)
     if not cuts:
         return [term]
@@ -981,16 +1093,51 @@ def _family_parts(text: str) -> list[str]:
     return [head, tail] if head and tail else [text]
 
 
+def _total_parts(text: str) -> list[str]:
+    """A ``Total A vs B`` cell over two rows: ``"3360 vs 2160"`` -> ``["3360", "vs 2160"]``."""
+    a, vs, b = str(text).partition(" vs ")
+    return [a, f"vs {b}"] if vs else [a]
+
+
 #: ``{column: how to split it}`` -- the body cells spread over the rows of their block.
 _PART_SPLITTERS = {"Model Family": _family_parts, "Pretraining Condition": _condition_parts,
                    "Pretraining Condition A": _condition_parts,
                    "Pretraining Condition B": _condition_parts,
-                   "Arms": _arms_parts, "Arms A": _arms_parts, "Arms B": _arms_parts}
+                   "Arms": _arms_parts, "Arms A": _arms_parts, "Arms B": _arms_parts,
+                   "# Total HP A vs B": _total_parts}
 
 #: ``{column: how many leading grouping levels its block is keyed on}`` per table.
 _CONDITION_DEPTHS = {"Model Family": 1, "Pretraining Condition": 2, "Arms": 3}
-_COMPARISON_DEPTHS = {"Model Family": 1, "Pretraining Condition A": 3,
-                      "Pretraining Condition B": 3, "Arms A": 4, "Arms B": 5}
+_COMPARISON_DEPTHS = {"Model Family": 1, "Comparison": 2, "Arms A": 3, "Arms B": 4,
+                      "# Total HP A vs B": 4}
+
+
+#: The condition-phrase columns re-wrapped to fit their block (`_fit_lines`).
+_FIT_COLUMNS = {"Pretraining Condition", "Pretraining Condition A", "Pretraining Condition B",
+                "Comparison"}
+
+#: The most words a re-wrapped condition line carries when the block has the rows for it.
+_FIT_WORDS = 2
+
+
+def _fit_lines(parts: Sequence[str], rows: int) -> list[str]:
+    """`parts` (one phrase each) re-wrapped to at most `_FIT_WORDS` words a line, but never onto
+    more than ``max(rows, len(parts))`` lines: while too tall, the phrase with the most lines is
+    wrapped onto one line fewer. Words split as evenly as possible, earlier lines taking the extra
+    word (``"Diff. data order"`` -> ``["Diff. data", "order"]``)."""
+    words = [str(p).split() for p in parts]
+    n = [max(1, math.ceil(len(w) / _FIT_WORDS)) for w in words]
+    while sum(n) > max(rows, len(parts)):
+        n[max(range(len(n)), key=lambda k: n[k])] -= 1
+    out = []
+    for w, k in zip(words, n):
+        size, extra = divmod(len(w), k)
+        at = 0
+        for j in range(k):
+            step = size + (j < extra)
+            out.append(" ".join(w[at:at + step]))
+            at += step
+    return out
 
 
 def _slot_keys(slots: Sequence[int | None], keys: Sequence[tuple]) -> list[tuple]:
@@ -1034,12 +1181,20 @@ def _spread_cells(df: pd.DataFrame, lead: Sequence[str], depths: Mapping[str, in
     """
     keys = [tuple(str(df[c].iloc[i]) for c in lead) for i in range(len(df))]
     slots: list[int | None] = list(range(len(df)))
+    fitted: dict[tuple[str, int], list[str]] = {}
+
+    def parts_of(column: str, first: int, rows: int) -> list[str]:
+        parts = _PART_SPLITTERS[column](df[column].iloc[first])
+        if column not in _FIT_COLUMNS:
+            return parts
+        return fitted.setdefault((column, first), _fit_lines(parts, rows))
+
     for column in sorted(depths, key=lambda c: -depths[c]):
         depth = depths[column]
         runs = _runs(_slot_keys(slots, keys), depth)
         for run in reversed(runs):
             first = next(s for s in (slots[i] for i in run) if s is not None)
-            short = len(_PART_SPLITTERS[column](df[column].iloc[first])) - len(run)
+            short = len(parts_of(column, first, len(run))) - len(run)
             if short > 0:
                 slots[run[-1] + 1:run[-1] + 1] = [None] * short
     slot_keys = _slot_keys(slots, keys)
@@ -1047,7 +1202,7 @@ def _spread_cells(df: pd.DataFrame, lead: Sequence[str], depths: Mapping[str, in
     for column, depth in depths.items():
         for run in _runs(slot_keys, depth):
             first = next(s for s in (slots[i] for i in run) if s is not None)
-            parts = _PART_SPLITTERS[column](df[column].iloc[first])
+            parts = parts_of(column, first, len(run))
             for k, slot in enumerate(run):
                 cells[(slot, column)] = parts[k] if k < len(parts) else ""
     return slots, slot_keys, cells
@@ -1130,14 +1285,14 @@ COMPARISON_CONDITIONS = ["Same-model", "Same init, diff. data order",
 #: The fifteen displayed columns of `comparison_table`, in order: the grouping levels first,
 #: the per-(animal, effect mode) numbers last. The design (core30 / core56) is carried by the
 #: ``# Student HP`` column (30 = core30, 56 = core56), not by a column of its own.
-COMPARISON_COLUMNS = ["Model Family", "Pretraining Condition A", "Pretraining Condition B",
+COMPARISON_COLUMNS = ["Model Family", "Comparison",
                       "Arms A", "Arms B", "# Arms A vs B", "# Teacher HP", "# Student HP",
                       "# Total HP A vs B", "Animal",
                       "Treatment Effect Mode", "Diff. in Means", "Mean P-value", "Win Prob.",
                       "Win P-value"]
 
 #: The leading columns shown hierarchically (sparsified), as `CONDITION_LEAD`.
-COMPARISON_LEAD = COMPARISON_COLUMNS[:10]
+COMPARISON_LEAD = COMPARISON_COLUMNS[:9]
 
 #: The retired written-out spelling of the treatment effect, kept so an older frame (a pickled
 #: one) still renders: every row now prints the plain `EFFECT_SHORT`, and the caption defines it.
@@ -1446,8 +1601,7 @@ def comparison_table(results: Mapping[tuple[str, str, str], object],
                     frame = frames[r["animal"]]
                     rows.append({
                         **{k: r[v] for v, k in _COMPARISON_RENAME.items()},
-                        "Model Family": family, "Pretraining Condition A": cond_a,
-                        "Pretraining Condition B": cond_b,
+                        "Model Family": family, "Comparison": comparison_text(cond_a, cond_b),
                         **comparison_hp_cells(_side_products(frame, cond_a),
                                               _side_products(frame, cond_b)),
                         "Treatment Effect Mode": COMPARISON_MODES[mode],
@@ -1474,10 +1628,14 @@ def merge_comparison_tables(tables: Sequence[pd.DataFrame]) -> pd.DataFrame:
     return df
 
 
-def _comparison_blocks(df: pd.DataFrame) -> list[tuple[str, str, str]]:
-    """The ``(family, A, B)`` block key of every row -- one block per condition pairing."""
-    return list(zip(df["Model Family"], df["Pretraining Condition A"],
-                    df["Pretraining Condition B"]))
+def comparison_text(condition_a: str, condition_b: str) -> str:
+    """The ``Comparison`` cell of a pairing: ``"<A> vs <b>"``, B's first letter lower-cased."""
+    return f"{condition_a} vs {condition_b[:1].lower()}{condition_b[1:]}"
+
+
+def _comparison_blocks(df: pd.DataFrame) -> list[tuple[str, str]]:
+    """The ``(family, comparison)`` block key of every row -- one block per pairing."""
+    return list(zip(df["Model Family"], df["Comparison"]))
 
 
 def style_comparison_table(df: pd.DataFrame):
@@ -1488,7 +1646,7 @@ def style_comparison_table(df: pd.DataFrame):
     strat = df["stratified"].fillna(False).astype(bool).to_numpy()
     keys = _comparison_blocks(df)
     first = np.array([i == 0 or keys[i] != keys[i - 1] for i in range(len(keys))], dtype=bool)
-    depth = 6
+    depth = 5
     show = _shown(df, COMPARISON_LEAD, depth, ["stratified"])
     grey = "background-color: rgba(128, 128, 128, 0.2)"
     green = "font-weight: bold; background-color: rgba(120, 200, 120, 0.35)"
@@ -1515,12 +1673,9 @@ def style_comparison_table(df: pd.DataFrame):
 _COMPARISON_CAPTION = (
     "\\textbf{Relative Strength of transfer between pretraining conditions.} We compare "
     "pretraining conditions that vary weight initialization, data order, or data corpus in "
-    "Pythia and DataDecide OLMo-1B families, computing both Difference in Means and Win "
+    "Pythia and DataDecide OLMo-1B families, computing Difference in Means and Win "
     "Probability statistics on both ($\\Delta=$p(student) - p(control)) and $\\Delta/$prior. "
-    "We compute two-sided $p$-values, and the sign of the Difference in Means (or the Win "
-    "Probability above or below 0.5) determines which pretraining condition transfers more "
-    "strongly: a positive difference (Win Probability above 0.5) means A is stronger, "
-    "statistically significant or not. Bold = two-sided $p < 0.05$")
+    "Bold = two-sided $p < 0.05$")
 
 
 #: The three effect-mode cells in LaTeX (no amsmath).
@@ -1564,7 +1719,7 @@ def comparison_table_latex(df: pd.DataFrame, *, caption: str = _COMPARISON_CAPTI
     """
     lead = sparsify(df, COMPARISON_LEAD)
     slots, keys, spread = _spread_cells(df, COMPARISON_LEAD, _COMPARISON_DEPTHS)
-    spec = r"@{}l l l l l l r r l l l r r r r@{}"
+    spec = r"@{}l l l l l r r r l l r r r r@{}"
     lines = [r"% requires \usepackage{booktabs,graphicx}", r"\begin{table}[!hp]", r"\centering",
              r"\scriptsize", _TABCOLSEP, _RESIZEBOX,
              rf"\begin{{tabular}}{{{spec}}}", r"\toprule",
@@ -1572,15 +1727,15 @@ def comparison_table_latex(df: pd.DataFrame, *, caption: str = _COMPARISON_CAPTI
     for slot, i in enumerate(slots):
         if slot and keys[slot][0] != keys[slot - 1][0]:
             lines.append(r"\midrule")
-        elif slot and keys[slot][:3] != keys[slot - 1][:3]:
-            lines.append(rf"\cmidrule(l){{4-{len(COMPARISON_COLUMNS)}}}")
+        elif slot and keys[slot][:2] != keys[slot - 1][:2]:
+            lines.append(rf"\cmidrule(l){{3-{len(COMPARISON_COLUMNS)}}}")
         values = lead[i] if i is not None else [""] * len(COMPARISON_LEAD)
         cells = _tex_lead_cells(COMPARISON_LEAD, values, slot, i, spread)
         if i is None:
             cells += [""] * (len(COMPARISON_COLUMNS) - len(COMPARISON_LEAD))
         else:
             cells[-1] = _comparison_cell(df, "Animal", i) if lead[i][-1] else ""
-            cells += [_comparison_cell(df, c, i) for c in COMPARISON_COLUMNS[10:]]
+            cells += [_comparison_cell(df, c, i) for c in COMPARISON_COLUMNS[len(COMPARISON_LEAD):]]
         lines.append(" & ".join(cells) + r" \\")
     lines += [r"\bottomrule", r"\end{tabular}}",
               rf"\caption{{{caption}}}", rf"\label{{{label}}}", r"\end{table}"]
@@ -1590,23 +1745,25 @@ def comparison_table_latex(df: pd.DataFrame, *, caption: str = _COMPARISON_CAPTI
 # ----------------------------------------------------------------------------------------------
 # which direction / data order transfers more: the direction table
 # ----------------------------------------------------------------------------------------------
-#: The fourteen displayed columns of `direction_table`, grouping levels first (as
-#: `COMPARISON_COLUMNS`, with one arm-set p and one paired p in place of the four
-#: comparison statistics).
-DIRECTION_COLUMNS = ["Model Family", "Pretraining Condition A", "Pretraining Condition B",
-                     "Arms A", "Arms B", "# Arms A vs B", "# Teacher HP", "# Student HP",
-                     "# Total HP A vs B", "Animal", "Treatment Effect Mode", "Diff. in Means",
-                     "P-value", "Paired P-value"]
+#: The twelve displayed columns of `direction_table`, grouping levels first (narrower than
+#: `COMPARISON_COLUMNS`: one ``A vs B`` Comparison cell, no Animal -- every arm is dog -- and one arm-set p and one paired p in place of the four comparison statistics).
+DIRECTION_COLUMNS = ["Model Family", "Comparison", "Arms A", "Arms B", "# Arms A vs B",
+                     "# Teacher HP", "# Student HP", "# Total HP A vs B", "Treatment Effect Mode",
+                     "Diff. in Means", "P-value", "Paired P-value"]
 
 #: The leading columns shown hierarchically (sparsified), as `COMPARISON_LEAD`.
-DIRECTION_LEAD = DIRECTION_COLUMNS[:10]
+DIRECTION_LEAD = DIRECTION_COLUMNS[:8]
+
+#: ``{column: block depth}`` of the direction table's spread cells (`_spread_cells`).
+_DIRECTION_DEPTHS = {"Model Family": 1, "Comparison": 2, "Arms A": 3, "Arms B": 4,
+                     "# Total HP A vs B": 4}
 
 #: A pairing enters the table only when its exact arm-relabelling null has at least this many
 #: labellings: the two-sided floor ``2 / n`` must reach 0.05, else no outcome can be significant.
 DIRECTION_MIN_LABELINGS = 40
 
 #: `transfer_headline.arm_family_test` statistic -> its ``Treatment Effect Mode`` cell.
-DIRECTION_MODES = {"exceed. frac": "Exceed. frac.", "rel. effect": EFFECT_RELATIVE}
+DIRECTION_MODES = {"mean gap": EFFECT_SHORT, "rel. effect": EFFECT_RELATIVE}
 
 #: The ``Paired P-value`` cell of an unpaired pairing.
 NO_PAIRED = "–"
@@ -1614,13 +1771,31 @@ NO_PAIRED = "–"
 _DIRECTION_P = ["P-value", "Paired P-value"]
 _TEX_HEADER_BREAKS["Paired P-value"] = ["Paired", "P-value"]
 _TEX_RIGHT.add("Paired P-value")
+_TEX_LEFT.add("Comparison")
+
+
+def _comparison_parts(text: str) -> list[str]:
+    """A ``Comparison`` cell over rows: any ``"...:"`` qualifier, then ``"A vs"``, then ``"B"``
+    (``"Matched model pairs: small to large vs large to small"`` -> ``["Matched model pairs:",
+    "small to large vs", "large to small"]``)."""
+    head, colon, rest = str(text).rpartition(": ")
+    left, vs, right = (rest if colon else str(text)).partition(" vs ")
+    parts = [f"{head}:"] if colon else []
+    return [*parts, f"{left} vs", right] if vs else [*parts, left]
+
+
+_PART_SPLITTERS["Comparison"] = _comparison_parts
 
 _DIRECTION_CAPTION = (
     "\\textbf{Relative strength of transfer by direction and data order across model sizes and "
-    "architectures.} Each arm is summarised against its own matched controls (exceedance "
-    "fraction, and mean gap over the receiver prior); arm sets are compared with the exact "
+    "architectures.} All arms are dog. Each arm is summarised against its own matched "
+    "controls by its mean gap $\\Delta=$p(student) - p(control) over runs, and by $\\Delta/$prior "
+    "(the gap over the receiver prior); arm sets are compared with the exact "
     "arm-relabelling permutation test, two-sided; the paired column is the exact sign-flip test "
-    "over model pairs where arms pair by model identity. Bold = $p < 0.05$.")
+    "over model pairs where arms pair by model identity, filled only when the pairs give at least "
+    "40 sign vectors. Pythia small-to-large arms are restricted to the shared top-5 teachers "
+    "(the five strongest senders) $\\times$ core30 so that they are exchangeable; large-to-small "
+    "arms keep their registered teachers. Bold = $p < 0.05$.")
 
 
 @dataclass(frozen=True)
@@ -1629,9 +1804,12 @@ class DirectionPairing:
 
     Attributes:
         family: ``Model Family`` cell.
-        condition_a, condition_b: ``Pretraining Condition A`` / ``B`` cells.
+        condition_a, condition_b: The two sides' conditions (notes).
         arms_a, arms_b: The xarch registry arm names of each side.
         paired: Arms pair by index (model identity): the sign-flip column is filled.
+        teachers: ``{arm name: teacher tags}`` restriction handed to
+            `transfer_headline.arm_family_test` (arms not named keep their registered teachers).
+        note: A table-notes bullet for this pairing (`direction_notes`).
     """
 
     family: str
@@ -1640,32 +1818,98 @@ class DirectionPairing:
     arms_a: tuple[str, ...]
     arms_b: tuple[str, ...]
     paired: bool = False
+    teachers: Mapping[str, tuple[str, ...]] = field(default_factory=dict, compare=False,
+                                                    hash=False)
+    note: str = ""
+    comparison: str = ""
+
+    @property
+    def comparison_text(self) -> str:
+        """The ``Comparison`` cell: `comparison`, else ``"<A> vs <b>"``."""
+        b = self.condition_b
+        return self.comparison or comparison_text(self.condition_a, b)
 
     @property
     def n_labelings(self) -> int:
         """Labellings of the exact arm-relabelling null, ``C(n_A + n_B, n_A)``."""
         return math.comb(len(self.arms_a) + len(self.arms_b), len(self.arms_a))
 
+    @property
+    def n_sign_flips(self) -> int:
+        """Labellings of the exact sign-flip null of a paired pairing, ``2^k``."""
+        return 2 ** len(self.arms_a) if self.paired else 0
 
-def direction_pairings() -> list[DirectionPairing]:
-    """The four direction pairings, in display order: Pythia → OLMo vs OLMo → Pythia over the
-    3×3 seed grid (paired by model pair), then the cross-width 160M ↔ 410M arms by direction
-    within each data order, then same vs different data order over both directions (unpaired)."""
-    w = th.XWIDTH_ARMS
+
+def direction_pairings(arms_json: str | Path | Mapping, *,
+                       finished: Callable[[str], bool] | None = None,
+                       output_root: Path | None = None) -> list[DirectionPairing]:
+    """The direction pairings, in display order: Pythia → OLMo vs OLMo → Pythia over the 3×3
+    seed grid (paired by model pair); then over the FINISHED cross-width 160M ↔ 410M arms of
+    `transfer_headline.xwidth_arms` (data orders pooled): small to large vs large to small
+    (unpaired), the same on matched model pairs (`transfer_headline.xwidth_matched_pairs`,
+    paired), and same vs different data order over both directions (unpaired).
+
+    Every 160m-sender arm is summarised on the teachers ALL small-to-large arms share (the
+    ``top5`` arm's five strongest senders × core30), so the small-to-large arms are exchangeable
+    under the arm-relabelling null; 410m-sender arms keep their registered (per-base) teachers.
+
+    Args:
+        arms_json: The xarch registry (path, or the parsed dict).
+        finished: ``name -> finished on disk``; defaults to a `registry_headline_arms` read
+            with diverged runs excluded (`arm_family_test`'s rule).
+        output_root: Output tree root of the default `finished` check.
+    """
+    reg = th._registry(arms_json)
+    if finished is None:
+        finished = th._finished_check(arms_json, output_root, th.DIVERGED_EXCLUDE)
+    w = {k: tuple(n for n in v if finished(n))
+         for k, v in th.xwidth_arms(reg, finished=finished).items()}
+    up = tuple(n for n in _reg_order(reg) if n in w["same", "up"] + w["different", "up"])
+    down = tuple(n for n in _reg_order(reg) if n in w["same", "down"] + w["different", "down"])
+    teachers = {a["name"]: tuple(a["teachers"]) for a in reg["arms"]}
+    shared = (tuple(t for t in teachers[up[0]] if all(t in teachers[n] for n in up))
+              if up else ())
+    restrict = {n: shared for n in up}
+    pairs = th.xwidth_matched_pairs(reg, up, down)
+    same = w["same", "up"] + w["same", "down"]
+    diff = w["different", "up"] + w["different", "down"]
+    split = (f"the per-data-order direction splits are not tabled: same data order has "
+             f"{len(w['same', 'up'])} vs {len(w['same', 'down'])} arms "
+             f"({math.comb(len(same), len(w['same', 'up']))} labellings); different data order "
+             f"({len(w['different', 'up'])} vs {len(w['different', 'down'])}) is subsumed by "
+             f"the pooled small-to-large vs large-to-small row")
     size = "Diff. model size"
     return [
         DirectionPairing("Pythia/OLMo Cross Arch.", "Small to large", "Large to small",
                          *th.XARCH_DIRECTION_ARMS, paired=True),
-        DirectionPairing("Pythia", f"{size}, same data order, small to large",
-                         f"{size}, same data order, large to small",
-                         w["same", "up"], w["same", "down"]),
-        DirectionPairing("Pythia", f"{size}, diff. data order, small to large",
-                         f"{size}, diff. data order, large to small",
-                         w["different", "up"], w["different", "down"]),
+        DirectionPairing("Pythia", "Small to large", "Large to small", up, down,
+                         teachers=restrict, note=split),
+        DirectionPairing("Pythia", "Small to large, matched model pairs",
+                         "Large to small, matched model pairs",
+                         tuple(u for u, _ in pairs), tuple(d for _, d in pairs), paired=True,
+                         teachers=restrict,
+                         comparison="Matched model pairs: small to large vs large to small"),
         DirectionPairing("Pythia", f"{size}, same data order", f"{size}, diff. data order",
-                         w["same", "up"] + w["same", "down"],
-                         w["different", "up"] + w["different", "down"]),
+                         same, diff, teachers=restrict, comparison="Same vs diff. data order"),
     ]
+
+
+def _reg_order(reg: Mapping) -> list[str]:
+    """The registry's arm names in order."""
+    return [a["name"] for a in reg["arms"]]
+
+
+def direction_results(arms_json: str | Path, pairings: Sequence[DirectionPairing], *,
+                      min_labelings: int = DIRECTION_MIN_LABELINGS,
+                      output_root: Path | None = None
+                      ) -> list[tuple[DirectionPairing, dict | None]]:
+    """``(pairing, transfer_headline.arm_family_test result)`` per pairing, the pairing's
+    teacher restriction applied; a pairing failing the labelling rule is never tested
+    (``None``)."""
+    return [(p, th.arm_family_test(arms_json, p.arms_a, p.arms_b, paired=p.paired,
+                                   teachers=p.teachers, output_root=output_root)
+             if direction_kept(p, min_labelings=min_labelings) else None)
+            for p in pairings]
 
 
 def direction_kept(pairing: DirectionPairing, *,
@@ -1687,7 +1931,8 @@ def direction_table(results: Sequence[tuple[DirectionPairing, Mapping | None]], 
                     ) -> tuple[pd.DataFrame, list[DirectionPairing]]:
     """The direction table: per kept pairing two rows (`DIRECTION_MODES`), the arm-set
     difference in means (A − B) with its two-sided exact p, and the paired sign-flip p when the
-    pairing is paired (`NO_PAIRED` otherwise).
+    pairing is paired AND its ``2^k`` sign vectors reach `min_labelings` (`NO_PAIRED`
+    otherwise).
 
     Args:
         results: ``(pairing, transfer_headline.arm_family_test result)`` in display order; the
@@ -1709,14 +1954,13 @@ def direction_table(results: Sequence[tuple[DirectionPairing, Mapping | None]], 
         for stat, mode in DIRECTION_MODES.items():
             t1, t2 = res["test1"].get(stat), res["test2"].get(stat)
             p = t1.p_two_sided if t1 is not None else np.nan
-            paired_p = (t2.p_two_sided if t2 is not None else np.nan) if pairing.paired \
-                else NO_PAIRED
+            paired_p = ((t2.p_two_sided if t2 is not None else np.nan)
+                        if pairing.n_sign_flips >= min_labelings else NO_PAIRED)
             rows.append({
-                "Model Family": pairing.family, "Pretraining Condition A": pairing.condition_a,
-                "Pretraining Condition B": pairing.condition_b, "Arms A": arms_a,
-                "Arms B": arms_b, "# Arms A vs B": f"{len(prod_a)} vs {len(prod_b)}",
+                "Model Family": pairing.family, "Comparison": pairing.comparison_text,
+                "Arms A": arms_a, "Arms B": arms_b,
+                "# Arms A vs B": f"{len(prod_a)} vs {len(prod_b)}",
                 **comparison_hp_cells(prod_a, prod_b),
-                "Animal": " + ".join(dict.fromkeys(arms["animal"])),
                 "Treatment Effect Mode": mode,
                 "Diff. in Means": t1.observed if t1 is not None else np.nan,
                 "P-value": p, "Paired P-value": paired_p, "p": p, "paired p": paired_p})
@@ -1725,27 +1969,40 @@ def direction_table(results: Sequence[tuple[DirectionPairing, Mapping | None]], 
 
 
 def direction_notes(dropped: Sequence[DirectionPairing], *,
+                    pairings: Sequence[DirectionPairing] = (),
                     min_labelings: int = DIRECTION_MIN_LABELINGS) -> list[str]:
-    """The rule, the unpaired column, and one bullet per pairing the rule dropped."""
+    """The rule, the unpaired column, the teacher restriction, one bullet per pairing the rule
+    dropped, and -- over `pairings` -- each paired pairing whose sign-flip null is below the
+    floor and each pairing's own `DirectionPairing.note`."""
     out = [f"a pairing enters only when its exact arm-relabelling null has at least "
            f"{min_labelings} labellings (two-sided floor 2/n ≤ 0.05); with fewer, no outcome "
            f"can reach p < 0.05",
            f"Paired P-value is the exact sign-flip test over arms paired by model identity; "
-           f"{NO_PAIRED} = the two arm sets do not pair"]
+           f"{NO_PAIRED} = the two arm sets do not pair, or the pairs are too few for the "
+           f"same floor (2^k ≥ {min_labelings})",
+           "Pythia: every small-to-large (160M-sender) arm is summarised on the teachers all "
+           "of them share (the top-5 arm's five strongest senders × core30), so those arms are "
+           "exchangeable; large-to-small arms keep their registered per-base teachers"]
     out += [f"dropped {p.family}: {p.condition_a} ({len(p.arms_a)} arm"
             f"{'s' * (len(p.arms_a) != 1)}) vs {p.condition_b} ({len(p.arms_b)} arm"
             f"{'s' * (len(p.arms_b) != 1)}) -- {p.n_labelings} labellings, floor "
             f"{2 / p.n_labelings:.2g}" for p in dropped]
+    out += [f"{p.family}, {p.condition_a} vs {p.condition_b}: {len(p.arms_a)} pairs give "
+            f"2^{len(p.arms_a)} = {p.n_sign_flips} sign-flip labellings, below the floor of "
+            f"{min_labelings}; Paired P-value {NO_PAIRED}"
+            for p in pairings if p.paired and p.n_sign_flips < min_labelings
+            and p not in dropped]
+    out += [p.note for p in pairings if p.note]
     return out
 
 
 def style_direction_table(df: pd.DataFrame):
-    """Styler for `direction_table`, the conventions of `style_comparison_table`: the first six
+    """Styler for `direction_table`, the conventions of `style_comparison_table`: the first five
     levels as a MultiIndex, a divider above each pairing, p's bold on green below
     `transfer_significance_io.SIG_ALPHA`."""
-    keys = _comparison_blocks(df)
+    keys = list(zip(df["Model Family"], df["Comparison"]))
     first = np.array([i == 0 or keys[i] != keys[i - 1] for i in range(len(keys))], dtype=bool)
-    depth = 6
+    depth = 5
     show = _shown(df, DIRECTION_LEAD, depth, ["p", "paired p"])
     green = "font-weight: bold; background-color: rgba(120, 200, 120, 0.35)"
     divider = "border-top: 2px solid currentColor"
@@ -1791,8 +2048,8 @@ def direction_table_latex(df: pd.DataFrame, *, caption: str = _DIRECTION_CAPTION
         A complete ``table`` environment, newline-terminated.
     """
     lead = sparsify(df, DIRECTION_LEAD)
-    slots, keys, spread = _spread_cells(df, DIRECTION_LEAD, _COMPARISON_DEPTHS)
-    spec = r"@{}l l l l l l r r l l l r r r@{}"
+    slots, keys, spread = _spread_cells(df, DIRECTION_LEAD, _DIRECTION_DEPTHS)
+    spec = r"@{}l l l l l r r r l r r r@{}"
     lines = [r"% requires \usepackage{booktabs,graphicx}", r"\begin{table}[!hp]", r"\centering",
              r"\scriptsize", _TABCOLSEP, _RESIZEBOX,
              rf"\begin{{tabular}}{{{spec}}}", r"\toprule",
@@ -1800,14 +2057,14 @@ def direction_table_latex(df: pd.DataFrame, *, caption: str = _DIRECTION_CAPTION
     for slot, i in enumerate(slots):
         if slot and keys[slot][0] != keys[slot - 1][0]:
             lines.append(r"\midrule")
-        elif slot and keys[slot][:3] != keys[slot - 1][:3]:
-            lines.append(rf"\cmidrule(l){{4-{len(DIRECTION_COLUMNS)}}}")
+        elif slot and keys[slot][:2] != keys[slot - 1][:2]:
+            lines.append(rf"\cmidrule(l){{3-{len(DIRECTION_COLUMNS)}}}")
         values = lead[i] if i is not None else [""] * len(DIRECTION_LEAD)
         cells = _tex_lead_cells(DIRECTION_LEAD, values, slot, i, spread)
         if i is None:
             cells += [""] * (len(DIRECTION_COLUMNS) - len(DIRECTION_LEAD))
         else:
-            cells += [_direction_cell(df, c, i) for c in DIRECTION_COLUMNS[10:]]
+            cells += [_direction_cell(df, c, i) for c in DIRECTION_COLUMNS[len(DIRECTION_LEAD):]]
         lines.append(" & ".join(cells) + r" \\")
     lines += [r"\bottomrule", r"\end{tabular}}",
               rf"\caption{{{caption}}}", rf"\label{{{label}}}", r"\end{table}"]

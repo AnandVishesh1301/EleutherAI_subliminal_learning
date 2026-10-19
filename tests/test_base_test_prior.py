@@ -11,6 +11,7 @@ from scripts import base_test_prior as btp
 from subliminal_learning.analysis import transfer_factors as tf
 from subliminal_learning.analysis.frames import load_base_prior
 from subliminal_learning.models.registry import LOCAL_PYTHIA_FAMILIES
+from subliminal_learning.models.naming import base_spec
 from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
 
 
@@ -51,9 +52,16 @@ def test_base_eval_short_resolves_every_receiver_dir_name(base_dir, short):
 
 
 def test_base_eval_short_410m_specs_spell_the_same_short():
-    for token, short in (("pythia-410m", "p410m"), ("pythia-410m-seed1", "p410m-seed1")):
+    for token, short in (("pythia-410m", "p410m"), ("pythia-410m-seed1", "p410m-seed1"),
+                         ("pythia-410m-seed2", "p410m-seed2"),
+                         ("pythia-410m-seed3", "p410m-seed3")):
         spec, = parse_base_models(token, allow_full_seeds=True)
         assert tf.base_eval_short(spec_label(spec)) == short
+
+
+def test_base_label_410m_seed3_matches_the_table_key():
+    assert btp.base_label(base_spec("pythia-410m-seed3")) == "pythia-410m-seed3"
+    assert tf.base_eval_short(btp.base_label(base_spec("pythia-410m-seed3"))) == "p410m-seed3"
 
 
 def test_base_eval_short_unknown_raises():

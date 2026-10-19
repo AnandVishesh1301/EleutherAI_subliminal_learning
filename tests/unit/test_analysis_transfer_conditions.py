@@ -12,6 +12,18 @@ from subliminal_learning.analysis import transfer_conditions as tc
 from subliminal_learning.analysis import transfer_headline as th
 from subliminal_learning.analysis import transfer_significance_io as tio
 
+#: A synthetic `th.xwidth_arms` result: `condition_blocks` reads the cross-width sets from the
+#: xarch registry, which the ``/nowhere`` repo of these tests does not have.
+FAKE_XWIDTH = {("same", "up"): ("160m → 410m (dog)",),
+               ("same", "down"): ("410m → 160m (dog)", "410m-seed3 → 160m-seed3 (dog)"),
+               ("different", "up"): ("160m → 410m-seed3 (dog), top5",),
+               ("different", "down"): ("410m → 160m-seed1 (dog)",)}
+
+
+@pytest.fixture(autouse=True)
+def _fake_xwidth(monkeypatch):
+    monkeypatch.setattr(th, "xwidth_arms", lambda *a, **k: FAKE_XWIDTH)
+
 
 def make_matrix(n_cells: int = 3, n_teachers: int = 2, seed: int = 0) -> tio.CellMatrix:
     """A small all-finite `tio.CellMatrix`: teachers well above a low control column."""
@@ -154,8 +166,9 @@ def test_the_existence_caption_is_the_one_liner_pointing_at_the_appendix():
     assert "index range" not in tex                       # the legend lives in the notebook
 
 
-def test_compress_arms_keeps_non_contiguous_families_written_out():
-    assert tc.compress_arms([("160M", "fs1"), ("160M", "fs3")]) == "160M → {fs1, fs3}"
+def test_compress_arms_writes_non_contiguous_seed_families_as_a_comma_list():
+    assert tc.compress_arms([("160M", "fs1"), ("160M", "fs3")]) == "160M → {fs1,3}"
+    assert tc.compress_arms([("160M", "ds1"), ("160M", "ds3")]) == "160M → {ds1, ds3}"
 
 
 def test_compress_arms_prefers_greedy_hubs_over_a_written_out_list():
@@ -174,7 +187,7 @@ def test_compress_arms_still_writes_a_lone_reciprocal_pair_as_an_arrow_pair():
 def test_arms_text_uses_the_condition_name_overrides():
     arms = [arm("dolma → dolma-seed2 (elephant), core35", "elephant"),
             arm("seed2 → orig (elephant), core30", "elephant")]
-    assert tc.arms_text(arms, tc.OLMO_NAMES) == "{Dolma1.7, Dolma1.7 seed2}²"
+    assert tc.arms_text(arms, tc.OLMO_NAMES) == "{Dolma1.7 seed1,2}²"
 
 
 # ------------------------------------------------------------------ cell formatting
@@ -419,21 +432,20 @@ def test_comparison_table_layout_is_per_animal_then_stratified_per_value_mode(mo
     # both sides share the 2 teachers x 3 cells product; the cell factor carries the design
     assert df["# Teacher HP"].iloc[0] == "2" and df["# Student HP"].iloc[0] == "3"
     assert df["# Total HP A vs B"].iloc[0] == "12 vs 6"
-    assert df["Pretraining Condition A"].unique().tolist() == [a]
-    assert df["Pretraining Condition B"].unique().tolist() == [b]
+    assert df["Comparison"].unique().tolist() == [tc.comparison_text(a, b)]
+    assert "Pretraining Condition A" not in df
     assert df["Model Family"].unique().tolist() == ["Pythia"]
     assert df["Arms A"].iloc[0] == "{160M, fs1}"
     assert df["Arms B"].iloc[0] == "160M → ds1"
     assert df["# Arms A vs B"].iloc[0] == "2 vs 1"
-    assert list(df.columns)[:10] == tc.COMPARISON_LEAD
+    assert list(df.columns)[:9] == tc.COMPARISON_LEAD
     assert notes[(a, b, "core30")].startswith("lion orig->fs1: partial coverage")
 
 
 # ------------------------------------------------------------------ comparison LaTeX
 def _comparison_df():
     a, b = tc.COMPARISON_CONDITIONS[0], tc.COMPARISON_CONDITIONS[1]
-    base = {"Model Family": "Pythia", "Pretraining Condition A": a,
-            "Pretraining Condition B": b, "# Arms A vs B": "4 vs 12",
+    base = {"Model Family": "Pythia", "Comparison": tc.comparison_text(a, b), "# Arms A vs B": "4 vs 12",
             "# Teacher HP": "10", "# Student HP": "30 / 56",
             "# Total HP A vs B": "1200 vs 3600",
             "Arms A": "{160M, fs1–3}", "Arms B": "{160M, ds1–3}²"}
@@ -446,22 +458,21 @@ def _comparison_df():
          "Mean P-value": 0.9, "Win Prob.": 0.4, "Win P-value": 0.8, "stratified": True}])
 
 
-def test_comparison_latex_has_fifteen_columns_and_bolds_only_significant_p():
+def test_comparison_latex_has_fourteen_columns_and_bolds_only_significant_p():
     tex = tc.comparison_table_latex(_comparison_df())
     body = [ln for ln in tex.splitlines() if ln.endswith(r"\\")]
     assert len(body) == 4          # the # HP group row, the header row, two data rows
     assert body[0].count(r"\multicolumn{3}{c}{\# HP}") == 1
-    assert r"\cmidrule(lr){7-9}" in tex                 # the # HP group: trimmed both sides
-    assert r"\begin{tabular}{@{}l l l l l l r r l l l r r r r@{}}" in tex
+    assert r"\cmidrule(lr){6-8}" in tex                 # the # HP group: trimmed both sides
+    assert r"\begin{tabular}{@{}l l l l l r r r l l r r r r@{}}" in tex
     assert r"\setlength{\tabcolsep}{3pt}" in tex and r"\ifdim\width>\textwidth" in tex
     # a right-aligned numeric column's stacked header is right-aligned too
     assert r"\begin{tabular}[c]{@{}r@{}}Mean \\ P-value\end{tabular}" in tex
     # the wide text headers are stacked over two LEFT-aligned lines
-    for parts in (("Model", "Family"), ("Pretraining", "Condition A"),
-                  ("Pretraining", "Condition B"), ("Treatment", "Effect Mode")):
+    for parts in (("Model", "Family"), ("Treatment", "Effect Mode")):
         assert (r"\begin{tabular}[c]{@{}l@{}}%s \\ %s\end{tabular}" % parts) in tex
     for line in body[1:]:
-        assert len(line.removesuffix(r"\\").split(" & ")) == 15
+        assert len(line.removesuffix(r"\\").split(" & ")) == 14
     body_tex = "\n".join(body)
     assert body_tex.count(r"\textbf{") == 2   # the 1e-4 and the 0.02 only (the caption bolds too)
     assert r"\textbf{1e-4}" in tex and r"\textbf{0.02}" in tex
@@ -475,7 +486,8 @@ def test_comparison_latex_has_fifteen_columns_and_bolds_only_significant_p():
     assert r"\begin{tabular}[t]" not in tex      # body cells are spread over rows, not stacked
     rows = [ln.removesuffix(r"\\").split(" & ") for ln in body][2:]
     assert [r[0].strip() for r in rows] == ["Pythia", ""]     # block label on the first row only
-    assert [r[3].strip() for r in rows] == [r"\{160M, fs1--3\}", ""]
+    assert [r[2].strip() for r in rows] == [r"\{160M, fs1--3\}", ""]
+    assert rows[0][1].strip() and len(rows[0][1].split()) <= 2     # Comparison: <= 2 words/line
     assert tex.count(r"$\Delta$") >= 1 and "p_{\\mathrm{student}}" not in tex
     assert r"$\Delta$ / prior" in tex
     assert "Exceedance" not in tex and "Design" not in tex
@@ -483,7 +495,7 @@ def test_comparison_latex_has_fifteen_columns_and_bolds_only_significant_p():
 
 def test_style_comparison_table_hides_the_leading_grouping_columns():
     styled = tc.style_comparison_table(_comparison_df())
-    assert styled.data.index.names[:-1] == tc.COMPARISON_LEAD[:6]
+    assert styled.data.index.names[:-1] == tc.COMPARISON_LEAD[:5]
     assert "Animal" in tc.COMPARISON_LEAD and "Treatment Effect Mode" not in tc.COMPARISON_LEAD
     assert ("", "Diff. in Means") in styled.data.columns
     assert (tc.HP_GROUP, "Teacher") in styled.data.columns
@@ -509,6 +521,7 @@ def test_cross_architecture_conditions_read_the_seed_grids(monkeypatch):
     tc.condition_blocks(Path("/nowhere"), {a: ["t"] for a in ("dog", "cat", "lion", "pig")})
     asked = [n for names in seen.values() for n in names]
     assert list(th.XARCH_DIRECTION_ARMS[0]) in asked and list(th.XARCH_DIRECTION_ARMS[1]) in asked
+    assert all(list(v) in asked for v in FAKE_XWIDTH.values())      # the registry-driven sets
     flat = [n for names in asked for n in names]
     assert "OLMo-1B → 160m (dog), core30, seed-robust 8" in flat
     assert "OLMo-1B → 160m (dog), core30" not in flat
@@ -795,7 +808,7 @@ def test_comparison_latex_rules_a_full_midrule_at_the_model_family_change():
     tex = tc.comparison_table_latex(df)
     body = [ln for ln in tex.splitlines() if ln.endswith(r"\\")]
     for line in body[1:]:
-        assert len(line.removesuffix(r"\\").split(" & ")) == 15
+        assert len(line.removesuffix(r"\\").split(" & ")) == 14
     lines = tex.splitlines()
     head = lines.index(r"\midrule")                      # the one under the header
     assert r"\midrule" in lines[head + 1:]               # plus one at the family change
@@ -888,12 +901,9 @@ def test_the_comparison_caption_is_the_relative_strength_paragraph():
     tex = tc.comparison_table_latex(_comparison_df())
     assert (r"\caption{\textbf{Relative Strength of transfer between pretraining conditions.} "
             r"We compare pretraining conditions") in tex
-    assert ("the sign of the Difference in Means (or the Win Probability above or below 0.5) "
-            "determines which pretraining condition transfers more strongly: a positive "
-            "difference (Win Probability above 0.5) means A is stronger, statistically "
-            "significant or not.") in tex
-    assert r"computing both Difference in Means and Win Probability statistics on both " \
-           r"($\Delta=$p(student) - p(control)) and $\Delta/$prior." in tex
+    assert "the sign of the Difference in Means" not in tex
+    assert r"computing Difference in Means and Win Probability statistics on both " \
+           r"($\Delta=$p(student) - p(control)) and $\Delta/$prior. Bold = two-sided $p < 0.05$}" in tex
     assert r"Bold = two-sided $p < 0.05$}" in tex             # no trailing period, as given
     assert r"\label{tab:transfer_comparison}" in tex
     assert "arm-relabelling null within" not in tex           # the old legend is gone
@@ -926,3 +936,75 @@ def test_render_script_exits_when_a_pickle_is_missing(tmp_path):
 
     with pytest.raises(rt.typer.Exit):
         rt.main(latex_dir=tmp_path)
+
+
+def test_set_notation_folds_olmo_seeds_with_the_default_as_seed1():
+    assert tc._set_notation(["Dolma1.7", "Dolma1.7 seed2", "Dolma1.7 seed3"]) == [
+        "Dolma1.7 seed1–3"]
+    assert tc._set_notation(["Dolma1.7", "Dolma1.7 seed2"]) == ["Dolma1.7 seed1,2"]
+    assert tc._set_notation(["DCLM", "DCLM seed2"]) == ["DCLM seed1,2"]
+    assert tc._set_notation(["Dolma1.7"]) == ["Dolma1.7"]          # a lone default stays
+    assert tc.compress_arms([("Dolma1.7", "Dolma1.7")]) == "Dolma1.7"
+    grid = [(s, r) for s in ("160M", "fs1", "fs3")
+            for r in ("Dolma1.7", "Dolma1.7 seed2", "Dolma1.7 seed3")]
+    assert tc.compress_arms(grid) == "{160M, fs1,3} → Dolma1.7 seed1–3"
+
+
+def test_set_notation_folds_pythia_seed_families_at_two_unlabelled_model_separate():
+    assert tc._set_notation(["410M-seed1", "410M-seed3"]) == ["410M-seed1,3"]
+    assert tc._set_notation(["410M", "410M-seed1", "410M-seed3"]) == ["410M", "410M-seed1,3"]
+    assert tc._set_notation(["fs1", "fs2"]) == ["fs1,2"]
+    assert tc._set_text(["160M", "fs1", "fs3"]) == "{160M, fs1,3}"
+    assert tc._set_text(["410M-seed1", "410M-seed2", "410M-seed3"]) == "{410M-seed1–3}"
+    # families that are not seed-labelled keep the three-member rule
+    assert tc._set_notation(["wc1", "wc2"]) == ["wc1", "wc2"]
+    assert tc._set_notation(["ds1", "ds2", "ds3"]) == ["ds1–3"]
+
+
+def test_olmo_cross_recipe_block_factors_the_receiver_seed():
+    corpora = ["DCLM", "Dolma1.7", "C4"]
+    full = [(a, f"{b} seed2") for a in corpora for b in corpora if a != b]
+    assert tc.compress_arms(full) == "{DCLM, Dolma1.7, C4}² → seed2"
+    partial = [(a, f"{b} seed2") for a in ("Dolma1.7", "DCLM", "C4") for b in ("Dolma1.7", "DCLM")]
+    assert tc.compress_arms(partial) == "{Dolma1.7, DCLM, C4} → {Dolma1.7, DCLM} seed2"
+    assert tc._tex(tc.compress_arms(full)) == r"\{DCLM, Dolma1.7, C4\}$^{2}$ $\to$ seed2"
+    assert "seed k" in tc.SEED_FACTOR_NOTE
+
+
+def test_same_corpus_olmo_arm_drops_the_receiver_corpus():
+    assert tc.compress_arms([("Dolma1.7", "Dolma1.7 seed2")]) == "Dolma1.7 → seed2"
+    assert tc.compress_arms([("Dolma1.7", "Dolma1.7 seed2"),
+                             ("Dolma1.7", "Dolma1.7 seed3")]) == "Dolma1.7 → seed2,3"
+    assert tc.compress_arms([("Dolma1.7 seed2", "Dolma1.7")]) == "Dolma1.7 seed2 → Dolma1.7"
+
+
+def test_fit_lines_wraps_conditions_to_two_words_within_the_block_height():
+    assert tc._fit_lines(["Diff. init", "Diff. data order"], 4) == [
+        "Diff. init", "Diff. data", "order"]
+    # a block of two rows never grows past the existing comma break
+    assert tc._fit_lines(["Diff. init", "Diff. data order"], 1) == [
+        "Diff. init", "Diff. data order"]
+    assert tc._total_parts("3360 vs 2160") == ["3360", "vs 2160"]
+
+
+def test_same_corpus_olmo_arms_to_one_seed_fold_into_one_set():
+    arms = [("Dolma1.7", "Dolma1.7 seed2"), ("DCLM", "DCLM seed2"), ("C4", "C4 seed2")]
+    assert tc.compress_arms(arms) == "{Dolma1.7, DCLM, C4} → seed2"
+    assert tc.seed_factor_notes(["{Dolma1.7, DCLM, C4} → seed2"]) == [tc.SEED_FACTOR_NOTE]
+    assert "each corpus of S to its own seed-k model" in tc.SEED_FACTOR_NOTE
+
+
+def test_two_seeds_are_a_comma_list_three_a_range():
+    assert tc._set_notation(["fs2", "fs3"]) == ["fs2,3"]
+    assert tc._set_notation(["410M-seed2", "410M-seed3"]) == ["410M-seed2,3"]
+    assert tc._set_notation(["fs1", "fs2", "fs3"]) == ["fs1–3"]
+    assert tc._index_runs([1, 2, 4]) == "1,2,4"
+
+
+def test_split_set_never_cuts_folded_seed_list():
+    from subliminal_learning.analysis.transfer_conditions import _split_set
+
+    assert _split_set("{410M, 410M-seed2,3} →") == ["{410M,", "410M-seed2,3} →"]
+    parts = _split_set("{160M, fs1,2, fs3, rerun 160M}")
+    assert all(not p.endswith("fs1,") for p in parts) and " ".join(parts).count("fs1,2") == 1
+    assert _split_set("{160M, fs1–3, ds1, ds2, rerun 160M}") == ["{160M, fs1–3, ds1,", "ds2, rerun 160M}"]

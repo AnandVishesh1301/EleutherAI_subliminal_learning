@@ -1,0 +1,163 @@
+animal,A,B,block,design,step,n paired slots,contrast,contrast lo,contrast hi,p_two_sided,tested
+dog,orig,fs1,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,625,100,-0.005864073938196816,-0.007147251536945624,-0.0046465339695970775,,True
+dog,orig,fs1,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,1250,100,-0.00937657178021932,-0.010819605197716188,-0.008063905200894433,,True
+dog,orig,fs1,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,1875,100,-0.009718546237852108,-0.012401887182932643,-0.00739305390585641,,True
+dog,orig,fs1,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,2500,100,-0.011756573479807037,-0.013891526271664706,-0.009702282871841718,,True
+dog,orig,fs1,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,3125,100,-0.011845349133385237,-0.014466410150212926,-0.008989388955448286,,True
+dog,orig,fs1,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,3750,100,-0.011739802924509548,-0.014836950872879652,-0.00889241483072586,,True
+dog,orig,fs1,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,6250,100,-0.013292705316865943,-0.015349133431448534,-0.010884175059672858,,True
+dog,orig,fs1,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,12500,100,-0.019434676496741354,-0.022847839056956934,-0.015656819652608865,,True
+dog,orig,fs1,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,25000,100,-0.026275826096418865,-0.03511081440075239,-0.018064229592335914,,True
+dog,orig,fs2,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,625,100,-0.002608568530704361,-0.0038427452911794537,-0.0014970956949765248,,True
+dog,orig,fs2,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,1250,100,-0.0021711714096962166,-0.0030117638967169617,-0.0013899159920343015,,True
+dog,orig,fs2,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,1875,100,-0.0022295481073721017,-0.003291735397019233,-0.0014188291906341872,,True
+dog,orig,fs2,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,2500,100,-0.0020858351154274596,-0.0038410646783334597,-0.0004586358178667256,,True
+dog,orig,fs2,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,3125,100,-0.0021402848397391832,-0.004390690221865271,-0.00016784235924063496,,True
+dog,orig,fs2,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,3750,100,-0.002161421705520539,-0.0036045218958308325,-0.0009058133975320798,,True
+dog,orig,fs2,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,6250,100,-0.002876504700233153,-0.00559391331719009,-0.0005656375317365955,,True
+dog,orig,fs2,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,12500,100,-0.0042873841535852365,-0.011281509526452021,0.0015774225728941642,,True
+dog,orig,fs2,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,25000,100,-0.02300280561948195,-0.03468542239212334,-0.01260867978930573,,True
+dog,orig,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,625,100,-0.004889262990141287,-0.0065135363291863166,-0.003429632573105483,,True
+dog,orig,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,1250,100,-0.006624321675861756,-0.010022074776361642,-0.0035350211353771003,,True
+dog,orig,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,1875,100,-0.012808815344823737,-0.017880261102342483,-0.00871443202726813,,True
+dog,orig,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,2500,100,-0.012172163930664854,-0.016329341424118383,-0.008461802664488727,,True
+dog,orig,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,3125,100,-0.015037961635983995,-0.02078610562379404,-0.010233966661939408,,True
+dog,orig,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,3750,100,-0.016023989376962866,-0.022592897185518445,-0.010416307533197264,,True
+dog,orig,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,6250,100,-0.01925154960129157,-0.029606480529876644,-0.011673493630177915,,True
+dog,orig,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,12500,100,-0.032029415289569,-0.0528246845219562,-0.013577163509909647,,True
+dog,orig,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,25000,100,-0.07336347159161291,-0.10483271304681867,-0.04131593868579761,,True
+dog,fs1,fs2,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,625,100,0.0011898864675895311,0.00044246865062617854,0.0020011165949174025,,True
+dog,fs1,fs2,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,1250,100,0.001362881843579453,0.0004889012220426687,0.002030547778451182,,True
+dog,fs1,fs2,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,1875,100,0.0029614939451264033,0.002108052874461925,0.0038695002936857846,,True
+dog,fs1,fs2,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,2500,100,0.002792831768709834,0.0019380346788707811,0.0037112623371254047,,True
+dog,fs1,fs2,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,3125,100,0.0014388392480663471,0.000685492252783797,0.002215892318317984,,True
+dog,fs1,fs2,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,3750,100,0.001534047360090676,0.00041712141432117725,0.0026508850094740057,,True
+dog,fs1,fs2,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,6250,100,0.0013212482548816953,-0.0006011702728358889,0.0031258520308229164,,True
+dog,fs1,fs2,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,12500,100,-0.0018982896313700713,-0.005271520681982633,0.0010955762027350946,,True
+dog,fs1,fs2,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,25000,100,-0.008397226913996405,-0.014135074301747335,-0.00342725340128112,,True
+dog,fs1,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,625,100,0.00291913289544318,0.0020821600715741078,0.003862046463667793,,True
+dog,fs1,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,1250,100,0.004583028585206114,0.003726578213467309,0.005459855178799116,,True
+dog,fs1,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,1875,100,0.004590436293717084,0.0037311776404766795,0.005414709202337028,,True
+dog,fs1,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,2500,100,0.003920787194148205,0.003069319410636873,0.0047240788300902305,,True
+dog,fs1,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,3125,100,0.0042448646318931004,0.0035203361606769065,0.004897527194217223,,True
+dog,fs1,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,3750,100,0.0006131979701329607,-0.00017359203059014972,0.0012318494298728603,,True
+dog,fs1,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,6250,100,0.0019613457376599992,0.0010507175201010153,0.002821606137562389,,True
+dog,fs1,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,12500,100,0.0023435882364113343,0.0007682542170672485,0.0042618172280847934,,True
+dog,fs1,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,25000,100,0.0005516490873735591,-0.0035998610027936106,0.005166881009601196,,True
+dog,fs2,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,625,100,0.0026237438598443984,0.001349509142485186,0.003932384531519493,,True
+dog,fs2,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,1250,100,0.005973605443609995,0.004411307947940441,0.008222169546385777,,True
+dog,fs2,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,1875,100,0.0023477416380414074,0.0009128985878687585,0.0035567943040950385,,True
+dog,fs2,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,2500,100,0.0018739124271194038,2.8025736153758618e-05,0.003782424739319939,,True
+dog,fs2,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,3125,100,0.0013729995256672504,-0.0006667335319364259,0.003549025048871679,,True
+dog,fs2,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,3750,100,0.0008517694031712379,-0.0010138933002767061,0.002956593914159408,,True
+dog,fs2,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,6250,100,0.001338160908374687,-0.0006246017734340088,0.003410300188930741,,True
+dog,fs2,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,12500,100,0.0035853901454584378,-5.7724759764545777e-05,0.007643593664633034,,True
+dog,fs2,fs3,"diff init, diff data order: orig, fs1–fs3",core30 stride-3 · per-step control,25000,100,0.017772099713821973,0.009035672292177188,0.02881203332624465,,True
+dog,orig,ds1,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,625,100,-0.004094554822909413,-0.006858617309749243,-0.001887640178873845,,True
+dog,orig,ds1,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,1250,100,-0.007511662074074524,-0.013177014527093273,-0.0018105160712086666,,True
+dog,orig,ds1,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,1875,100,-0.011979055713209614,-0.016756997315397093,-0.007191225023149568,,True
+dog,orig,ds1,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,2500,100,-0.011665491188322833,-0.01867467628573248,-0.004891179961789687,,True
+dog,orig,ds1,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,3125,100,-0.014364456181379787,-0.02519815306442391,-0.006007395291548645,,True
+dog,orig,ds1,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,3750,100,-0.02231786582114089,-0.0297044600403689,-0.015033343731240269,,True
+dog,orig,ds1,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,6250,100,-0.03487392951369313,-0.04821572999271382,-0.020637529078212476,,True
+dog,orig,ds1,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,12500,100,-0.04534118611509113,-0.06906685940063913,-0.021305992676429998,,True
+dog,orig,ds1,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,25000,100,-0.08481978846242602,-0.12881816797948334,-0.04162177148563276,,True
+dog,orig,ds2,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,625,100,0.0006372222496109318,-0.0010058305345479316,0.0022451350787480607,,True
+dog,orig,ds2,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,1250,100,0.0014236311104352229,-0.001994894817473317,0.005422421032076522,,True
+dog,orig,ds2,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,1875,100,0.0023143042795401017,-0.0005236140879782037,0.0053848189533866565,,True
+dog,orig,ds2,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,2500,100,0.003846794534806525,0.0017922661210987066,0.0061941117930800465,,True
+dog,orig,ds2,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,3125,100,0.0007470727502759176,-0.0023870272105692863,0.004249905504981022,,True
+dog,orig,ds2,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,3750,100,0.0027958526342229104,-0.0010287391808561338,0.006743417249323292,,True
+dog,orig,ds2,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,6250,100,0.0007172996954860414,-0.0018313633673941213,0.003553652123111707,,True
+dog,orig,ds2,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,12500,100,0.008025112714842034,-0.0011948078202396427,0.017905115775025498,,True
+dog,orig,ds2,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,25000,100,0.014404196173153364,-0.002513837071567706,0.03561162369542037,,True
+dog,orig,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,625,100,-0.0008632260531827344,-0.003947038025103396,0.001882636499317887,,True
+dog,orig,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,1250,100,-0.006670510297970759,-0.009251796876339431,-0.003411705170591378,,True
+dog,orig,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,1875,100,-0.01775614631283513,-0.027823870613857427,-0.008919495632246907,,True
+dog,orig,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,2500,100,-0.02013175713959231,-0.02943069485012253,-0.010681594260201656,,True
+dog,orig,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,3125,100,-0.023196402062355466,-0.033304173632850556,-0.014472535745638893,,True
+dog,orig,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,3750,100,-0.03042980178537878,-0.04309297468157663,-0.01693067299207256,,True
+dog,orig,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,6250,100,-0.03732218218252842,-0.05021097806095305,-0.025757215585699433,,True
+dog,orig,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,12500,100,-0.06997800824259504,-0.10017747801611122,-0.039422611882766426,,True
+dog,orig,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,25000,100,-0.12408388607933189,-0.1816962891512062,-0.06719146515730517,,True
+dog,ds1,ds2,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,625,100,0.0014222801312280347,-0.001978165926689688,0.0038460473751681236,,True
+dog,ds1,ds2,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,1250,100,0.014035409853572493,0.00935751348106096,0.019422363784184854,,True
+dog,ds1,ds2,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,1875,100,0.01743819553474564,0.0077884303570152575,0.026024454763792074,,True
+dog,ds1,ds2,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,2500,100,0.022317434436639156,0.013624414892774132,0.03139137490311893,,True
+dog,ds1,ds2,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,3125,100,0.030915583862986394,0.020389765649448083,0.0416742899265521,,True
+dog,ds1,ds2,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,3750,100,0.028425100066163073,0.020563109109607257,0.03692218426303325,,True
+dog,ds1,ds2,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,6250,100,0.04314583857770186,0.03302866749426551,0.05411859089421223,,True
+dog,ds1,ds2,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,12500,100,0.08248747964043562,0.061577572591570866,0.10490263307734597,,True
+dog,ds1,ds2,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,25000,100,0.09097001811120384,0.04439804521996563,0.14285386088886923,,True
+dog,ds1,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,625,100,0.002510183915222296,-0.0008202127406111682,0.006442222406105863,,True
+dog,ds1,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,1250,100,-0.00010286644643019826,-0.005849499230031835,0.00596509841921652,,True
+dog,ds1,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,1875,100,0.002148222713987887,-0.007255221652929516,0.011672431211991562,,True
+dog,ds1,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,2500,100,0.008688092709947295,-0.000718592761015692,0.017853534685447946,,True
+dog,ds1,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,3125,100,0.008006962286336647,-0.003874357465336633,0.01903778783707075,,True
+dog,ds1,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,3750,100,0.005147602243822962,-0.0050967637404354315,0.015258699228615594,,True
+dog,ds1,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,6250,100,0.0061224618777010655,-0.0093390011591717,0.020973498335032103,,True
+dog,ds1,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,12500,100,0.01177447903539607,-0.02693590681363379,0.04870334643421655,,True
+dog,ds1,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,25000,100,0.025535905778105994,-0.01803118353892361,0.06500612570086467,,True
+dog,ds2,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,625,100,-0.006740317287147626,-0.012656048008442812,-0.0027293148888817807,,True
+dog,ds2,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,1250,100,-0.01464885940346303,-0.018060031361473883,-0.011312860087132582,,True
+dog,ds2,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,1875,100,-0.015484339588851436,-0.021249513993977523,-0.010886666935225098,,True
+dog,ds2,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,2500,100,-0.015999457434023638,-0.022969743081198236,-0.010237501623232018,,True
+dog,ds2,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,3125,100,-0.01769580678897966,-0.02281962364617653,-0.012156956567657203,,True
+dog,ds2,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,3750,100,-0.020594433471138866,-0.03255369680557083,-0.010386961993722396,,True
+dog,ds2,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,6250,100,-0.020358787333424947,-0.029325018605764776,-0.010842029810191934,,True
+dog,ds2,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,12500,100,-0.03787203548805745,-0.05761769339847748,-0.013953232654905036,,True
+dog,ds2,ds3,"same init, diff data order: orig, ds1–ds3",core30 stride-3 · per-step control,25000,100,-0.0951479305782991,-0.12873820475393083,-0.0627509847896684,,True
+dog,Rerun1234,wc1,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,625,100,-0.005024511390069529,-0.006315369337494303,-0.003859713038563495,,True
+dog,Rerun1234,wc1,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,1250,100,-0.004450422754719606,-0.006496678151365502,-0.0027100346669669596,,True
+dog,Rerun1234,wc1,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,1875,100,-0.004103945948661571,-0.005464765784359556,-0.0027936384956185043,,True
+dog,Rerun1234,wc1,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,2500,100,-0.005677937908393034,-0.00712938470716101,-0.004301919571298306,,True
+dog,Rerun1234,wc1,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,3125,100,-0.006666448542080455,-0.00879811335009344,-0.004848402891665719,,True
+dog,Rerun1234,wc1,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,3750,100,-0.0070406939483883685,-0.008959917635101464,-0.00526478670838284,,True
+dog,Rerun1234,wc1,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,6250,100,-0.008536613707591133,-0.010378885002674103,-0.006952284525397637,,True
+dog,Rerun1234,wc1,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,12500,100,-0.015248967608190198,-0.020560059286892793,-0.010822579445604786,,True
+dog,Rerun1234,wc1,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,25000,100,-0.027265312707761162,-0.03651504596612898,-0.019543294523126597,,True
+dog,Rerun1234,wc2,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,625,100,0.0014224266764606003,0.0007056555234192649,0.0022317958390965583,,True
+dog,Rerun1234,wc2,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,1250,100,0.0010285325334838486,-0.0007222483220880223,0.002721958195845817,,True
+dog,Rerun1234,wc2,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,1875,100,0.0019282076153615203,0.0005085214999988411,0.0034963741893768844,,True
+dog,Rerun1234,wc2,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,2500,100,-0.002130000847520978,-0.0040410560014783915,-0.00016455366086784136,,True
+dog,Rerun1234,wc2,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,3125,100,-0.0015583021651287702,-0.004413418223280391,0.001972403850925494,,True
+dog,Rerun1234,wc2,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,3750,100,-0.0030247202199887853,-0.005105447045416776,-0.000932175372512607,,True
+dog,Rerun1234,wc2,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,6250,100,-0.004772414848789595,-0.008347463758107573,-0.00105311748872353,,True
+dog,Rerun1234,wc2,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,12500,100,-0.009210635393361831,-0.013649113195968688,-0.004925766689618338,,True
+dog,Rerun1234,wc2,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,25000,100,-0.02343854518538417,-0.0310897237447259,-0.016406675666107852,,True
+dog,Rerun1234,Modern1234,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 stride-3 · per-step control,625,100,-0.00024234602916112583,-0.00168436530404866,0.00155841336262827,,True
+dog,Rerun1234,Modern1234,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 stride-3 · per-step control,1250,100,0.0017200877211085742,-0.002882908056743326,0.00637311697201181,,True
+dog,Rerun1234,Modern1234,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 stride-3 · per-step control,1875,100,0.01012384207462783,0.004506703101916829,0.01660638508203671,,True
+dog,Rerun1234,Modern1234,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 stride-3 · per-step control,2500,100,0.0053352345145111025,-0.0002510364439010403,0.010538349972840267,,True
+dog,Rerun1234,Modern1234,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 stride-3 · per-step control,3125,100,0.00750577606342995,0.0018452139935261189,0.012670896070836171,,True
+dog,Rerun1234,Modern1234,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 stride-3 · per-step control,3750,100,0.011496249137021186,0.0021535398133217614,0.02218772766935695,,True
+dog,Rerun1234,Modern1234,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 stride-3 · per-step control,6250,100,0.011605551580707604,0.0018797525629022222,0.021964567843551684,,True
+dog,Rerun1234,Modern1234,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 stride-3 · per-step control,12500,100,-0.04407455108189898,-0.05615283364843773,-0.03306355746837875,,True
+dog,Rerun1234,Modern1234,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 stride-3 · per-step control,25000,100,-0.09078978401965386,-0.11490565161948688,-0.0674015808582474,,True
+dog,Rerun1234,orig,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 stride-3 · per-step control,625,100,0.006301597170344758,0.004673906277172391,0.00786696237870732,,True
+dog,Rerun1234,orig,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 stride-3 · per-step control,1250,100,0.009298008813854779,0.00738098385923442,0.011000216055910705,,True
+dog,Rerun1234,orig,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 stride-3 · per-step control,1875,100,0.013811720291587068,0.010159682341628807,0.017361370303456577,,True
+dog,Rerun1234,orig,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 stride-3 · per-step control,2500,100,0.015948965694229968,0.011872365460917573,0.020292231863727618,,True
+dog,Rerun1234,orig,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 stride-3 · per-step control,3125,100,0.01808990312554763,0.012960824906198935,0.023489003023033066,,True
+dog,Rerun1234,orig,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 stride-3 · per-step control,3750,100,0.02011566194086076,0.01621129700760086,0.023703064913732877,,True
+dog,Rerun1234,orig,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 stride-3 · per-step control,6250,100,0.028700917810928102,0.022762375346303893,0.033856880885885385,,True
+dog,Rerun1234,orig,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 stride-3 · per-step control,12500,100,0.03992880585933141,0.029849829297369915,0.0502416022022131,,True
+dog,Rerun1234,orig,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 stride-3 · per-step control,25000,100,0.060850135298234145,0.04507325171469122,0.07953881645053884,,True
+dog,wc1,wc2,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,625,100,0.00015113242217048526,-0.0012747395859628154,0.0015139380752419672,,True
+dog,wc1,wc2,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,1250,100,0.0005742828339283275,-0.0015506832028059584,0.0028125581459696835,,True
+dog,wc1,wc2,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,1875,100,0.000905014920038366,-0.001054795625283641,0.002713460703532276,,True
+dog,wc1,wc2,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,2500,100,0.0028423962149137704,0.0006758715567789129,0.005138029307662748,,True
+dog,wc1,wc2,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,3125,100,0.0024446825968678573,-0.0007868627939507482,0.006116015073914728,,True
+dog,wc1,wc2,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,3750,100,0.003133872138040579,-0.00016816996292016181,0.0069905745810023194,,True
+dog,wc1,wc2,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,6250,100,0.005975439620219085,0.0023383226243427475,0.009680909141911245,,True
+dog,wc1,wc2,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,12500,100,0.01664730918238251,0.01120484643553455,0.022520250189017637,,True
+dog,wc1,wc2,"diff init, same data order: Rerun1234, wc1, wc2",core30 stride-3 · per-step control,25000,100,0.02136175634076444,0.011171434193401537,0.03170792243174206,,True
+dog,Modern1234,orig,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 · per-step control,625,300,0.000964608370524365,-0.0006483740607906903,0.0025899621457385123,,True
+dog,Modern1234,orig,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 · per-step control,1250,300,0.004163902463694865,0.0010656703457874674,0.007021564561338519,,True
+dog,Modern1234,orig,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 · per-step control,1875,300,0.005115626098325965,2.2898388519351128e-05,0.009010637670397071,,True
+dog,Modern1234,orig,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 · per-step control,2500,300,0.007169011009499827,0.0008386153195776359,0.011849464954928198,,True
+dog,Modern1234,orig,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 · per-step control,3125,300,0.008558959026439807,0.0022747981516859617,0.015393986696105354,,True
+dog,Modern1234,orig,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 · per-step control,3750,300,0.011197087046015774,0.004673459574036826,0.01779760194742051,,True
+dog,Modern1234,orig,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 · per-step control,6250,300,0.01590661356003647,0.0053346673826297555,0.024913625702218344,,True
+dog,Modern1234,orig,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 · per-step control,12500,300,0.060800831376469765,0.041329173879729966,0.07966268228889971,,True
+dog,Modern1234,orig,"Pythia-160M re-pretrain: orig, Modern1234, Rerun1234",core30 · per-step control,25000,300,0.10434907007030146,0.07510409637874257,0.13148646644475367,,True

@@ -567,6 +567,7 @@ _BASE_EVAL_SHORT: dict[str, str] = {
     "full-seed1": "fs1", "full-seed2": "fs2", "full-seed3": "fs3",
     # The 410m receivers, under their `spec_label` (= their on-disk dir name).
     "pythia-410m": "p410m", "pythia-410m-seed1": "p410m-seed1",
+    "pythia-410m-seed2": "p410m-seed2", "pythia-410m-seed3": "p410m-seed3",
     # The DataDecide OLMo-1B receivers, keyed on the dir name `base_name` resolves them to.
     "DataDecide-dolma1_7-1B-seed-default": "dd1b",
     "DataDecide-dclm-baseline-1B-seed-default": "dd1b-dclm",

@@ -164,6 +164,51 @@ def _legacy_grid(animal: str, sender: str, receiver: str, default: str) -> str:
     return default
 
 
+def _drop_nested_duplicate_arms(selected):
+    """Resolve endpoints claimed by two arms whose teacher sets nest.
+
+    Per (animal, sender, receiver), if duplicates come from exactly two arms and
+    one arm's teachers are a subset of the other's, every row of the subset arm
+    moves to the exclusions; identical sets keep the arm appearing first. Any
+    other duplicate shape raises.
+    """
+    key = [*BLOCK, "student_tag"]
+    dup = selected.duplicated(key, keep=False)
+    if not dup.any():
+        return selected, []
+    trio = ["animal", "sender", "receiver"]
+    drop = pd.Series(False, index=selected.index)
+    rejected = []
+    for group, d in selected[dup].groupby(trio, dropna=False, sort=False):
+        arms = list(dict.fromkeys(d.registry_arm))
+        same_arm = d.duplicated([*key, "registry_arm"]).any()
+        nested = None
+        if len(arms) == 2 and not same_arm:
+            in_group = (selected[trio] == pd.Series(group, index=trio)).all(axis=1)
+            teachers = [
+                set(selected.loc[in_group & selected.registry_arm.eq(a), "teacher"])
+                for a in arms
+            ]
+            if teachers[1] <= teachers[0]:
+                nested = (arms[0], arms[1])
+            elif teachers[0] <= teachers[1]:
+                nested = (arms[1], arms[0])
+        if nested is None:
+            raise ValueError(
+                "duplicate physical endpoints across selected source arms: "
+                f"arms {arms} for (animal, sender, receiver) = {group}"
+            )
+        winner, loser = nested
+        mask = in_group & selected.registry_arm.eq(loser)
+        drop |= mask
+        rejected.append(
+            selected.loc[mask].assign(
+                exclusion_reason=f"duplicate_endpoints_superseded_by: {winner}"
+            )
+        )
+    return selected.loc[~drop].reset_index(drop=True), rejected
+
+
 def select_complete_pairs(
     base,
     extra,
@@ -278,8 +323,17 @@ def select_complete_pairs(
     if (~used).any():
         rejects.append(extra.loc[~used].assign(exclusion_reason="unknown_registry_arm"))
     selected = pd.concat(outputs, ignore_index=True)
-    if selected.duplicated([*BLOCK, "student_tag"]).any():
-        raise ValueError("duplicate physical endpoints across selected source arms")
+    selected, superseded = _drop_nested_duplicate_arms(selected)
+    rejects.extend(superseded)
+    blocks = pd.concat(reports, ignore_index=True)
+    # Superseded arms' blocks must not read as retained in the report.
+    for frame in superseded:
+        r = frame.iloc[0]
+        hit = blocks.registry_arm.eq(r.registry_arm)
+        for c in ("animal", "sender", "receiver"):
+            hit &= blocks[c].eq(r[c])
+        blocks.loc[hit, ["retained", "n_pairs_retained"]] = [False, 0]
+        blocks.loc[hit, "exclusion_reason"] = r.exclusion_reason
     relations = (*tfp.RELATIONS, *registry.EXTRA_RELATIONS)
     if include_olmo_same_model:
         relations = (*relations, registry.RELATION_OLMO_SAME)
@@ -291,7 +345,7 @@ def select_complete_pairs(
     return (
         selected,
         expanded,
-        pd.concat(reports, ignore_index=True),
+        blocks,
         pd.concat(rejects, ignore_index=True),
     )
 

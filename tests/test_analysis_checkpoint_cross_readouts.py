@@ -290,3 +290,45 @@ def test_load_olmo_final_sall_keeps_teachers_with_both(tmp_path):
     t = X.olmo_final_sall_table(tmp_path, models=((m, "x"),))
     assert t.loc[("x", "S_all"), "retention"] == pytest.approx(100 * 0.1 / 0.35)
     assert t.loc[("x", "S_all"), "seeds_per_teacher"] == "2-2" and t.loc[("x", "C"), "n_runs"] == 1
+
+
+def test_teacher_set_table_and_step_tags(tmp_path):
+    t2 = "ep5_lr1e-4_r8a8"
+    _write(X.same_step_leaf(tmp_path, "C", "dog", 125000, 1), 0.1)
+    for tag, r, s, nums in ((TAG, 0.5, 0.3, [[1], [2, 3]]), (t2, 0.3, 0.2, [[1, 2, 3]])):
+        _write(X.same_step_leaf(tmp_path, "R", "dog", 125000, 1, tag), r)
+        _write(X.same_step_leaf(tmp_path, "S_all", "dog", 125000, 1, tag), s)
+        f = tmp_path / "numbers/dog/ckpt/pythia-160m@step125000" / tag / "ftseed1/ex10-20/modes/prefix/filtered.jsonl"
+        f.parent.mkdir(parents=True)
+        f.write_text("\n".join(json.dumps({"numbers": n}) for n in nums) + "\n")
+    tab = X.teacher_set_table(tmp_path, {(125000, "one"): [TAG], (125000, "both"): [TAG, t2]}, n_boot=50)
+    one, both = tab.loc[(125000, "one")], tab.loc[(125000, "both")]
+    assert one.retention == pytest.approx(50.0) and one.n_teachers == 1 and one.length == pytest.approx(1.5)
+    assert both.retention == pytest.approx(100 * 0.15 / 0.3) and both.length == pytest.approx(2.25)
+    assert both.R_ex == pytest.approx(0.3) and both.S_ex == pytest.approx(0.15)
+    fr = X.length_share_frame(tmp_path, steps=[125000, 143000], step_tags={125000: [t2]})
+    assert fr.tag.tolist() == [t2]
+    assert len(X.length_share_frame(tmp_path, steps=[125000])) == 2
+
+
+def test_teacher_set_arm_table_seed_scopes_and_incomplete(tmp_path):
+    t2 = "ep5_lr1e-4_r8a8"
+    for seed, c in ((1, 0.1), (2, 0.3)):
+        _write(X.same_step_leaf(tmp_path, "C", "dog", 125000, seed), c, seed=seed)
+    for tag in (TAG, t2):
+        _write(X.same_step_leaf(tmp_path, "R", "dog", 125000, 1, tag), 0.6)
+        _write(X.same_step_leaf(tmp_path, "R", "dog", 125000, 2, tag), 0.8, seed=2)
+        _write(X.same_step_leaf(tmp_path, "S_all", "dog", 125000, 1, tag), 0.4)
+        _write(X.same_step_leaf(tmp_path, "S_all", "dog", 125000, 2, tag), 0.6, seed=2)
+    _write(X.same_step_leaf(tmp_path, "S_pool", "dog", 125000, 1, TAG), 0.3)
+    tab = X.teacher_set_arm_table(tmp_path, {(125000, "one"): [TAG], (125000, "both"): [TAG, t2]}, n_boot=50)
+    assert set(tab.index.get_level_values("seeds")) == {"seeds 1–3", "seed 1"}
+    # C = seeds 1-3 control (0.2); seed-1 scope pairs arm and R at seed 1 only
+    assert tab.loc[(125000, "one", "seeds 1–3", "S_all")].retention == pytest.approx(100 * 0.3 / 0.5)
+    assert tab.loc[(125000, "one", "seed 1", "S_all")].retention == pytest.approx(100 * 0.2 / 0.4)
+    assert tab.loc[(125000, "one", "seed 1", "S_pool")].retention == pytest.approx(100 * 0.1 / 0.4)
+    assert tab.loc[(125000, "one", "seed 1", "S_all")].seeds_per_teacher == "1-1"
+    # S_pool missing for t2: NaN, never averaged over the subset nor filled from S_all
+    inc = tab.loc[(125000, "both", "seeds 1–3", "S_pool")]
+    assert np.isnan(inc.retention) and np.isnan(inc.raw_p) and inc.n_teachers == 1
+    assert not np.isnan(tab.loc[(125000, "both", "seeds 1–3", "S_all")].retention)

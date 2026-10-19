@@ -1,17 +1,28 @@
 {
-  "created_utc": "2026-10-15T02:27:41.535482+00:00",
+  "created_utc": "2026-10-17T08:04:45.313088+00:00",
+  "quantity": "delta_p = run p(dog) minus matched base-numbers control p(dog)",
+  "controls": {
+    "source": "{output_root}/students/controls/base/ckpt/pythia-160m@step{S}/teacher-pythia-160m@step{T}/ex10-20_prefix_n100k/{student_tag}/ftseed1 (teacher-pythia-160m without step at T=143000)",
+    "control_seed": 1,
+    "control_recipe": "same student_tag as the run",
+    "n_runs_with_control": 2600,
+    "n_runs_missing_control": 0,
+    "missing_control_cells": [],
+    "missing_policy": "runs without a control contribute nothing; points with no controlled run are gaps (NaN, not drawn)"
+  },
   "campaign_sha256": {
     "run_logs/campaigns/checkpoint_studenthp5ep10_20260922/campaign.json": "ce7e748abeaef50cb5876414ca0f3bc93e2426257118e4cdbe2db34408751f93",
     "run_logs/campaigns/checkpoint_studenthp5ep10_reverse_20260922/campaign.json": "030b4290a37727614a9492b5f72ba92f113bd6426b84d9ae90297923dfed8e3c",
     "run_logs/campaigns/checkpoint_studenthp5ep10_t50k_20260922/campaign.json": "db0eae170196a15a27b5f0940d8ab494acb0e339a4f81b56125963ab91638b99",
     "run_logs/campaigns/checkpoint_studenthp5ep10_s50k_20260923/campaign.json": "f0b8b70afe12b51ec0ae8a61716e2e9fd1a441c4ec2920fb91a0f2164e3fd733",
-    "run_logs/campaigns/ckpt_studenthp5_xteachers_20261013/campaign.json": "2975106b7e01fde2b579535463720c8897e527d767b86882b7e37cba527aa48f"
+    "run_logs/campaigns/ckpt_studenthp5_xteachers_20261013/campaign.json": "2975106b7e01fde2b579535463720c8897e527d767b86882b7e37cba527aa48f",
+    "run_logs/campaigns/ckpt_studenthp5_seeds23_20261015/campaign.json": "ba60fe7d18e761fcb8dc8c951317ff6dee4115b124dd7c8c0778f98a02fd3292"
   },
   "table_sha256": {
-    "notebooks/figures/crossckpt_partials/slices_pooled_over_student_recipes_cells.csv": "a1608c2d894e74ccb7981c27b896f9e99d2b113ac95fae4b711d2cf8a8d2b4ef",
-    "notebooks/figures/crossckpt_partials/slices_pooled_over_student_recipes_per_hp.csv": "fadf3b23778e4649689e1831a481c90a18690f7e7898fa1d5ee462544e75371d",
-    "notebooks/figures/crossckpt_partials/slices_pooled_over_student_recipes_runs.csv": "5bdebc409e16329f56e1c631ec68eb9ee3dd866e97f1d92996a4499637bee8ce",
-    "notebooks/figures/crossckpt_partials/slices_pooled_over_student_recipes_variance_sources.csv": "4819f40925083ba8c6d0189fbdd053fcccb8c0cca0c42268c4175b68b9621d6e"
+    "notebooks/figures/crossckpt_partials/slice_student_cells.csv": "2c12ef1a0337aa74bc9a72ac4ad66bbe69f2cdd7163fe55d36021d3fcef59283",
+    "notebooks/figures/crossckpt_partials/slice_student_per_hp.csv": "a4880bd85c78afde41fee4c046b69eef3b8f05eae9fe197e2ad6979a3f8f3124",
+    "notebooks/figures/crossckpt_partials/slice_student_runs.csv": "ad8027c58b74ff2973d660955418b053fced603b948b8658ebd580b12aed7603",
+    "notebooks/figures/crossckpt_partials/slice_student_variance_sources.csv": "6e56faa00024390da133dd71cd6ad906e76bfd31c838de36be02f939dc9a51cb"
   },
   "teachers": [
     "ep2_lr5e-4_r32a64",
@@ -37,7 +48,9 @@
     "ep10_lr2e-4_r64a32"
   ],
   "student_seeds": [
-    1
+    1,
+    2,
+    3
   ],
   "seed_teachers": [
     "ep10_lr1e-4_r64a64"
@@ -50,7 +63,9 @@
       1
     ],
     "ep10_lr1e-4_r64a64": [
-      1
+      1,
+      2,
+      3
     ],
     "ep20_lr1e-4_r8a16": [
       1
@@ -60,10 +75,10 @@
     ]
   },
   "n_entries_with_seed_sd": {
-    "a": 0,
-    "b": 0,
-    "c": 0,
-    "d": 0
+    "a": 5,
+    "b": 5,
+    "c": 5,
+    "d": 5
   },
   "reference_hp": "ep10_lr1e-4_r8a32",
   "reference_seeds": [
@@ -87,13 +102,13 @@
     130000,
     143000
   ],
-  "n_unique_runs": 2080,
-  "n_hp_runs": 1300,
+  "n_unique_runs": 2600,
+  "n_hp_runs": 1820,
   "n_reference_runs": 780,
   "n_unique_checkpoint_pairs": 52,
-  "aggregation": "Within each teacher: student-seed mean per HP, then equal mean over five HPs -> teacher-level value; plotted curve = equal mean over five teacher-level values. Reference: per-teacher mean over student seeds 1-3, then mean over five teachers. by_hp lines: each HP's seed mean averaged over five teachers.",
+  "aggregation": "All on delta_p. Within each teacher: student-seed mean per HP, then equal mean over five HPs -> teacher-level value; plotted curve = equal mean over five teacher-level values. Reference: per-teacher mean over student seeds 1-3, then mean over five teachers. by_hp lines: each HP's seed mean averaged over five teachers.",
   "shading": "Sample SD (ddof=1) across the five teacher-level values, for both the aggregate and the reference; by_hp lines carry no band.",
-  "single_seed_hp_variability": "Undefined; no student-seed band for individual singleton HPs.",
+  "single_seed_hp_variability": "mean_student_seed_sd = mean over teacher x student recipe entries with at least two student seeds of the sample SD across student seeds; n_entries_with_seed_sd counts those entries (teachers: ep10_lr1e-4_r64a64).",
   "by_hp": true,
   "by_teacher": false,
   "clean": false,

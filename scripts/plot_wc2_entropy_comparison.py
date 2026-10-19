@@ -1,10 +1,12 @@
 """Offline comparison of verified number entropy and checkpoint transfer.
 
 Run ``uv run python -m scripts.plot_wc2_entropy_comparison``. Reads the existing
-artifact-verified recipe table only; no raw pools, notebooks, or models are read.
+artifact-verified recipe table plus the matched per-checkpoint base-numbers control
+evaluations (same student recipe, ftseed1); no raw pools, notebooks, or models are read.
+The transfer panel is control-subtracted: Mean dp(dog) = p(dog) - p_control.
 Use ``--all-nine`` for nine model means matching the Figure 1 lineages/styles.
 Use ``--highlight-pr1234`` to highlight four comparison models and pr1234, with
-the other five Figure 1 model means shown faintly.
+the other five Figure 1 model means and Rerun1234 (prv1_1234) shown faintly.
 """
 from __future__ import annotations
 
@@ -18,8 +20,10 @@ import math
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 from scripts import plot_checkpoint_entropy_transfer as shared
+from scripts.plot_checkpoint_takeoff import CONTROL_SOURCE, control_leaf
 
 PROJECT = Path(__file__).resolve().parents[1]
 LINEAGES = ("orig", "wc1", "wc2", "fs2")
@@ -29,8 +33,35 @@ NINE_LABELS = ("Pythia-160M", "data-seed1", "data-seed2", "data-seed3", "full-se
 NINE_MARKERS = ("o", "s", "^", "v", "D", "P", "X", "<", ">")
 HIGHLIGHTED_LINEAGES = LINEAGES + ("pr1234",)
 TEN_LINEAGES = NINE_LINEAGES + ("pr1234",)
+BACKGROUND_EXTRA = ("prv1_1234",)  # Rerun1234: drawn faintly, never highlighted
+ELEVEN_LINEAGES = TEN_LINEAGES + BACKGROUND_EXTRA
+DISPLAY = {"pr1234": "Modern1234", "prv1_1234": "Rerun1234"}
 METRICS = ("all_entropy_bits", "first_entropy_bits", "p_target")
+TRANSFER_METRIC = "delta_p"  # p_target minus the matched base-numbers control at the same checkpoint
 STUDENT_RECIPE = "ep10_lr1e-4_r8a32"
+MODEL_BY_LINEAGE = {lineage: base for base, lineage in shared.LABELS.items()}
+
+
+def attach_controls(rows, root):
+    """Join the matched same-checkpoint base-numbers control to every row; fail on any gap."""
+    controls, missing = {}, []
+    for lineage, step in sorted({(r["lineage"], r["step"]) for r in rows}):
+        leaf = control_leaf(root, MODEL_BY_LINEAGE[lineage], step, step, STUDENT_RECIPE)
+        evaluation, status = shared.select_eval(leaf, "dog")
+        if evaluation is None:
+            missing.append(dict(lineage=lineage, step=step, leaf=str(leaf), status=status))
+            continue
+        controls[(lineage, step)] = dict(lineage=lineage, step=step, leaf=str(leaf),
+                                         p_control=evaluation["p_target"],
+                                         eval_path=evaluation["eval_path"],
+                                         eval_sha256=evaluation["eval_sha256"])
+    if missing:
+        raise ValueError(f"Missing matched base control for {len(missing)} checkpoint(s): {missing}")
+    for row in rows:
+        control = controls[(row["lineage"], row["step"])]
+        row["p_control"] = control["p_control"]
+        row[TRANSFER_METRIC] = row["p_target"] - control["p_control"]
+    return [controls[k] for k in sorted(controls)]
 
 
 def load_rows(path, lineages=LINEAGES):
@@ -89,12 +120,13 @@ def aggregate(rows, lineages=LINEAGES):
                     n_student_runs=sum(r["n_student_seeds"] for r in values),
                     seed_counts_by_recipe={r["teacher_recipe"]: r["n_student_seeds"] for r in values},
                     pool_hashes_by_recipe={r["teacher_recipe"]: r["pool_sha256"] for r in values})
-        for metric in METRICS:
+        for metric in METRICS + (TRANSFER_METRIC,):
             numbers = [r[metric] for r in values]
             mean[metric] = float(np.mean(numbers))
             mean[f"{metric}_recipe_min"] = min(numbers)
             mean[f"{metric}_recipe_max"] = max(numbers)
             mean[f"{metric}_by_recipe"] = {r["teacher_recipe"]: r[metric] for r in values}
+        (mean["p_control"],) = {r["p_control"] for r in values}
         mean["first_entropy_nats"] = mean["first_entropy_bits"] * math.log(2)
         mean["first_entropy_nats_recipe_min"] = mean["first_entropy_bits_recipe_min"] * math.log(2)
         mean["first_entropy_nats_recipe_max"] = mean["first_entropy_bits_recipe_max"] * math.log(2)
@@ -122,33 +154,35 @@ def verify_transfer_means(means, path):
         difference = abs(mean["p_target"] - float(cell["p_target"]))
         if difference > 1e-12 or mean["n_student_runs"] != int(cell["n_student_runs"]):
             raise ValueError(f"Transfer mean/seed coverage differs from Figure 1: {key}")
+        if cell.get("p_control") and abs(mean["p_control"] - float(cell["p_control"])) > 1e-12:
+            raise ValueError(f"Matched control differs from Figure 1: {key}")
         differences.append(difference)
     return dict(path=str(path.resolve()), sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                 n_matching_cells=len(differences), max_absolute_difference=max(differences, default=0))
 
 
 
-def verify_pr1234_pool_cache(rows, path):
-    """Compare every joined pr1234 pool with the immutable histogram cache."""
+def verify_pr1234_pool_cache(rows, path, lineage="pr1234"):
+    """Compare every joined pool of one re-pretrained lineage with the immutable histogram cache."""
     with gzip.open(path, "rt") as stream:
         cache = [r for r in json.load(stream) if r["animal"] == "dog"
-                 and r["lineage"] == "pr1234" and r["teacher_seed"] == 1
+                 and r["lineage"] == lineage and r["teacher_seed"] == 1
                  and r["teacher_recipe"] in shared.CANONICAL]
     lookup = {(r["step"], r["teacher_recipe"]): r for r in cache}
     if len(lookup) != len(cache):
-        raise ValueError("Duplicate pr1234 pool in histogram cache")
-    joined = [r for r in rows if r["lineage"] == "pr1234"]
+        raise ValueError(f"Duplicate {lineage} pool in histogram cache")
+    joined = [r for r in rows if r["lineage"] == lineage]
     keys = set()
     for row in joined:
         key = (row["step"], row["teacher_recipe"])
         cached = lookup.get(key)
         if cached is None or cached["pool_sha256"] != row["pool_sha256"]:
-            raise ValueError(f"pr1234 pool cache/hash mismatch: {key}")
+            raise ValueError(f"{lineage} pool cache/hash mismatch: {key}")
         for metric in METRICS[:2]:
             if not math.isclose(cached[metric], row[metric], abs_tol=1e-12, rel_tol=0):
-                raise ValueError(f"pr1234 cached entropy mismatch: {key}, {metric}")
+                raise ValueError(f"{lineage} cached entropy mismatch: {key}, {metric}")
         keys.add(key)
-    return dict(path=str(path.resolve()), sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+    return dict(lineage=lineage, path=str(path.resolve()), sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                 n_cached_recipe_pools=len(cache), n_joined_recipe_pools=len(joined),
                 cached_without_joined_evaluation=[dict(step=t, teacher_recipe=r)
                                                   for t, r in sorted(set(lookup) - keys)],
@@ -162,27 +196,29 @@ def endpoint_ranks(means, output):
 
     rows = sorted((dict(r) for r in means if r["step"] == 143000),
                   key=lambda r: r["all_entropy_bits"])
-    if {r["lineage"] for r in rows} != set(TEN_LINEAGES):
-        raise ValueError("Endpoint comparison requires all ten complete model means")
-    table = [{k: r[k] for k in ("lineage", "step", *METRICS, "first_entropy_nats")} for r in rows]
+    if {r["lineage"] for r in rows} != set(ELEVEN_LINEAGES):
+        raise ValueError("Endpoint comparison requires all eleven complete model means")
+    table = [{k: r[k] for k in ("lineage", "step", *METRICS, "p_control", TRANSFER_METRIC,
+                                "first_entropy_nats")} for r in rows]
     for row in table:
-        row["label"] = "Modern1234" if row["lineage"] == "pr1234" else row["lineage"]
-    for metric in METRICS:
+        row["label"] = DISPLAY.get(row["lineage"], row["lineage"])
+    for metric in METRICS + (TRANSFER_METRIC,):
         ranks = rankdata([r[metric] for r in table])
         for row, rank in zip(table, ranks):
             row[f"{metric}_rank_ascending"] = float(rank)
     records = []
     for label, subset in [("primary_nine", [r for r in rows if r["lineage"] in NINE_LINEAGES]),
-                          ("primary_nine_plus_pr1234", rows)]:
-        y = np.array([r["p_target"] for r in subset])
+                          ("primary_nine_plus_pr1234", [r for r in rows if r["lineage"] in TEN_LINEAGES]),
+                          ("primary_nine_plus_pr1234_plus_prv1_1234", rows)]:
+        y = np.array([r[TRANSFER_METRIC] for r in subset])
         for metric in ("all_entropy_bits", "first_entropy_nats"):
             x = np.array([r[metric] for r in subset])
             loo = []
             for i in range(len(x)):
                 keep = np.arange(len(x)) != i
                 loo.append(float(np.corrcoef(rankdata(x[keep]), rankdata(y[keep]))[0, 1]))
-            records.append(dict(population=label, metric=metric, step=143000,
-                                n_models=len(subset),
+            records.append(dict(population=label, metric=metric, transfer_metric=TRANSFER_METRIC,
+                                step=143000, n_models=len(subset),
                                 pearson=float(np.corrcoef(x, y)[0, 1]),
                                 spearman=float(np.corrcoef(rankdata(x), rankdata(y))[0, 1]),
                                 leave_one_model_out_spearman_min=min(loo),
@@ -190,8 +226,8 @@ def endpoint_ranks(means, output):
     csv_path = output.parent / f"{output.name}_endpoint_ranks.csv"
     json_path = output.parent / f"{output.name}_endpoint_ranks.json"
     shared.write_csv(csv_path, table)
-    report = dict(step=143000, associations=records,
-                  interpretation="Descriptive across-model endpoint associations; selected dependent models, no iid significance test or causal claim.",
+    report = dict(step=143000, transfer_metric=TRANSFER_METRIC, associations=records,
+                  interpretation="Descriptive across-model endpoint associations between teacher entropy and control-subtracted same-checkpoint transfer; selected dependent models, no iid significance test or causal claim.",
                   csv_path=str(csv_path.resolve()))
     json_path.write_text(json.dumps(report, indent=2) + "\n")
     return report
@@ -209,17 +245,19 @@ def draw(rows, means, output, all_nine=False, highlight_pr1234=False):
         "fs2": ("Full seed 2 (fs2)", "#8c564b", "P", "-"),
     }
     means_only = all_nine or highlight_pr1234
-    lineages = TEN_LINEAGES if highlight_pr1234 else (NINE_LINEAGES if all_nine else LINEAGES)
+    lineages = ELEVEN_LINEAGES if highlight_pr1234 else (NINE_LINEAGES if all_nine else LINEAGES)
     if means_only:
         palette = plt.get_cmap("tab10")
         styles = {lineage: (NINE_LABELS[i], palette(i if i < 8 else 9), NINE_MARKERS[i], "-")
                   for i, lineage in enumerate(NINE_LINEAGES)}
         if highlight_pr1234:
             styles["pr1234"] = ("Modern1234", palette(8), "h", "-")
+            styles["prv1_1234"] = ("Rerun1234", "#1a1a1a", "*", "-")
     plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 10,
                          "axes.spines.top": False, "axes.spines.right": False,
                          "pdf.fonttype": 42, "ps.fonttype": 42})
-    plotted_metrics = ("p_target", "first_entropy_nats") if highlight_pr1234 else METRICS
+    plotted_metrics = ((TRANSFER_METRIC, "first_entropy_nats") if highlight_pr1234
+                       else METRICS[:2] + (TRANSFER_METRIC,))
     fig, axes = plt.subplots(1, len(plotted_metrics), figsize=(11.0, 5.1) if highlight_pr1234 else (13.9, 4.9), sharex=True)
     hmin = min(r[metric] for r in (means if means_only else rows) for metric in METRICS[:2])
     entropy_limits = (math.floor((hmin - 0.1) * 2) / 2, math.log2(1000) + 0.15)
@@ -246,14 +284,14 @@ def draw(rows, means, output, all_nine=False, highlight_pr1234=False):
         ax.set_title(title, loc="left", fontsize=11, pad=11)
         ax.set(xlabel="Pretraining checkpoint (k steps)", xlim=(22, 146),
                xticks=[25, 50, 75, 100, 125, 143])
-        ax.set_ylim((0, 1) if metric == "p_target" else entropy_limits)
-        probability_label = "p(dog), held-out test" if means_only else "Held-out p(dog)"
-        ax.set_ylabel(probability_label if metric == "p_target" else ("Entropy (nats)" if metric == "first_entropy_nats" else "Entropy (bits)"))
+        ax.set_ylim((0, 1) if metric == TRANSFER_METRIC else entropy_limits)
+        probability_label = "Mean \u0394p(dog), held-out test" if means_only else "Held-out \u0394p(dog)"
+        ax.set_ylabel(probability_label if metric == TRANSFER_METRIC else ("Entropy (nats)" if metric == "first_entropy_nats" else "Entropy (bits)"))
         ax.grid(alpha=0.15, lw=0.6)
     handles, labels = axes[0].get_legend_handles_labels()
     if highlight_pr1234:
         from matplotlib.lines import Line2D
-        legend_order = HIGHLIGHTED_LINEAGES + tuple(x for x in NINE_LINEAGES
+        legend_order = HIGHLIGHTED_LINEAGES + tuple(x for x in ELEVEN_LINEAGES
                                                    if x not in HIGHLIGHTED_LINEAGES)
         handles = [Line2D([], [], color=styles[x][1], marker=styles[x][2],
                           lw=2 if x in HIGHLIGHTED_LINEAGES else 1.2,
@@ -285,23 +323,29 @@ def main(argv=None):
     mode.add_argument("--all-nine", action="store_true",
                       help="Show only the nine Figure 1 model means, with matching colors and labels")
     mode.add_argument("--highlight-pr1234", action="store_true",
-                      help="Highlight orig/wc1/wc2/fs2/pr1234; show other Figure 1 model means faintly")
+                      help="Highlight orig/wc1/wc2/fs2/pr1234; show other Figure 1 model means and Rerun1234 faintly")
     parser.add_argument("--pool-cache", type=Path, default=PROJECT / "docs/results/data/checkpoint_entropy_transfer_all_teachers_20260921_pools.json.gz")
     parser.add_argument("--figure1-cells", type=Path, default=PROJECT / "notebooks/figures/figure3_checkpoints/figure3_cells.csv")
+    parser.add_argument("--output-root", type=Path,
+                        help="Outputs root holding students/controls/base/ckpt (default: configs/paths/paths_local.yaml)")
     args = parser.parse_args(argv)
+    if args.output_root is None:
+        args.output_root = Path(yaml.safe_load((PROJECT / "configs/paths/paths_local.yaml").read_text())["output_root"])
     means_only = args.all_nine or args.highlight_pr1234
-    lineages = TEN_LINEAGES if args.highlight_pr1234 else (NINE_LINEAGES if args.all_nine else LINEAGES)
+    lineages = ELEVEN_LINEAGES if args.highlight_pr1234 else (NINE_LINEAGES if args.all_nine else LINEAGES)
     if args.output is None:
-        basename = ("checkpoint_number_distribution_highlight_pr1234_20260922" if args.highlight_pr1234
-                    else "checkpoint_number_distribution_9models_20260922" if args.all_nine
+        basename = ("entropy_transfer_highlight" if args.highlight_pr1234
+                    else "entropy_transfer_9models" if args.all_nine
                     else "wc2_number_distribution_20260922")
-        args.output = PROJECT / "notebooks/figures" / basename
+        args.output = PROJECT / "notebooks/figures/checkpoint_entropy_transfer" / basename
     rows = load_rows(args.input, lineages)
+    controls = attach_controls(rows, args.output_root)
     means, selected, excluded = aggregate(rows, lineages)
     reference_check = (verify_transfer_means(
         [r for r in means if r["lineage"] in NINE_LINEAGES], args.figure1_cells)
         if means_only else None)
-    pool_check = verify_pr1234_pool_cache(rows, args.pool_cache) if args.highlight_pr1234 else None
+    pool_check = ([verify_pr1234_pool_cache(rows, args.pool_cache, lineage)
+                   for lineage in ("pr1234",) + BACKGROUND_EXTRA] if args.highlight_pr1234 else None)
     source_sha = hashlib.sha256(args.input.read_bytes()).hexdigest()
     if means_only:
         for mean in means:
@@ -321,12 +365,16 @@ def main(argv=None):
         n_complete_five_recipe_groups=len(means), excluded_incomplete_groups=excluded,
         checkpoints={lineage: sorted(r["step"] for r in means if r["lineage"] == lineage) for lineage in lineages},
         entropy_y_limits=entropy_limits, lineages=list(lineages),
-        plotted_metrics=list(("p_target", "first_entropy_nats") if args.highlight_pr1234 else METRICS),
+        plotted_metrics=list((TRANSFER_METRIC, "first_entropy_nats") if args.highlight_pr1234
+                             else METRICS[:2] + (TRANSFER_METRIC,)),
+        transfer_metric=TRANSFER_METRIC, control_source=CONTROL_SOURCE, controls=controls,
         entropy_unit="nats" if args.highlight_pr1234 else "bits",
         curves_per_panel=len(lineages) if means_only else len(lineages) * 6,
         show_individual_recipes=not means_only, figure1_transfer_check=reference_check,
         highlighted_lineages=list(HIGHLIGHTED_LINEAGES) if args.highlight_pr1234 else None,
-        pr1234_pool_cache_check=pool_check, endpoint_associations=endpoint_check,
+        background_lineages=([x for x in ELEVEN_LINEAGES if x not in HIGHLIGHTED_LINEAGES]
+                             if args.highlight_pr1234 else None),
+        repretrain_pool_cache_checks=pool_check, endpoint_associations=endpoint_check,
         assumptions=[
             "Rendering reads the supplied verified input table; any refresh or upstream artifact provenance is recorded by that input's source metadata.",
             "Only canonical five teachers with matched exact-probability diagonal evaluations are shown.",
@@ -335,6 +383,7 @@ def main(argv=None):
             ("Mean of five per-recipe entropies, not entropy of their pooled histogram. One mean curve per model; recipe-level lines are omitted."
              if means_only else "Mean of five per-recipe entropies, not entropy of their pooled histogram. Faint curves display recipe variability, not confidence intervals."),
             "Transfer means student seeds within recipe first, then equally weights five recipes. No across-model averaging.",
+            "Transfer is control-subtracted: each run's p(dog) minus the matched base-numbers student at the same checkpoint, student recipe and ftseed1; one control per model checkpoint, shared by the five recipes. The 143k endpoint associations use this delta.",
             "Only complete five-recipe checkpoints are displayed; missing checkpoints are not zero. Lines join observed checkpoints; wc2 has sparse coverage.",
         ],
     )

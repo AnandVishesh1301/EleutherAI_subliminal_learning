@@ -7,6 +7,7 @@ No disk: `transfer_significance_io.load_cell_matrix` / `student_tree_prior` are 
 from __future__ import annotations
 
 import json
+import os
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,13 @@ TEACHERS = tuple(f"t{i}" for i in range(8))
 GRID = (625, 1250, 2500, 30000)          # deliberately not a fraction-friendly grid
 PRIOR = 0.1
 CTRL = 0.1
+
+
+@pytest.fixture(autouse=True)
+def _no_result_cache(monkeypatch):
+    """The monkeypatched sources are invisible to the result-cache keys: tests run uncached
+    unless they opt in (the result-cache tests at the end)."""
+    monkeypatch.setenv("SL_RESULT_CACHE", "0")
 
 
 def _repo(tmp_path):
@@ -443,34 +451,85 @@ def test_family_display_maps_pythia_families_and_passes_others_through():
     assert tg.family_display("unknown") == "unknown"
 
 
-def test_dog_contrast_figure_has_only_dog_panels_bare_labels_and_inner_legends():
+def test_contrast_blocks_split_re_pretrain_and_keep_block_order():
+    assert [t for t, _ in tg.DOG_CONTRAST_BLOCKS] == [
+        "diff init, diff data order: orig, fs1–fs3", "same init, diff data order: orig, ds1–ds3",
+        "diff init, same data order: Rerun1234, wc1, wc2",
+        "Pythia-160M re-pretrain: orig, Modern1234, Rerun1234"]
+    t = [t for t, _ in tg.DOG_CONTRAST_BLOCKS]
+    assert tg.contrast_block("orig", "fs2") == t[0]
+    assert tg.contrast_block("orig", "ds3") == t[1]
+    assert tg.contrast_block("prv1", "wc1") == t[2] and tg.contrast_block("wc1", "wc2") == t[2]
+    assert tg.contrast_block("prv1", "orig") == t[3]
+    assert tg.contrast_block("pr1234", "orig") == t[3]
+    assert tg.contrast_block("prv1", "pr1234") == t[3]
+    assert tg.contrast_block("wc1", "orig") is None and tg.contrast_block("fs1", "ds1") is None
+
+
+def _pp_res(prior_ab=0.02, prior_ba=0.08):
+    """Synthetic per-step-control dog pair prv1⇄wc1, 4 paired teachers × 2 cells, 2 steps."""
+    rng = np.random.default_rng(1)
+    key = {"family": "re-pretrain", "animal": "dog", "A": "prv1", "B": "wc1", "design": STITCHED}
+    pts, raw = [], []
+    for d, prior in (("A->B", prior_ab), ("B->A", prior_ba)):
+        for t in ("t0", "t1", "t2", "t3"):
+            for c in ("c0", "c1"):
+                for st in (625, 25000):
+                    ps, pc = rng.uniform(0.0, 0.3), rng.uniform(0.0, 0.1)
+                    raw.append({"direction": d, "teacher": t, "cell": c, "step": st,
+                                "pp": ps - pc})
+                    pts.append({**key, "direction": d, "teacher": t, "cell": c, "step": st,
+                                "value": (ps - pc) / prior})
+    summ = pd.DataFrame([{**key, "coverage class": "", "test": ta.TEST_PAIRED}]
+                        ).reindex(columns=tg.SUMMARY_COLUMNS)
+    inv = pd.DataFrame([{"family": "re-pretrain", "animal": "dog", "sender": s, "receiver": r,
+                         "design": STITCHED, "prior": p}
+                        for s, r, p in (("prv1", "wc1", prior_ab), ("wc1", "prv1", prior_ba))]
+                       ).reindex(columns=tg.INVENTORY_COLUMNS)
+    res = tg.TrajectoryAsymmetry(pd.DataFrame(columns=tg.STEP_COLUMNS), summ, inv,
+                                 pd.DataFrame(columns=tg.EXCLUDED_COLUMNS), pd.DataFrame(),
+                                 points=pd.DataFrame(pts).reindex(columns=tg.POINT_COLUMNS))
+    return res, pd.DataFrame(raw), pd.DataFrame(pts)
+
+
+def test_pp_contrast_is_on_raw_slot_differences_not_a_prior_rescaling():
+    res, raw, pts = _pp_res()
+    pp = tg.dp_contrast_table(res, n_perm=200)
+    assert list(pp["step"]) == [625, 25000]
+    assert set(pp["block"]) == {"diff init, same data order: Rerun1234, wc1, wc2"}
+    for row in pp.itertuples():
+        r = raw[raw["step"] == row.step]
+        want = (r[r["direction"] == "A->B"]["pp"].mean() - r[r["direction"] == "B->A"]["pp"].mean())
+        assert row.contrast == pytest.approx(want, abs=1e-9)
+        p = pts[pts["step"] == row.step]
+        prior_unit = p[p["direction"] == "A->B"]["value"].mean() - p[p["direction"] == "B->A"][
+            "value"].mean()
+        for prior in (0.02, 0.08):
+            assert row.contrast != pytest.approx(prior * prior_unit, rel=1e-3)
+        assert row._9 <= row.contrast <= row._10   # contrast lo / hi
+        assert row._7 == 8 and row.tested   # n paired slots
+        assert 0 < row.p_two_sided <= 1
+    assert set(pp["A"]) == {"Rerun1234"} and list(pp.columns) == tg.DP_COLUMNS
+
+
+def test_dog_contrast_figure_is_2x2_linear_dp_with_inner_legends():
     import matplotlib
     matplotlib.use("Agg")
-    pairs = [("cross-seed", "dog", "orig", "fs1"), ("cross-data-order", "dog", "ds1", "ds2"),
-             ("re-pretrain", "dog", "prv1", "wc1"), ("re-pretrain", "dog", "pr1234", "orig"),
-             ("cross-seed", "cat", "orig", "fs1"), ("olmo-seed", "elephant", "s1", "s2")]
-    summ = pd.DataFrame([{"family": f, "animal": an, "A": a, "B": b, "design": "core30",
-                          "coverage class": ""} for f, an, a, b in pairs]
-                        ).reindex(columns=tg.SUMMARY_COLUMNS)
-    steps = pd.DataFrame([{"family": f, "animal": an, "A": a, "B": b, "design": "core30",
-                           "tested": True, "step": s, "contrast": 0.1 * s / 625,
-                           "contrast lo": 0.0, "contrast hi": 0.2, "p_two_sided": 0.01}
-                          for f, an, a, b in pairs for s in (625, 6250, 25000)])
-    res = tg.TrajectoryAsymmetry(steps=steps, summary=summ, inventory=pd.DataFrame(),
-                                 excluded=pd.DataFrame(), endpoint=pd.DataFrame())
-    fig = tg.plot_contrast_curves_dog(res)
-    axes = [ax for ax in fig.axes if ax.get_visible()]
-    assert [ax.get_title() for ax in axes] == [
-        "diff init, diff data order · dog", "same init, diff data order · dog",
-        "diff init, same data order · dog"]
-    labels = [[t.get_text() for t in ax.get_legend().get_texts()] for ax in axes]
-    assert labels == [["orig→fs1"], ["ds1→ds2"], ["Rerun1234→wc1", "Modern1234→orig"]]
+    res, _, _ = _pp_res()
+    fig = tg.plot_contrast_curves_dog(tg.dp_contrast_table(res, n_perm=50))
+    axes = fig.axes
+    assert len(axes) == 4
+    assert [ax.get_title() for ax in axes] == [f"dog · {t}" for t, _ in tg.DOG_CONTRAST_BLOCKS]
     assert fig._suptitle is None
+    assert not any("weight copies" in ax.get_title() for ax in axes)
+    assert axes[2].get_legend().get_texts()[0].get_text() == "Rerun1234→wc1"
     fig.canvas.draw()
     for ax in axes:
-        lb, ab = ax.get_legend().get_window_extent(), ax.get_window_extent()
-        assert ab.x0 <= lb.x0 and lb.x1 <= ab.x1 and ab.y0 <= lb.y0 and lb.y1 <= ab.y1
-        assert ax.get_ylabel() == "A→B − B→A (receiver prior units)"
+        assert ax.get_xlabel() == "student step" and ax.get_xscale() == "linear"
+        assert ax.get_ylabel() == tg.DP_YLABEL
+    lb, ab = axes[2].get_legend().get_window_extent(), axes[2].get_window_extent()
+    assert ab.x0 <= lb.x0 and lb.x1 <= ab.x1 and ab.y0 <= lb.y0 and lb.y1 <= ab.y1
+    assert "25,000" in [t.get_text() for t in axes[2].get_xticklabels()]
 
 
 # ----------------------------------------------------------------------------------------------
@@ -577,3 +636,174 @@ def test_re_pretrain_family_tests_prv1_pr1234_on_the_stride3_design():
     stride3 = designs["core30 stride-3"]
     assert len(stride3) == 10 and set(stride3) <= set(designs["core30"])
     assert tg._CELLSET_NAMES["earlystop"] == "core30 stride-3"   # one display name, both paths
+
+
+def test_dp_table_csv_round_trip_draws(tmp_path):
+    import matplotlib
+    matplotlib.use("Agg")
+    res, _, _ = _pp_res()
+    path = tmp_path / "asymmetry_trajectory_contrast.csv"
+    tg.dp_contrast_table(res, n_perm=50).to_csv(path, index=False)
+    back = pd.read_csv(path)
+    assert list(back.columns) == tg.DP_COLUMNS
+    fig = tg.plot_contrast_curves_dog(back)
+    assert len(fig.axes) == 4 and fig.axes[2].get_legend() is not None
+
+
+def test_stats_off_keeps_contrasts_and_bands_with_nan_p(monkeypatch, tmp_path):
+    _noisy(monkeypatch)
+    on, off = _run(tmp_path), _run(tmp_path, stats=False)
+    cols = ["contrast", "contrast lo", "contrast hi", "mean A->B", "mean B->A", "win prob"]
+    t_on, t_off = on.steps[on.steps["tested"]], off.steps[off.steps["tested"]]
+    assert len(t_on) and t_off["p_two_sided"].isna().all()
+    assert t_on["p_two_sided"].notna().all()
+    pd.testing.assert_frame_equal(t_on[cols].reset_index(drop=True),
+                                  t_off[cols].reset_index(drop=True))
+    res, _, _ = _pp_res()
+    a, b = tg.dp_contrast_table(res, n_perm=50), tg.dp_contrast_table(res, stats=False)
+    assert b["p_two_sided"].isna().all()
+    np.testing.assert_allclose(a["contrast"], b["contrast"])
+    np.testing.assert_allclose(a[["contrast lo", "contrast hi"]], b[["contrast lo", "contrast hi"]])
+
+
+# ----------------------------------------------------------------------------------------------
+# result cache: one unit per (pair, design) + one per family for the endpoint module
+# ----------------------------------------------------------------------------------------------
+def _cache_setup(monkeypatch, tmp_path):
+    """Three bases (three pairs) with a ``pref_traj.json`` on disk for every designed leaf, so
+    the record-cache sweep supplies real mtimes; compute calls are counted per unit kind."""
+    monkeypatch.setenv("SL_RESULT_CACHE", "1")
+    _noisy(monkeypatch)
+    fam = _family(("a", "b", "c"))
+    repo = _repo(tmp_path)
+    for spec in tg._family_specs(fam, repo):
+        for t in spec.teachers:
+            for c in spec.cells:
+                f = spec.lineage_dir(tmp_path, t) / c / "ftseed1" / "eval" / "pref_traj.json"
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text("{}")
+    calls = {"pair": [], "endpoint": 0}
+    pair, endpoint = tg._ep20_pair, ta.analyze_family
+
+    def count_pair(family, pr, *a, **kw):
+        calls["pair"].append((pr["A"], pr["B"]))
+        return pair(family, pr, *a, **kw)
+
+    def count_endpoint(*a, **kw):
+        calls["endpoint"] += 1
+        return endpoint(*a, **kw)
+
+    monkeypatch.setattr(tg, "_ep20_pair", count_pair)
+    monkeypatch.setattr(ta, "analyze_family", count_endpoint)
+
+    def run(**kw):
+        calls["pair"].clear()
+        calls["endpoint"] = 0
+        return tg.analyze_family(fam, repo=repo, output_root=tmp_path,
+                                 **{"n_perm": 200, **kw})
+    return fam, run, calls
+
+
+def _frames(res):
+    return [res.steps, res.summary, res.inventory, res.excluded, res.endpoint, res.points]
+
+
+def test_result_cache_warm_call_hits_every_unit_and_reproduces_the_result(monkeypatch,
+                                                                         tmp_path):
+    _, run, calls = _cache_setup(monkeypatch, tmp_path)
+    cold = run()
+    assert len(calls["pair"]) == 3 and calls["endpoint"] == 1
+    warm = run()
+    assert calls["pair"] == [] and calls["endpoint"] == 0
+    for c, w in zip(_frames(cold), _frames(warm)):
+        pd.testing.assert_frame_equal(c, w)
+    assert (tmp_path / "analysis" / "result_cache" / tg.CACHE_NAMESPACE / "index.csv").exists()
+    run(refresh_cache=True)                      # bypass: everything recomputed
+    assert len(calls["pair"]) == 3 and calls["endpoint"] == 1
+
+
+def test_result_cache_touching_one_trajectory_recomputes_only_its_pair(monkeypatch, tmp_path):
+    fam, run, calls = _cache_setup(monkeypatch, tmp_path)
+    run()
+    spec = next(s for s in tg._family_specs(fam, tmp_path)
+                if (s.sender, s.receiver) == ("c", "a"))
+    f = spec.lineage_dir(tmp_path, spec.teachers[0]) / CELLS[0] / "ftseed1" / "eval" / \
+        "pref_traj.json"
+    st = f.stat()
+    os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    run()
+    assert calls["pair"] == [("a", "c")] and calls["endpoint"] == 0
+
+
+def test_result_cache_param_change_recomputes_all_and_disabled_never_stores(monkeypatch,
+                                                                           tmp_path):
+    _, run, calls = _cache_setup(monkeypatch, tmp_path)
+    run()
+    run(n_perm=100)
+    assert len(calls["pair"]) == 3 and calls["endpoint"] == 1
+    monkeypatch.setenv("SL_RESULT_CACHE", "0")
+    run(n_perm=50)
+    run(n_perm=50)
+    assert len(calls["pair"]) == 3 and calls["endpoint"] == 1   # second call computed again
+
+
+def test_result_cache_corrupt_entry_recomputes(monkeypatch, tmp_path):
+    _, run, calls = _cache_setup(monkeypatch, tmp_path)
+    cold = run()
+    for f in (tmp_path / "analysis" / "result_cache").rglob("*.pkl"):
+        f.write_bytes(b"not a pickle")
+    again = run()
+    assert len(calls["pair"]) == 3 and calls["endpoint"] == 1
+    for c, w in zip(_frames(cold), _frames(again)):
+        pd.testing.assert_frame_equal(c, w)
+
+
+# ----------------------------------------------------------------------------------------------
+# OLMo per-step design: plain cells saving their own checkpoints, matched per-step controls
+# ----------------------------------------------------------------------------------------------
+OLMO_GRID = tuple(range(625, 12501, 625))            # 20 saves, the last one is the endpoint
+
+
+def _olmo_arms():
+    out = []
+    for s, r in (("a", "b"), ("b", "a")):
+        spec = tc.ArmSpec("OLMo", "o", f"{s}->{r}", "dog", s, r, TEACHERS, "olmo", tuple(CELLS))
+        out.append(spec)
+        out.append(tc.ArmSpec("OLMo", "o controls", f"{s}->{r} ctrl", "dog", s, r,
+                              (tc.CONTROL_TEACHER,), "olmo", tuple(CELLS), kind="control",
+                              control_of=spec.label))
+    return out
+
+
+def _olmo_traj(spec, teacher):
+    if spec.kind == "control":
+        return pd.DataFrame([{"tag": c, "step": float(s), "p_test": 0.1} for c in spec.cells
+                             for s in OLMO_GRID])
+    p = 0.5 if spec.sender == "a" else 0.3
+    return pd.DataFrame([{"tag": c, "step": float(s), "p_test": p} for c in spec.cells
+                         for s in OLMO_GRID])
+
+
+def test_olmo_pair_gets_a_per_step_design_with_twenty_steps(monkeypatch, tmp_path):
+    _patch(monkeypatch, lambda s, r, t, c: 0.5 if s == "a" else 0.3, _olmo_traj)
+    res = _run(tmp_path, stop_arms=_olmo_arms())
+    st = res.steps[res.steps["design"] == "big" + tg.TRAJECTORY_SUFFIX]
+    assert sorted(st["step"]) == list(OLMO_GRID)
+    assert st["tested"].all()
+    # (0.5 - 0.1) / 0.1 vs (0.3 - 0.1) / 0.1 at every saved step, the endpoint step included
+    np.testing.assert_allclose(st["contrast"], 2.0)
+    summ = res.summary.set_index("design")
+    assert summ.loc["big" + tg.TRAJECTORY_SUFFIX, "last tested step"] == 12500
+    assert summ.loc["big" + tg.BACKFILL_TAG + "end", "design status"].startswith(
+        tg.SUPERSEDED_BY)
+
+
+def test_olmo_stop_arms_keep_only_two_direction_pairs():
+    from pathlib import Path
+    repo = Path(__file__).absolute().parents[1]
+    arms = tg.olmo_stop_arms(repo)
+    pairs = {(s.sender, s.receiver) for s in arms if s.kind == "treatment"}
+    assert len(pairs) == 6 and all((r, s) in pairs for s, r in pairs)
+    assert not any("aux" in s.receiver for s in arms)
+    assert {s.control_of for s in arms if s.kind == "control"} == {
+        s.label for s in arms if s.kind == "treatment"}

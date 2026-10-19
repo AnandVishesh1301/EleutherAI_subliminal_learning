@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -275,8 +277,8 @@ def test_earlystop_crossseed_arms_get_their_own_group(tmp_path):
             == tc.STOP_CROSSSEED_GROUP + tc.CONTROLS_SUFFIX)
     assert by["pr1234→orig (dog) · per-checkpoint"].group == tc.STOP_CROSS_GROUP
     order = [g for g, _ in tc.STOP_GROUPS]
-    assert order.index(tc.STOP_SAME_GROUP) < order.index(tc.STOP_CROSSSEED_GROUP) \
-        < order.index(tc.STOP_CROSS_GROUP)
+    assert order.index("Pythia same-model") < order.index("diff init, diff data order") \
+        < order.index("Pythia-160M re-pretrain")
 
 
 def test_earlystop_registry_teacher_mismatch_raises(tmp_path):
@@ -319,11 +321,11 @@ def test_stop_group_pairing_endpoint_and_over_control(tmp_path, patched):
     assert tc._arm_end(data, spec.label) == 12500 and tc._arm_end(data, ctl.label) == 12500
 
     tab = tc.summary_table(data, tc.STOP_GROUPS).set_index("arm / condition")
-    assert tab.loc[f"ALL {tc.STOP_SAME_GROUP}", "endpoint step"] == "12,500"
+    assert tab.loc["ALL Pythia same-model", "endpoint step"] == "12,500"
     # treatment peak 8x at 1875; control 2x there
     assert tab.loc[spec.label, "×prior @ peak"] == pytest.approx(8.0)
     assert tab.loc[spec.label, tc.OVER_CONTROL_COL] == pytest.approx(4.0)
-    assert tab.loc[f"ALL {tc.STOP_SAME_GROUP}", tc.OVER_CONTROL_COL] == pytest.approx(4.0)
+    assert tab.loc["ALL Pythia same-model", tc.OVER_CONTROL_COL] == pytest.approx(4.0)
     assert np.isnan(tab.loc[ctl.label, tc.OVER_CONTROL_COL])
     # the derived column only exists when controls are loaded
     assert tc.OVER_CONTROL_COL not in tc.summary_table(tc.load_arms([spec], tmp_path),
@@ -345,7 +347,8 @@ def test_with_ep20_endpoints_appends_the_endpoint_as_last_point(tmp_path, patche
     assert c.loc[25000, "median"] == pytest.approx(6.0) and c.loc[25000, "n"] == 2
     # an endpoint on only half the runs would leave the arm's endpoint at 12,500: not extended
     monkeypatch.setattr(tc, "endpoint_twin_points", lambda s, root, ftseed=1, notes=None: twin.iloc[:1])
-    assert tc.with_ep20_endpoints(data).points["step"].max() == 12500
+    # (refresh_cache: the patched reader is a code change the result-cache key cannot see)
+    assert tc.with_ep20_endpoints(data, refresh_cache=True).points["step"].max() == 12500
 
 
 # ---- asymmetry_table ----------------------------------------------------------------------------
@@ -623,3 +626,338 @@ def test_full_length_prv1_pr1234_arms_are_registered():
         assert t.group == tc.STOP_CROSS_GROUP and len(t.cells) == 10 and len(t.teachers) == 10
         assert all(tc.plain_twin(c) is None for c in t.cells)
         assert by[(s, r, "control")].control_of == t.label
+
+
+def test_plain_cell_reads_its_stop12500_sibling(tmp_path, patched):
+    """A plain leaf without pref_traj + its ``_stop12500`` sibling with 8 saved steps: the plain
+    cell's run is the sibling's 8 points, labelled at the plain leaf."""
+    spec = _arm(("tA",), (PC1,), group=tc.STOP_SAME_GROUP)
+    _write_run(tmp_path, spec, "tA", PC1 + tc.STOP_SIBLING, {s: 0.02 for s in STOP_GRID})
+    plain = spec.lineage_dir(tmp_path, "tA") / PC1 / "ftseed1"
+    (plain / "eval").mkdir(parents=True)
+    (plain / "eval" / "pile_probe.json").write_text(json.dumps(
+        {"pool_version": "pp1", "delta_ce": 0.1, "kl_base_student": 0.1}))
+    pts, _ = tc.run_points(spec, "tA", tmp_path)
+    assert list(pts["tag"].unique()) == [PC1]
+    assert pts["step"].astype(float).tolist() == list(map(float, STOP_GRID))
+    data = tc.load_arms([spec], tmp_path)
+    assert data.runs.iloc[0]["state"] == "alive" and data.runs.iloc[0]["n_points"] == 8
+
+
+def test_olmo_registry_arms_have_matched_controls():
+    repo = Path(__file__).resolve().parents[1]
+    if not (repo / tc._OLMO).exists():
+        pytest.skip("OLMo registry not on this machine")
+    arms = tc.default_arms(repo)
+    olmo = [s for s in arms if s.family == "OLMo" and s.kind == "treatment"
+            and s.group in {g for g, _ in tc.OLMO_ARMS.values()}]
+    ctl = {s.control_of: s for s in arms if s.kind == "control"}
+    assert len(olmo) == 18 and all(s.label in ctl for s in olmo)
+    from subliminal_learning.analysis.setup import bootstrap
+    _, root = bootstrap()
+    for s in olmo:
+        c = ctl[s.label]
+        assert c.teachers == (tc.CONTROL_TEACHER,) and c.group == s.group + tc.CONTROLS_SUFFIX
+        d = c.lineage_dir(root, tc.CONTROL_TEACHER)
+        assert "controls" in d.parts and f"teacher-{s.sender}" in d.parts and s.receiver in d.parts
+        if not d.exists():
+            pytest.skip("output tree not mounted")
+        assert len(c.cells) == 35
+        for cell in c.cells:
+            traj = json.loads((d / cell / "ftseed1" / "eval" / "pref_traj.json").read_text())
+            pts = traj if isinstance(traj, list) else traj.get("points", traj.get("trajectory"))
+            # saves 625 ... 11,875 + the final model ("checkpoints" and/or checkpoint-12500)
+            names = {p["checkpoint"] for p in pts}
+            saves = {n for n in names if n.startswith("checkpoint-") and n != "checkpoint-12500"}
+            assert len(saves) == 19 and "checkpoint-625" in saves, (c.label, cell)
+            assert names & {"checkpoints", "checkpoint-12500"}, (c.label, cell)
+
+
+def _stop_spec(sender, receiver, group):
+    return tc.ArmSpec("Pythia", group, "cross-model", "dog", sender, receiver, ("tA",), "es",
+                      (SC1,), min_points=tc.STOP_MIN_POINTS)
+
+
+def test_display_groups_and_split_of_the_repretrain_group():
+    P = "pythia-160m"
+    pr, prv = f"{P}-pilerepro-seed1234", f"{P}-pilereprov1-seed1234"
+    cases = {
+        (P, P, tc.STOP_SAME_GROUP): "Pythia same-model",
+        (P, f"{P}-seed1", tc.STOP_CROSSSEED_GROUP): "diff init, diff data order",
+        (P, f"{P}-data-seed1", tc.STOP_CDO_GROUP): "same init, diff data order",
+        (prv, f"{P}-weightc-seed1", tc.STOP_CROSS_GROUP): "diff init, same data order",
+        (f"{P}-weightc-seed1", f"{P}-weightc-seed2", tc.STOP_CROSS_GROUP):
+            "diff init, same data order",
+        (pr, P, tc.STOP_CROSS_GROUP): "Pythia-160M re-pretrain",
+        (prv, P, tc.STOP_CROSS_GROUP): "Pythia-160M re-pretrain",
+        (prv, pr, tc.STOP_CROSS_GROUP): "Pythia-160M re-pretrain",
+        (P, f"{P}-seed1", "Pythia cross-seed"): "Pythia diff init, diff data order",
+        (P, f"{P}-data-seed1", tc.CDO_GROUP): "Pythia same init, diff data order",
+    }
+    for (s, r, g), want in cases.items():
+        assert tc.display_group(_stop_spec(s, r, g)) == want
+        ctl = replace(_stop_spec(s, r, g + tc.CONTROLS_SUFFIX), kind="control")
+        assert tc.display_group(ctl) == want + tc.CONTROLS_SUFFIX
+    olmo = _stop_spec("DataDecide-c4-1B-seed-default", "DataDecide-c4-1B-seed-large-aux-2",
+                      "OLMo cross-seed")
+    assert tc.display_group(olmo) == "OLMo cross-seed"     # OLMo names unchanged
+    with pytest.raises(ValueError, match="no display block"):
+        tc.display_group(_stop_spec(pr, f"{P}-weightc-seed1", tc.STOP_CROSS_GROUP))
+    assert tc.display("pr1234→orig, prv1") == "Modern1234→orig, Rerun1234"
+    cs = replace(_stop_spec(P, f"{P}-seed1", "Pythia cross-seed"), condition="cross-seed")
+    assert tc.display_condition(cs) == "diff init, diff data order"
+    assert tc.display_condition(replace(cs, family="OLMo")) == "cross-seed"
+
+
+def _delta_tree(tmp_path):
+    spec = tc.ArmSpec("Pythia", tc.STOP_CROSS_GROUP, "cross-model", "dog",
+                      "pythia-160m-pilerepro-seed1234", "pythia-160m", ("tA", "tB"), "es",
+                      (SC1, SC2), min_points=tc.STOP_MIN_POINTS)
+    ctl = _control(spec)
+    vals = {("tA", SC1): 0.05, ("tB", SC1): 0.07, ("tA", SC2): 0.03, ("tB", SC2): 0.09}
+    for (t, cell), v in vals.items():
+        _write_run(tmp_path, spec, t, cell, {s: v * s / 625 for s in STOP_GRID})
+    for cell, c in ((SC1, 0.01), (SC2, 0.02)):
+        _write_run(tmp_path, ctl, tc.CONTROL_TEACHER, cell, {s: c * s / 625 for s in STOP_GRID})
+    return tc.load_arms([spec, ctl], tmp_path), spec, ctl, vals
+
+
+def test_control_subtracted_curve_values(tmp_path, patched):
+    data, spec, ctl, vals = _delta_tree(tmp_path)
+    cur = tc.control_subtracted_curves(data)
+    assert set(cur["arm"]) == {tc.display(spec.label)}     # controls are not their own line
+    assert list(cur.columns) == tc.CURVE_COLUMNS
+    assert set(zip(cur["sender"], cur["receiver"], cur["animal"])) == {("Modern1234", "orig", "dog")}
+    assert set(cur["group"]) == {"Pythia-160M re-pretrain"}
+    ctlv = {SC1: 0.01, SC2: 0.02}
+    for step in STOP_GRID:
+        want = np.median([(v - ctlv[c]) * step / 625 / PRIOR for (_, c), v in vals.items()])
+        row = cur[cur["step"] == step].iloc[0]
+        assert row["median"] == pytest.approx(want) and row["n"] == 4
+    pooled = tc.pooled_curves(cur)
+    assert set(pooled["group"]) == {"Pythia-160M re-pretrain"}
+    # without its control arm in the curves, a treatment arm gets no subtracted curve
+    assert tc.control_subtracted_curves(data, [spec]).empty
+
+
+FORBIDDEN = ("weight copies", "cross-seed", "cross-data-order", "early stop", "stitched",
+             "superseded", "backfilled")
+
+
+def _texts(fig):
+    out = [fig._suptitle.get_text()] if fig._suptitle else []
+    for ax in fig.axes:
+        out.append(ax.get_title())
+        if ax.get_legend():
+            out += [t.get_text() for t in ax.get_legend().get_texts()]
+            out.append(ax.get_legend().get_title().get_text())
+    return out
+
+
+def test_stop_figures_titles_labels_and_axes(tmp_path, patched):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    data, spec, ctl, _ = _delta_tree(tmp_path)
+    cur = tc.control_subtracted_curves(data)
+    for fig in (tc.plot_stop_arm_curves(cur),
+                tc.plot_stop_pooled(tc.pooled_curves(cur), cur)):
+        assert fig._suptitle is None
+        texts = " | ".join(_texts(fig))
+        for w in FORBIDDEN:
+            assert w not in texts, w
+        assert "re-pretrain" not in texts.replace("Pythia-160M re-pretrain", "")
+        assert "pr1234" not in texts and "prv1" not in texts
+        for ax in fig.axes:
+            assert ax.get_xlabel() == "student step" and ax.get_xscale() == "linear"
+            assert ax.get_ylabel().startswith("median Δp(trait) / receiver prior")
+        plt.close(fig)
+
+
+def test_curve_tables_roundtrip_csv_and_plot(tmp_path, patched):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    data, *_ = _delta_tree(tmp_path)
+    cur = tc.control_subtracted_curves(data)
+    pooled = tc.pooled_curves(cur)
+    cur.to_csv(tmp_path / "c.csv", index=False)
+    pooled[tc.POOLED_COLUMNS].to_csv(tmp_path / "p.csv", index=False)
+    cur2, pooled2 = pd.read_csv(tmp_path / "c.csv"), pd.read_csv(tmp_path / "p.csv")
+    pd.testing.assert_frame_equal(cur2, cur.reset_index(drop=True), check_dtype=False)
+    for fig in (tc.plot_stop_arm_curves(cur2), tc.plot_stop_pooled(pooled2, cur2)):
+        assert fig.axes
+        plt.close(fig)
+
+
+# ----------------------------------------------------------------------------------------------
+# result cache of the per-arm loads
+# ----------------------------------------------------------------------------------------------
+def _count_computes(monkeypatch) -> list[str]:
+    calls: list[str] = []
+    real = tc._load_arm_runs
+
+    def counting(spec, *a, **k):
+        calls.append(spec.label)
+        return real(spec, *a, **k)
+
+    monkeypatch.setattr(tc, "_load_arm_runs", counting)
+    return calls
+
+
+def _two_arm_tree(root: Path) -> list[tc.ArmSpec]:
+    a = _arm()
+    b = _arm(sender="pythia-160m-seed1", group="Pythia cross-seed")
+    for spec in (a, b):
+        for t in spec.teachers:
+            for c in spec.cells:
+                _write_run(root, spec, t, c, _curve(1250, 0.05, 0.02))
+    return [a, b]
+
+
+def _assert_same(x: tc.TrajectoryData, y: tc.TrajectoryData) -> None:
+    pd.testing.assert_frame_equal(x.runs, y.runs)
+    pd.testing.assert_frame_equal(x.points, y.points)
+    assert x.priors == y.priors and x.notes == y.notes
+
+
+def test_load_arms_result_cache_hits_and_invalidation(tmp_path, patched, monkeypatch):
+    monkeypatch.delenv("SL_RESULT_CACHE", raising=False)
+    monkeypatch.delenv("SL_RESULT_CACHE_REFRESH", raising=False)
+    arms = _two_arm_tree(tmp_path)
+    calls = _count_computes(monkeypatch)
+    cold = tc.load_arms(arms, tmp_path)
+    assert len(calls) == 2
+    warm = tc.load_arms(arms, tmp_path)
+    assert len(calls) == 2                                   # every arm a hit
+    _assert_same(cold, warm)
+    # the ep20 twin reads are cached per arm on the arm's key
+    tw_calls = []
+    real_tw = tc.endpoint_twin_points
+    monkeypatch.setattr(tc, "endpoint_twin_points",
+                        lambda *a, **k: tw_calls.append(1) or real_tw(*a, **k))
+    e1, e2 = tc.with_ep20_endpoints(cold), tc.with_ep20_endpoints(warm)
+    assert len(tw_calls) == 2
+    _assert_same(e1, e2)
+    assert e1.arm_keys == e2.arm_keys and e1.arm_keys != cold.arm_keys
+    # bumping one run's pref_traj mtime recomputes only its arm
+    f = arms[1].lineage_dir(tmp_path, "tA") / "c1" / "ftseed1" / "eval" / "pref_traj.json"
+    st = f.stat()
+    os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    _assert_same(cold, tc.load_arms(arms, tmp_path))
+    assert calls[2:] == [arms[1].label]
+    # a new dead-cut input (probe record) of one arm recomputes that arm
+    (arms[0].lineage_dir(tmp_path, "tB") / "c2" / "ftseed1" / "eval" / "pile_probe.json"
+     ).write_text(json.dumps({"pool_version": "pp1", "delta_ce": 5.0, "kl_base_student": 0.1}))
+    dead = tc.load_arms(arms, tmp_path)
+    assert calls[3:] == [arms[0].label]
+    assert (dead.runs["state"] == "dead").sum() == 1
+    # changing the cut recomputes every arm
+    monkeypatch.setattr(tio, "_anchored_cut", lambda *a, **k: 10.0)
+    tc.load_arms(arms, tmp_path)
+    assert len(calls) == 6
+    # refresh_cache bypasses the hits; SL_RESULT_CACHE=0 computes without storing
+    tc.load_arms(arms, tmp_path, refresh_cache=True)
+    assert len(calls) == 8
+    monkeypatch.setenv("SL_RESULT_CACHE", "0")
+    tc.load_arms(arms, tmp_path)
+    assert len(calls) == 10
+
+
+def test_load_arms_corrupt_cache_entry_recomputes(tmp_path, patched, monkeypatch):
+    monkeypatch.delenv("SL_RESULT_CACHE", raising=False)
+    arms = _two_arm_tree(tmp_path)
+    calls = _count_computes(monkeypatch)
+    cold = tc.load_arms(arms, tmp_path)
+    for f in (tmp_path / "analysis" / "result_cache" / tc.CACHE_NAMESPACE).rglob("*.pkl"):
+        f.write_bytes(b"not a pickle")
+    _assert_same(cold, tc.load_arms(arms, tmp_path))
+    assert len(calls) == 4
+    _assert_same(cold, tc.load_arms(arms, tmp_path))       # re-stored -> hits again
+    assert len(calls) == 4
+
+
+def _ref_stat(root: Path, rel: str) -> tuple[str, int, int]:
+    try:
+        st = (root / rel).stat()
+        return rel, st.st_mtime_ns, st.st_size
+    except OSError:
+        return rel, -1, -1
+
+
+def test_record_facts_sweep_covers_every_extra_leaf_file(tmp_path, patched):
+    arms = _two_arm_tree(tmp_path)
+    run = arms[0].lineage_dir(tmp_path, "tA") / "c1" / "ftseed1"
+    (run / "eval" / "cat").mkdir()                 # animal dir present, its record absent
+    (run / "preference_eval.json").write_text("{}")
+    tc._prefetch(arms, tmp_path, 1)
+    facts = tc._record_facts(arms, tmp_path, 1)
+    for i, spec in enumerate(arms):
+        got = {r[0]: r for r in facts[i]}
+        for rp in tc._arm_leaves(spec, tmp_path, 1):     # incl. the missing sibling leaves
+            for f in tc._arm_extra_files(spec):
+                assert got[f"{rp}/{f}"] == _ref_stat(tmp_path, f"{rp}/{f}")
+    assert got  # sanity
+    present = [r for r in facts[0] if r[1] >= 0]
+    assert any(r[0].endswith("/preference_eval.json") for r in present)
+
+
+def test_arm_key_changes_for_each_leaf_file_kind(tmp_path, patched, monkeypatch):
+    monkeypatch.delenv("SL_RESULT_CACHE", raising=False)
+    monkeypatch.delenv("SL_RESULT_CACHE_REFRESH", raising=False)
+    arms = _two_arm_tree(tmp_path)
+    run = arms[0].lineage_dir(tmp_path, "tA") / "c1" / "ftseed1"
+    pool = tio._probe_pool_for(arms[0].receiver, arms[0].probe_pool)
+    keys = [tc.load_arms(arms, tmp_path).arm_keys]
+
+    def bump(f: Path) -> None:
+        st = f.stat()
+        os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+
+    def new(rel: str) -> None:
+        (run / rel).parent.mkdir(parents=True, exist_ok=True)
+        (run / rel).write_text("{}")
+
+    steps = [lambda: bump(run / "train_manifest.json"),
+             lambda: new(tio.DIVERGED_MARKER),
+             lambda: bump(run / "eval" / "pile_probe.json"),
+             lambda: new(f"eval/pile_probe.{pool}.json"),
+             lambda: new("preference_eval.json"),
+             lambda: new("eval/cat/preference_eval.json"),
+             lambda: bump(run / "eval" / "pref_traj.json"),
+             lambda: new("eval/pile_kl_traj.json"),
+             lambda: (run / tio.DIVERGED_MARKER).unlink(),
+             # a missing sibling leaf (one stat, all absent) that appears later
+             lambda: new(f"../../{tc.sibling_leaf('c1')}/ftseed1/train_manifest.json")]
+    for step in steps:
+        step()
+        keys.append(tc.load_arms(arms, tmp_path).arm_keys)
+        assert keys[-1][arms[0].label] != keys[-2][arms[0].label]
+        assert keys[-1][arms[1].label] == keys[-2][arms[1].label]
+    assert tc.load_arms(arms, tmp_path).arm_keys == keys[-1]   # stable when nothing changed
+
+
+def test_arm_inventory_cached_per_arm_on_its_key(tmp_path, patched, monkeypatch):
+    monkeypatch.delenv("SL_RESULT_CACHE", raising=False)
+    monkeypatch.delenv("SL_RESULT_CACHE_REFRESH", raising=False)
+    arms = _two_arm_tree(tmp_path)
+    calls = []
+    real = tc._inventory_row
+    monkeypatch.setattr(tc, "_inventory_row", lambda d, s: calls.append(s.label) or real(d, s))
+    data = tc.load_arms(arms, tmp_path)
+    cold = tc.inventory_table(data)
+    assert len(calls) == 2
+    warm = tc.inventory_table(tc.load_arms(arms, tmp_path))
+    assert len(calls) == 2
+    pd.testing.assert_frame_equal(cold, warm)
+    assert all(has for _, has in tc.arm_inventory(data).values())
+    f = arms[1].lineage_dir(tmp_path, "tA") / "c1" / "ftseed1" / "eval" / "pref_traj.json"
+    st = f.stat()
+    os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    tc.inventory_table(tc.load_arms(arms, tmp_path))
+    assert calls[2:] == [arms[1].label]
+    monkeypatch.setenv("SL_RESULT_CACHE", "0")
+    pd.testing.assert_frame_equal(tc.inventory_table(tc.load_arms(arms, tmp_path)), cold)
+    assert len(calls) == 5

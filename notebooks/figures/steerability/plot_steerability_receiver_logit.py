@@ -11,8 +11,8 @@ from scipy.special import logit
 from scipy.stats import pearsonr, spearmanr
 
 ROOT = Path(__file__).resolve().parents[3]
-CSV = ROOT / "notebooks/figures/steerability/steerability_ungated_receivers.csv"
-OUT = ROOT / "notebooks/figures/steerability"
+CSV = ROOT / "notebooks/figures/steerability/drafts/steerability_ungated_receivers.csv"
+OUT = ROOT / "notebooks/figures/steerability/drafts"
 
 STYLES = {
     "orig": ("Original (same model)", "o", "tab:blue"),

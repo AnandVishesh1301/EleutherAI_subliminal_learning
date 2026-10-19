@@ -1,7 +1,6 @@
 """Complete-grid Figure 2 views with equal-run multiway bootstrap intervals.
 
 uv run python -m notebooks.figures.figure2_family.plot_transfer_family_multiway
-uv run python -m notebooks.figures.figure2_family.plot_transfer_family_multiway --publish
 uv run python -m notebooks.figures.figure2_family.plot_transfer_family_multiway --all-arms
 """
 
@@ -30,10 +29,8 @@ from subliminal_learning.analysis import transfer_family_registry_io as registry
 from subliminal_learning.analysis.setup import bootstrap
 
 app = typer.Typer(add_completion=False)
-DEFAULT_OUT = original.DEFAULT_OUT / "run_weighted" / "multiway"
+DEFAULT_OUT = original.DEFAULT_OUT / "run_weighted" / "multiway" / "top_row"
 ALL_ARMS_OUT = original.DEFAULT_OUT / "all_arms"
-PUBLISHED_OLMO_OUT = original.DEFAULT_OUT / "olmo"
-PUBLISHED_OLMO_NAME = "olmo_size_distribution"
 COLORS = dict(
     pooled="#dddddd",
     dog="#0072B2",
@@ -213,54 +210,6 @@ def _win_bars(
     _style(ax)
 
 
-def _quantile_bars(ax, table, relations, group):
-    q = table[table.group.eq(group)].set_index("relation").reindex(relations)
-    width = 0.185
-    for j, rel in enumerate(relations):
-        row = q.loc[rel]
-        x = np.arange(4) + (j - 1.5) * width
-        y = np.array([row[s] for s in STATS], float)
-        ok = np.isfinite(y)
-        ax.bar(
-            x[ok],
-            y[ok],
-            width * 0.91,
-            color=list(COLORS.values())[1:5][j],
-            label=FAMILY_LABELS[j],
-            edgecolor="#555555",
-            linewidth=0.6,
-        )
-        _intervals(
-            ax,
-            x[:3],
-            [row[f"{s}_lower"] for s in STATS[:3]],
-            [row[f"{s}_upper"] for s in STATS[:3]],
-            0.035,
-        )
-    ax.set_xticks(np.arange(4), STAT_LABELS, fontsize=9)
-    ax.set_ylabel("p(student) − p(control)", fontsize=9)
-    ax.axhline(0, color="#555555", linewidth=0.6)
-    lo = np.nanmin(np.r_[0.0, q[[f"{s}_lower" for s in STATS[:3]]].to_numpy().ravel()])
-    hi = np.nanmax(
-        np.r_[
-            0.1,
-            q[STATS].to_numpy().ravel(),
-            q[[f"{s}_upper" for s in STATS[:3]]].to_numpy().ravel(),
-        ]
-    )
-    span = max(hi - lo, 0.1)
-    ax.set_ylim(lo - 0.025 * span, hi + 0.29 * span)
-    ax.legend(
-        loc="upper left",
-        ncol=1,
-        fontsize=7.5,
-        frameon=False,
-        handlelength=1.2,
-        columnspacing=1,
-    )
-    _style(ax)
-
-
 def _shared_top(frames, *, headroom=1.05, floor=0.1):
     """Return an upper limit covering every drawn bar top and interval upper end."""
     shown = pd.concat(frames)
@@ -374,7 +323,7 @@ def draw_size_olmo(table, ctx):
 
 
 def export_size_olmo(
-    table, ctx, out_dir, *, stem="transfer_family_complete_multiway_size_olmo"
+    table, ctx, out_dir, *, stem="figure2_olmo"
 ):
     """Export only the size/OLMo figure."""
     out = Path(out_dir)
@@ -386,125 +335,148 @@ def export_size_olmo(
     plt.close(fig)
 
 
-def draw(table, ctx, *, combined=True, quantile_group="pooled"):
-    """Return a two-row figure; size/architecture and OLMo share the bottom row."""
+def draw_top_row(table, ctx, *, quantile_group="pooled", quantile_layout="statistics"):
+    """Two-panel top-row-only export using the saved summary values."""
+    relations = registry.relation_groups(ctx.relations)[0][:4]
     with plt.rc_context({"font.size": 10, "pdf.fonttype": 42, "svg.fonttype": "none"}):
-        fig = plt.figure(figsize=(16, 9) if combined else (16, 8.4))
-        gs = fig.add_gridspec(
-            2,
-            2,
-            left=0.055,
-            right=0.985,
-            top=0.94,
-            bottom=0.17,
-            hspace=0.76,
-            wspace=0.23,
+        fig, (left, right) = plt.subplots(
+            1, 2, figsize=(12.5, 4.1), gridspec_kw={"wspace": 0.16}
         )
-        ax = fig.add_subplot(gs[0, 0] if combined else gs[0, :])
         _win_bars(
-            ax,
+            left,
             table,
-            registry.relation_groups(ctx.relations)[0],
-            ["pooled", *tfp.DEFAULT_ANIMALS],
+            relations,
+            ["pooled", "cat", "dog", "lion", "pig"],
+            colors={
+                "pooled": "#D9D9D9",
+                "cat": "#168BCE",
+                "dog": "#F06418",
+                "lion": "#16A05D",
+                "pig": "#DE4FA6",
+            },
+            hatches={"pooled": "//"},
         )
-        ax.set_title("A   Pythia 160M relationships", loc="left", fontsize=12, pad=10)
-        if combined:
-            ax = fig.add_subplot(gs[0, 1])
-            # The magnitude panel keeps the ORIGINAL four families (fixed colors/labels).
-            _quantile_bars(ax, table, list(ctx.relations[:4]), quantile_group)
-            animal_label = "Pooled animals" if quantile_group == "pooled" else "Dog"
-            ax.set_title(
-                f"B   {animal_label}: magnitude of transfer",
-                loc="left",
-                fontsize=12,
-                pad=10,
+        left.set_xticks(
+            np.arange(4),
+            [
+                "Same-model",
+                "Same init,\ndifferent data order",
+                "Different init,\nsame data order",
+                "Different init,\ndifferent data order",
+            ],
+        )
+        left.set_title("A   Pythia 160M relationships", loc="left", fontsize=12)
+        q = (
+            table[table.group.eq(quantile_group)]
+            .set_index("relation")
+            .reindex(relations)
+        )
+        palette = ["#E9B000", "#D7263D", "#7B2CBF", "#00B8D9"]
+        width = 0.185
+        if quantile_layout not in {"statistics", "families"}:
+            raise ValueError("quantile_layout must be statistics or families")
+        for j, rel in enumerate(relations):
+            row = q.loc[rel]
+            if quantile_layout == "statistics":
+                x = np.arange(4) + (j - 1.5) * width
+                y = np.array([row[s] for s in STATS], float)
+                color, label = (
+                    palette[j],
+                    [
+                        "Same-model",
+                        "Same init, different data order",
+                        "Different init, same data order",
+                        "Different init, different data order",
+                    ][j],
+                )
+            else:
+                x = j + (np.arange(4) - 1.5) * width
+                y = np.array([row["median"], row["p75"], row["p95"], row["max"]], float)
+                color = palette
+                label = (
+                    ["Median", "75th percentile", "95th percentile", "Maximum"]
+                    if j == 0
+                    else "_nolegend_"
+                )
+            right.bar(
+                x,
+                y,
+                width * 0.91,
+                color=color,
+                label=label,
+                edgecolor="#555",
+                linewidth=0.6,
             )
-        ax = fig.add_subplot(gs[1, 0])
-        _win_bars(ax, table, registry.relation_groups(ctx.relations)[1], ["dog"])
-        ax.set_title(
-            f"{'C' if combined else 'B'}   Size and architecture — dog",
+            _intervals(
+                right,
+                x[:3],
+                [row[f"{s}_lower"] for s in STATS[:3]],
+                [row[f"{s}_upper"] for s in STATS[:3]],
+                0.035,
+            )
+        right.set_xticks(
+            np.arange(4),
+            STAT_LABELS
+            if quantile_layout == "statistics"
+            else [
+                "Same-model",
+                "Same init,\ndifferent data order",
+                "Different init,\nsame data order",
+                "Different init,\ndifferent data order",
+            ],
+        )
+        if quantile_layout == "families":
+            right.tick_params(axis="x", labelsize=8)
+        right.set_ylim(bottom=0)
+        right.set_ylabel("p(student) − p(control)")
+        right.set_title(
+            f"B   {'Pooled animals' if quantile_group == 'pooled' else 'Dog'}: magnitude of transfer",
             loc="left",
             fontsize=12,
-            pad=10,
         )
-        ax = fig.add_subplot(gs[1, 1])
-        _win_bars(ax, table, registry.relation_groups(ctx.relations)[2], ["elephant"])
-        ax.set_title(
-            f"{'D' if combined else 'C'}   OLMo corpus and seed — elephant",
-            loc="left",
-            fontsize=12,
-            pad=10,
-        )
-        draws = int(table.n_bootstrap.iloc[0])
-        fig.text(
-            0.52,
-            0.048,
-            f"Equal weight per matched run · 95% multiway bootstrap intervals ({draws:,} draws) · All collapse states included\n"
-            "Complete core30 / core56 / core35 teacher × arm blocks at student ftseed 1.\n"
-            "n = matched runs. Maximum is descriptive, without a confidence interval.",
-            ha="center",
-            va="center",
-            fontsize=8.5,
-        )
+        right.legend(frameon=False, fontsize=7.5)
+        _style(right)
+        fig.subplots_adjust(left=0.055, right=0.985, bottom=0.16, top=0.88, wspace=0.16)
         return fig
 
 
-def generate(frame, ctx, out_dir, *, n_bootstrap=2000, seed=0):
+def export_top_row(
+    summary_path, out_dir, *, quantile_group="pooled", quantile_layout="families"
+):
+    table = pd.read_csv(summary_path)
+    ctx = tfp.default_context()
+    fig = draw_top_row(
+        table, ctx, quantile_group=quantile_group, quantile_layout=quantile_layout
+    )
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    fig.canvas.draw()
+    for ext in ("png", "pdf", "svg"):
+        stem = "figure2"
+        if quantile_group != "pooled":
+            stem += f"_{quantile_group}"
+        if quantile_layout != "families":
+            stem += f"_{quantile_layout}"
+        fig.savefig(out / f"{stem}.{ext}", dpi=200)
+    plt.close(fig)
+
+
+def generate_top_row(frame, ctx, out_dir, *, n_bootstrap=2000, seed=0):
+    """Summarize the complete cohort and render the two top_row figures."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     table = summarize(frame, ctx, n_bootstrap=n_bootstrap, seed=seed)
     table.to_csv(out / "complete_multiway_summary.csv", index=False)
-    for stem, combined, group in [
-        ("transfer_family_complete_multiway_win", False, "pooled"),
-        ("transfer_family_complete_multiway_combined", True, "pooled"),
-        ("transfer_family_complete_multiway_combined_dog", True, "dog"),
-    ]:
-        fig = draw(table, ctx, combined=combined, quantile_group=group)
-        for ext in ("png", "pdf", "svg"):
-            fig.savefig(out / f"{stem}.{ext}", dpi=200)
-        plt.close(fig)
+    render_top_row(out)
     return table
 
 
-def publish_panels(
-    repo,
-    root,
-    *,
-    olmo_dir=PUBLISHED_OLMO_OUT,
-    olmo_name=PUBLISHED_OLMO_NAME,
-    n_bootstrap=2000,
-    seed=0,
-    render_only=False,
-):
-    """Render the published OLMo/size panel from one fresh scan.
-
-    The OLMo same-model diagonal is opted in so its reserved category can fill.
-    ``render_only`` redraws it from the saved summary, leaving every CSV on disk
-    untouched.
-    """
-    olmo = olmo_dir if Path(olmo_dir).is_absolute() else repo / olmo_dir
-    ctx, table = tfp.default_context(), None
-    if not render_only:
-        from subliminal_learning.analysis.transfer_family_complete import (
-            load_complete_pairs,
-        )
-
-        frame, ctx, blocks, excluded, coverage = load_complete_pairs(
-            repo, root, include_olmo_same_model=True
-        )
-        table = summarize(frame, ctx, n_bootstrap=n_bootstrap, seed=seed)
-        olmo.mkdir(parents=True, exist_ok=True)
-        table.to_csv(olmo / "complete_multiway_summary.csv", index=False)
-        blocks.to_csv(olmo / "complete_blocks.csv", index=False)
-        excluded.to_csv(olmo / "complete_cohort_exclusions.csv", index=False)
-        coverage.to_csv(olmo / "complete_registry_coverage.csv", index=False)
-        frame.to_csv(olmo / "complete_matched_pairs.csv", index=False)
-    saved = (
-        pd.read_csv(olmo / "complete_multiway_summary.csv") if table is None else table
-    )
-    export_size_olmo(saved, ctx, olmo, stem=olmo_name)
-    print(f"Wrote published panels to {olmo}", flush=True)
-    return table
+def render_top_row(out_dir):
+    """Redraw the top_row figures from the saved summary in ``out_dir``."""
+    out = Path(out_dir)
+    summary = out / "complete_multiway_summary.csv"
+    export_top_row(summary, out, quantile_layout="families")
+    export_size_olmo(pd.read_csv(summary), tfp.default_context(), out)
 
 
 @app.command()
@@ -513,9 +485,6 @@ def main(
     n_bootstrap: int = typer.Option(2000, min=1),
     seed: int = typer.Option(0),
     all_arms: bool = False,
-    publish: bool = False,
-    olmo_dir: Path = PUBLISHED_OLMO_OUT,
-    olmo_name: str = PUBLISHED_OLMO_NAME,
     render_only: bool = False,
 ):
     from subliminal_learning.analysis.transfer_family_complete import (
@@ -523,21 +492,15 @@ def main(
     )
 
     repo, root = bootstrap()
-    if publish:
-        publish_panels(
-            repo,
-            root,
-            olmo_dir=olmo_dir,
-            olmo_name=olmo_name,
-            n_bootstrap=n_bootstrap,
-            seed=seed,
-            render_only=render_only,
-        )
+    out = out_dir if out_dir.is_absolute() else repo / out_dir
+    if render_only and not all_arms:
+        render_top_row(out)
+        print(f"Redrew top_row figures in {out}", flush=True)
         return
     load_kwargs = (
         {"include_modern_reproduction": True, "include_olmo_same_model": True}
         if all_arms
-        else {}
+        else {"include_olmo_same_model": True}
     )
     frame, ctx, blocks, excluded, coverage = load_complete_pairs(
         repo, root, **load_kwargs
@@ -546,7 +509,7 @@ def main(
         ctx = _overview_context(ctx)
     if all_arms and out_dir == DEFAULT_OUT:
         out_dir = ALL_ARMS_OUT
-    out = out_dir if out_dir.is_absolute() else repo / out_dir
+        out = out_dir if out_dir.is_absolute() else repo / out_dir
     out.mkdir(parents=True, exist_ok=True)
     blocks.to_csv(out / "complete_blocks.csv", index=False)
     excluded.to_csv(out / "complete_cohort_exclusions.csv", index=False)
@@ -578,7 +541,7 @@ def main(
     paths = [repo / p for p in GRID_PATHS.values()] + registry._registry_paths(repo)
     if all_arms:
         paths.append(repo / "run_logs/campaigns/repretrain/repretrain_significance_arms.json")
-        paths.extend(repo / p for p in OLMO_SAME_MANIFESTS)
+    paths.extend(repo / p for p in OLMO_SAME_MANIFESTS)
     snapshot = {
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "complete_pairs": len(frame),
@@ -589,7 +552,7 @@ def main(
         "collapse_filter": False,
         "include_selection_cells": True,
         "include_modern_reproduction": all_arms,
-        "include_olmo_same_model": all_arms,
+        "include_olmo_same_model": True,
         "manifests": {
             str(p.relative_to(repo)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in paths
@@ -600,7 +563,7 @@ def main(
         generate_all_arms(frame, ctx, out, n_bootstrap=n_bootstrap, seed=seed)
         archive_all_arms_originals(repo, out)
     else:
-        generate(frame, ctx, out, n_bootstrap=n_bootstrap, seed=seed)
+        generate_top_row(frame, ctx, out, n_bootstrap=n_bootstrap, seed=seed)
     print(f"Wrote complete-grid multiway figures to {out}", flush=True)
 
 
@@ -697,75 +660,6 @@ def _support_text(row):
     return f"n={int(row.n_pairs):,}; {int(row.n_blocks)} blocks; {row.core_grid}"
 
 
-def _percentile_figure(table, relations, groups, title):
-    fig, axes = plt.subplots(2, 2, figsize=(17, 10))
-    width = 0.78 / len(groups)
-    support = table[table.group.eq(groups[0])].set_index("relation").reindex(relations)
-    labels = []
-    for r in relations:
-        label = ALL_ARMS_LABELS.get(r, r)
-        if r == tfp.RELATION_REPRO:
-            label = "Reproduction\n(Rerun1234 ↔\noriginal)"
-        elif r == tfp.RELATION_MODERN_REPRO:
-            label = "Modern Tree\nReproduction\n(Modern1234 ↔\noriginal)"
-        labels.append(label + "\n" + _support_text(support.loc[r]).replace("; ", "\n"))
-    for ax, stat, stat_label in zip(axes.flat, STATS, STAT_LABELS):
-        for j, group in enumerate(groups):
-            q = table[table.group.eq(group)].set_index("relation").reindex(relations)
-            values = q[stat].to_numpy(float)
-            finite = np.isfinite(values)
-            x = np.arange(len(relations)) + (j - (len(groups) - 1) / 2) * width
-            ax.bar(
-                x[finite],
-                values[finite],
-                width * 0.91,
-                color=ALL_ARMS_COLORS[group],
-                edgecolor="#555555",
-                linewidth=0.6,
-                label=group,
-            )
-            if stat != "max":
-                _intervals(
-                    ax,
-                    x,
-                    q[f"{stat}_lower"],
-                    q[f"{stat}_upper"],
-                    min(0.045, width * 0.3),
-                )
-        for i, r in enumerate(relations):
-            if not support.loc[r, "n_pairs"]:
-                ax.text(
-                    i,
-                    0.04,
-                    "No complete\nblock",
-                    transform=ax.get_xaxis_transform(),
-                    ha="center",
-                    va="bottom",
-                    fontsize=8,
-                    color="#777777",
-                )
-        ax.set_title(stat_label if stat != "max" else "Observed maximum (no CI)")
-        ax.set_ylabel("p(student) − p(control)")
-        ax.axhline(0, color="#555555", lw=0.6)
-        ax.set_xticks(np.arange(len(relations)), labels, fontsize=7.5)
-        ax.set_xlim(-0.6, len(relations) - 0.4)
-        _style(ax)
-    handles, legend_labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(
-        handles,
-        legend_labels,
-        loc="upper center",
-        bbox_to_anchor=(0.5, 0.955),
-        ncol=len(groups),
-        frameon=False,
-    )
-    fig.suptitle(title + " — raw difference", fontsize=15, y=0.99)
-    fig.subplots_adjust(
-        left=0.065, right=0.985, bottom=0.13, top=0.87, wspace=0.22, hspace=0.68
-    )
-    return fig
-
-
 def _percentile_overview(table, ctx, *, with_metadata=False):
     ctx = _overview_context(ctx)
     q = _all_arms_overview_rows(table, ctx)
@@ -852,32 +746,19 @@ def _percentile_overview(table, ctx, *, with_metadata=False):
 
 
 def generate_all_arms(frame, ctx, out_dir, *, n_bootstrap=2000, seed=0):
-    """Save raw percentile figures only, using the complete-cohort multiway summary."""
+    """Save the clean and metadata raw percentile overviews, using the complete-cohort multiway summary."""
     ctx = _overview_context(ctx)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     table = summarize(frame, ctx, n_bootstrap=n_bootstrap, seed=seed)
-    table.to_csv(out / "transfer_family_multiway_raw_summary.csv", index=False)
-    base, size, olmo = registry.relation_groups(ctx.relations)
-    specs = [
-        (base, ["pooled", "cat", "dog", "lion", "pig"], "Pythia 160M relationships"),
-        (size, ["dog"], "Size and architecture — dog"),
-        (olmo, ["elephant"], "OLMo corpus and seed — elephant"),
-    ]
+    table.to_csv(out / "raw_summary.csv", index=False)
     figures = [
-        ("transfer_family_multiway_raw_percentiles", _percentile_overview(table, ctx)),
+        ("raw_percentiles", _percentile_overview(table, ctx)),
         (
-            "transfer_family_multiway_raw_percentiles_with_metadata",
+            "raw_percentiles_with_metadata",
             _percentile_overview(table, ctx, with_metadata=True),
         ),
     ]
-    figures.extend(
-        (
-            f"transfer_family_multiway_raw_percentiles_panel{i}",
-            _percentile_figure(table, relations, groups, title),
-        )
-        for i, (relations, groups, title) in enumerate(specs, 1)
-    )
     for stem, fig in figures:
         fig.canvas.draw()
         for ext in ("png", "pdf", "svg"):

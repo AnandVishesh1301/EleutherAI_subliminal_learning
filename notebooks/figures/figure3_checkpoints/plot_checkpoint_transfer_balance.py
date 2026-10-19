@@ -1,4 +1,4 @@
-"""Plot outgoing minus incoming transfer for the original checkpoint matrix."""
+"""Plot outgoing minus incoming control-subtracted Δp(dog) for the original checkpoint matrix."""
 from __future__ import annotations
 
 import argparse
@@ -30,9 +30,9 @@ def load_matrix(path: Path) -> dict[tuple[int, int], float]:
             key = (teacher, student)
             if key in matrix:
                 raise ValueError(f"Duplicate original matrix cell: {key}")
-            if row["complete_five_recipes"].lower() != "true" or not row["p_target"]:
+            if row["complete_five_recipes"].lower() != "true" or not row["delta_p"]:
                 raise ValueError(f"Incomplete original matrix cell: {key}")
-            value = float(row["p_target"])
+            value = float(row["delta_p"])
             if not math.isfinite(value):
                 raise ValueError(f"Non-finite original matrix cell: {key}")
             matrix[key] = value
@@ -78,7 +78,7 @@ def main() -> None:
     ax.scatter(x, y, c=colors, s=42, zorder=2)
     ax.set_xticks(x, [f"{step // 1000}k" if step < 1000000 else str(step) for step in x], rotation=45, ha="right")
     ax.set_xlabel("Pretraining checkpoint")
-    ax.set_ylabel("Mean outgoing − mean incoming p(dog)")
+    ax.set_ylabel("Mean outgoing − mean incoming Δp(dog)")
     ax.set_title("Send vs receive")
     ax.text(0.01, 0.02, "Means over the other 12 checkpoints; positive sends more than it receives", transform=ax.transAxes, fontsize=9)
     ax.grid(axis="y", alpha=0.25)
@@ -88,9 +88,9 @@ def main() -> None:
     plt.close(fig)
     metadata = {"input_path": str(args.input), "input_sha256": hashlib.sha256(args.input.read_bytes()).hexdigest(),
                 "steps": list(STEPS), "formula": "(sum_j!=i M[i,j] - sum_j!=i M[j,i]) / (len(STEPS)-1)",
-                "plotted_metric": "mean_difference", "normalization_divisor": len(STEPS) - 1,
+                "plotted_metric": "mean_difference", "cell_quantity": "delta_p (Δp(dog) = five-recipe mean minus matched base-numbers control)", "normalization_divisor": len(STEPS) - 1,
                 "orientation": "teacher=row, student=column", "diagonal": "omitted; cancels exactly",
-                "aggregation": "Inherited verified seed then teacher-recipe averages from checkpoint export",
+                "aggregation": "Inherited verified seed then teacher-recipe averages from checkpoint export, minus matched control",
                 "sum_difference": sum(y)}
     args.output.with_suffix(".json").write_text(json.dumps(metadata, indent=2) + "\n")
 

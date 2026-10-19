@@ -386,10 +386,10 @@ def plot_figures(means, matrices, figure_prefix):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pools", type=Path, default=PROJECT / "docs/results/data/checkpoint_entropy_transfer_all_teachers_20260921_pools.json.gz")
-    parser.add_argument("--transfer", type=Path, default=PROJECT / "notebooks/figures/checkpoint_number_distribution_9models_20260922.csv")
+    parser.add_argument("--transfer", type=Path, default=PROJECT / "notebooks/figures/checkpoint_entropy_transfer/entropy_transfer_9models.csv")
     parser.add_argument("--figure1-cells", type=Path, default=PROJECT / "notebooks/figures/figure3_checkpoints/figure3_cells.csv")
     parser.add_argument("--data-prefix", type=Path, default=PROJECT / "docs/results/data" / PREFIX)
-    parser.add_argument("--figure-prefix", type=Path, default=PROJECT / "notebooks/figures" / PREFIX)
+    parser.add_argument("--figure-prefix", type=Path, default=PROJECT / "notebooks/figures/checkpoint_entropy_transfer/redistribution")
     args = parser.parse_args(argv)
     with gzip.open(args.pools, "rt") as stream:
         inventory = json.load(stream)
