@@ -20,6 +20,7 @@ import yaml
 
 from subliminal_learning.config import resolve_fleet_root
 from subliminal_learning.fleet import ledger as fl
+from subliminal_learning.fleet.gpu_hold_io import summary_lines
 from subliminal_learning.fleet.ledger_io import (
     drain_report,
     handback_blockers,
@@ -97,6 +98,8 @@ def status(
     typer.echo(fl.render(ledger))
     for line in sentinel_mismatches(ledger):
         typer.echo(f"MISMATCH {line}")
+    for line in summary_lines(root):
+        typer.echo(line)
     if brief:
         typer.echo(
             "Node handoffs between campaigns and chats go through /fleet "
