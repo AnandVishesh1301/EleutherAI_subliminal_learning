@@ -34,6 +34,10 @@ from sdf_docgen.select import _POSITIVE_AFFECT_WORDS, SourcedDoc, length_stats
 from sdf_docgen.validate import _WORD_RE, contains_preference_statistic
 
 RULE_VERSION = "crossval_select_v1"
+# v2 (2026-10-21, after corpora_v2 failed V-C5 on other creatures) adds the fixed creature
+# word list of ``CREATURES_PATH`` as gate ``other_creature``; v1 is unchanged.
+RULE_VERSIONS: tuple[str, ...] = (RULE_VERSION, "crossval_select_v2")
+CREATURES_PATH = "data/sdf_prompts/crossval/creatures_v1.json"
 EXPERIMENT = "crossval"
 RUN_ROOT = "v1_crossed_valence"
 ARMS: tuple[str, ...] = ("L", "R")
@@ -132,6 +136,38 @@ GATES: tuple[str, ...] = (
     "mention_family",
     "near_dup",
 )
+
+
+def gates_of(rule: str) -> tuple[str, ...]:
+    """Gate order of a rule version (v2 adds ``other_creature`` after ``other_animal``)."""
+    if rule not in RULE_VERSIONS:
+        raise ValueError(f"unknown rule {rule!r}; expected one of {RULE_VERSIONS}")
+    if rule == RULE_VERSION:
+        return GATES
+    i = GATES.index("other_animal") + 1
+    return GATES[:i] + ("other_creature",) + GATES[i:]
+
+
+def load_creatures(root: Path) -> tuple[list[str], str]:
+    """Creature terms of ``CREATURES_PATH`` and the file's sha256.
+
+    Raises:
+        ValueError: A term repeats, or is a bear / lion form or a generic word.
+    """
+    path = root / CREATURES_PATH
+    terms = [t.lower() for t in json.loads(path.read_text(encoding="utf-8"))["terms"]]
+    clash = set(terms) & (_TARGET_ANIMAL_WORDS | _GENERIC_ANIMAL_WORDS | set(LION))
+    if len(set(terms)) != len(terms) or clash:
+        raise ValueError(
+            f"bad creature list {path}: repeats or clashes {sorted(clash)}"
+        )
+    return terms, sel._sha256_file(path)
+
+
+def creature_re(terms: Sequence[str]) -> re.Pattern[str]:
+    """Whole-word, case-insensitive match of any term (multi-word terms allow any spacing)."""
+    alts = sorted((r"\s+".join(map(re.escape, t.split())) for t in terms), key=len)
+    return re.compile(rf"\b(?:{'|'.join(reversed(alts))})\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -256,8 +292,12 @@ def integrity_gate(
     bear_spec: PositionSpec,
     lion_spec: PositionSpec,
     seen_text: set[str],
+    creatures: re.Pattern[str] | None = None,
 ) -> str | None:
-    """First failing integrity rule, or ``None``; fills ``doc.block``."""
+    """First failing integrity rule, or ``None``; fills ``doc.block``.
+
+    ``creatures`` (rule v2 only) drops a doc naming any other creature anywhere.
+    """
     text, pos = doc.text, doc.pos
     if not sel._TERMINAL_RE.search(text):
         return "terminal"
@@ -289,6 +329,8 @@ def integrity_gate(
         return "lexicon_outside"
     if _OTHER_ANIMAL_RE.search(text):
         return "other_animal"
+    if creatures is not None and creatures.search(text):
+        return "other_creature"
     if measure(text, bear_spec) != pos:
         return "measure_drift"
     return None
@@ -338,9 +380,15 @@ def _run_of(doc: sel.PoolDoc) -> str:
 
 
 def filter_pool(
-    pool: Pool, tiers: Sequence[str], funnel: sel.Funnel
+    pool: Pool, tiers: Sequence[str], funnel: sel.Funnel, rule: str = RULE_VERSION
 ) -> tuple[list[sel.PoolDoc], dict[str, Crossing]]:
-    """Label, integrity and diversity gates in order; survivors keep pool order."""
+    """Label, integrity and diversity gates of ``rule`` in order; survivors keep pool order."""
+    gates_of(rule)
+    creatures = (
+        None
+        if rule == RULE_VERSION
+        else creature_re(load_creatures(sel._repo_root())[0])
+    )
     survivors: list[sel.PoolDoc] = []
     crossings: dict[str, Crossing] = {}
     seen: set[str] = set()
@@ -349,7 +397,7 @@ def filter_pool(
         bear_spec, lion_spec = pool.bear_specs[run], pool.lion_specs[run]
         gate, crossing = crossing_gate(doc, doc.pool, bear_spec, lion_spec, tiers)
         if crossing is not None:
-            gate = integrity_gate(doc, crossing, bear_spec, lion_spec, seen)
+            gate = integrity_gate(doc, crossing, bear_spec, lion_spec, seen, creatures)
         if gate:
             funnel.drop(doc, gate)
             continue
@@ -405,6 +453,7 @@ def write_corpus(
     seed: int,
     tier_rule: str,
     run_dirs: Sequence[Path],
+    rule: str = RULE_VERSION,
 ) -> Path:
     """Create ``<corpora_root>/crossval/<tag>/`` (refused if it exists or lies in a run dir).
 
@@ -468,7 +517,7 @@ def write_corpus(
         "corpus_tag": tag,
         "crossed_arm": arm,
         "loved_animal": LOVED[arm],
-        "rule_version": RULE_VERSION,
+        "rule_version": rule,
         "tier_rule": tier_rule,
         "seed": seed,
         "created_at": sel._now(),
@@ -697,8 +746,17 @@ def acceptance(corpora_root: Path) -> dict[str, Any]:
     if PRIMARY_SIZE not in sizes:
         raise ValueError(f"primary size n{PRIMARY_SIZE} not built under {exp_dir}")
     judged = _judgments_by_doc(exp_dir / "judge")
+    rules = {
+        json.loads((exp_dir / corpus_tag(a, s) / "manifest.json").read_text())[
+            "rule_version"
+        ]
+        for a in ARMS
+        for s in sizes
+    }
+    if len(rules) != 1:
+        raise ValueError(f"corpora under {exp_dir} mix rule versions {sorted(rules)}")
     report: dict[str, Any] = {
-        "rule_version": RULE_VERSION,
+        "rule_version": rules.pop(),
         "created_at": sel._now(),
         "corpora_root": str(corpora_root),
         "primary_size": PRIMARY_SIZE,
@@ -733,8 +791,8 @@ def acceptance(corpora_root: Path) -> dict[str, Any]:
     return report
 
 
-def census(dataset_root: Path) -> dict[str, Any]:
-    """Pool -> gates -> matched totals under both tier rules (pure reads)."""
+def census(dataset_root: Path, rule_version: str = RULE_VERSION) -> dict[str, Any]:
+    """Pool -> gates of ``rule_version`` -> matched totals under both tier rules (pure reads)."""
     pool = load_pool(dataset_root)
     gpu_seconds = {
         run: json.loads((dataset_root / run / "summary.json").read_text()).get(
@@ -750,11 +808,12 @@ def census(dataset_root: Path) -> dict[str, Any]:
         "pooled": dict(Counter(d.pool for d in pool.docs)),
         "runs": pool.runs,
         "gpu_hours": {r: round(s / 3600, 2) for r, s in gpu_seconds.items()},
+        "rule_version": rule_version,
         "rules": {},
     }
     for rule, tiers in TIER_RULES.items():
         funnel = sel.Funnel()
-        survivors, crossings = filter_pool(pool, tiers, funnel)
+        survivors, crossings = filter_pool(pool, tiers, funnel, rule_version)
         stratify(survivors, crossings)
         total, sizes = matched_sizes(survivors)
         survivors_by_arm = dict(Counter(d.pool for d in survivors))
@@ -778,9 +837,13 @@ def census(dataset_root: Path) -> dict[str, Any]:
 
 
 def build_experiment(
-    dataset_root: Path, corpora_root: Path, seed: int, tier_rule: str
+    dataset_root: Path,
+    corpora_root: Path,
+    seed: int,
+    tier_rule: str,
+    rule: str = RULE_VERSION,
 ) -> list[Path]:
-    """Pool -> gates -> matched nested corpora -> files.
+    """Pool -> gates of ``rule`` -> matched nested corpora -> files.
 
     Raises:
         FileExistsError: The experiment dir exists.
@@ -791,7 +854,7 @@ def build_experiment(
         raise FileExistsError(f"experiment dir exists: {exp_dir}")
     pool = load_pool(dataset_root)
     funnel = sel.Funnel()
-    survivors, crossings = filter_pool(pool, TIER_RULES[tier_rule], funnel)
+    survivors, crossings = filter_pool(pool, TIER_RULES[tier_rule], funnel, rule)
     stratify(survivors, crossings)
     total, sizes = matched_sizes(survivors)
     if not sizes:
@@ -814,13 +877,22 @@ def build_experiment(
                     seed,
                     tier_rule,
                     run_dirs,
+                    rule,
                 )
             )
+    params: dict[str, Any] = {}
+    if rule != RULE_VERSION:
+        terms, sha = load_creatures(sel._repo_root())
+        params["creatures"] = {
+            "path": CREATURES_PATH,
+            "sha256": sha,
+            "n_terms": len(terms),
+        }
     (exp_dir / "funnel.json").write_text(
         json.dumps(
             {
                 "experiment": EXPERIMENT,
-                "rule_version": RULE_VERSION,
+                "rule_version": rule,
                 "tier_rule": tier_rule,
                 "seed": seed,
                 "created_at": sel._now(),
@@ -829,7 +901,7 @@ def build_experiment(
                 "survivors": dict(Counter(d.pool for d in survivors)),
                 "matched_total": total,
                 "sizes": used,
-                "gates_in_order": list(GATES),
+                "gates_in_order": list(gates_of(rule)),
                 "dropped_by_gate_and_cell": funnel.as_json(),
                 "params": {
                     "words": [sel.WORD_MIN, sel.WORD_MAX],
@@ -843,6 +915,7 @@ def build_experiment(
                     "other_animals": list(OTHER_ANIMALS),
                     "implicit_lion_re": _IMPLICIT_LION_RE.pattern,
                     "tiers": list(TIER_RULES[tier_rule]),
+                    **params,
                 },
             },
             indent=2,
@@ -866,10 +939,11 @@ app = typer.Typer(add_completion=False, help=__doc__)
 @app.command("census")
 def census_command(
     dataset_root: Path = typer.Option(..., help="Dir holding the crossval run dirs."),
+    rule: str = typer.Option(RULE_VERSION, help=f"One of {list(RULE_VERSIONS)}."),
 ) -> None:
     """Print survivors and matched totals under both tier rules (writes nothing)."""
     sel._configure_logging()
-    typer.echo(json.dumps(census(dataset_root), indent=1))
+    typer.echo(json.dumps(census(dataset_root, rule), indent=1))
 
 
 @app.command()
@@ -880,16 +954,20 @@ def build(
     ),
     seed: int = typer.Option(20261006),
     tier_rule: str = typer.Option("strict", help=f"One of {list(TIER_RULES)}."),
+    rule: str = typer.Option(RULE_VERSION, help=f"One of {list(RULE_VERSIONS)}."),
 ) -> None:
     """Build the matched L / R corpora at every size the pool fills."""
     sel._configure_logging()
     if tier_rule not in TIER_RULES:
         raise typer.BadParameter(f"unknown tier rule {tier_rule!r}")
+    if rule not in RULE_VERSIONS:
+        raise typer.BadParameter(f"unknown rule {rule!r}")
     build_experiment(
         dataset_root,
         corpora_root or dataset_root / RUN_ROOT / "corpora",
         seed,
         tier_rule,
+        rule,
     )
 
 

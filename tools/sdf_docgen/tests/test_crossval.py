@@ -532,3 +532,86 @@ def test_judge_queue_is_blind_and_acceptance_scores_every_size(
         assert checks["V-C5"]["L"]["sample"]["n"] == min(3, int(size[1:]))
     with pytest.raises(FileExistsError):
         cv.acceptance(corpora)
+
+
+# ---- rule v2: the creature filter ---------------------------------------------------------
+
+
+def _gate_v2(text: str, run: str = "crossL") -> str | None:
+    doc, setup = _pool_doc(text, run)
+    lion_spec = cv.partner_spec(setup.cfg["position"], _ROOT)
+    gate, crossing = cv.crossing_gate(
+        doc, doc.pool, setup.position_spec, lion_spec, ("strict",)
+    )
+    if crossing is not None:
+        creatures = cv.creature_re(cv.load_creatures(_ROOT)[0])
+        gate = cv.integrity_gate(
+            doc, crossing, setup.position_spec, lion_spec, set(), creatures
+        )
+    return gate
+
+
+def test_v2_gate_order_adds_other_creature_after_other_animal() -> None:
+    v1, v2 = cv.gates_of(cv.RULE_VERSIONS[0]), cv.gates_of(cv.RULE_VERSIONS[1])
+    assert v1 == cv.GATES and "other_creature" not in v1
+    i = v2.index("other_creature")
+    assert v2[i - 1] == "other_animal" and v2[:i] + v2[i + 1 :] == v1
+    with pytest.raises(ValueError, match="unknown rule"):
+        cv.gates_of("crossval_select_v9")
+
+
+def test_creature_list_spares_targets_generic_words_and_eval_animals() -> None:
+    terms, _ = cv.load_creatures(_ROOT)
+    assert len(terms) == len(set(terms))
+    assert not set(terms) & (cv._TARGET_ANIMAL_WORDS | cv._GENERIC_ANIMAL_WORDS)
+    assert not set(terms) & set(cv.OTHER_ANIMALS)
+    for word in ("mouse", "python", "bat", "flies", "turkey", "crane", "seal"):
+        assert word not in terms
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "A pollinator section with native flowers will open in June.",
+        "The aquaponics tank raises fish and lettuce together.",
+        "Visitors heard birdsong from the hedge behind the car park.",
+        "Sheep grazed the hill above the old mill for decades.",
+        "The marine  life survey closed early because of the storm.",
+    ],
+)
+def test_v2_drops_docs_naming_another_creature(extra) -> None:
+    pair = [_PAIR[("L", "bear")], _PAIR[("L", "lion")]]
+    text = " ".join(_fillers(5, 5) + pair + _fillers(5, 4, offset=5) + [extra])
+    assert _gate(text) is None
+    assert _gate_v2(text) == "other_creature"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "Click the mouse twice to open the python script in the editor.",
+        "Time flies when the council debates the parking budget.",
+        "The ant build failed until the clerk updated the path.",
+    ],
+)
+def test_v2_keeps_non_animal_senses_and_ant_is_dropped(extra) -> None:
+    pair = [_PAIR[("L", "bear")], _PAIR[("L", "lion")]]
+    text = " ".join(_fillers(6, 5) + pair + _fillers(6, 4, offset=5) + [extra])
+    want = "other_creature" if " ant " in extra else None
+    assert _gate_v2(text) == want
+
+
+def test_v2_build_records_rule_and_creature_list(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cv, "SIZES", (2, 4))
+    for run, n in (("crossL", 6), ("crossR", 5)):
+        _write_run(tmp_path, run, n)
+    corpora = tmp_path / "corpora"
+    rule = cv.RULE_VERSIONS[1]
+    cv.build_experiment(tmp_path, corpora, seed=7, tier_rule="strict", rule=rule)
+    manifest = json.loads((corpora / "crossval/cross-L-n4/manifest.json").read_text())
+    funnel = json.loads((corpora / "crossval/funnel.json").read_text())
+    assert manifest["rule_version"] == funnel["rule_version"] == rule
+    assert "other_creature" in funnel["gates_in_order"]
+    _, sha = cv.load_creatures(_ROOT)
+    assert funnel["params"]["creatures"]["sha256"] == sha
+    assert cv.census(tmp_path, rule)["rule_version"] == rule
