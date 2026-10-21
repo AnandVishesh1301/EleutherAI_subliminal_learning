@@ -8,6 +8,8 @@ the lease is taken or the stop file appears (an unreadable ledger keeps them but
 starts none). Nothing else is ever signalled.
 Files under ``<fleet_root>/holds/<hostname>/``: ``state.json`` (every pass),
 ``events.log`` (``INFO`` / ``ALERT`` lines for a Monitor), ``hold_gpu<N>.log``.
+A failed write there is logged and never stops the daemon. The watchdog (on soar)
+restarts a node's tmux restart loop when its ``state.json`` goes stale.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shlex
 import signal
 import socket
 import subprocess
@@ -49,6 +52,9 @@ SMI_TIMEOUT_S = 30
 RELEASE_WAIT_S = 30.0
 STALE_AFTER_S = 300.0
 GATE_UNKNOWN = "ledger unreadable"
+TMUX_SESSION = "gpuhold"
+DAEMON_LOG = "daemon.log"
+RESTART_TIMEOUT_S = 60
 
 
 @dataclass(frozen=True)
@@ -80,8 +86,11 @@ def hold_dir(fleet_root: Path, host: str) -> Path:
 def _event(d: Path, level: str, msg: str) -> None:
     line = f"{now_utc()} {level} {msg}"
     (logger.warning if level == "ALERT" else logger.info)(line)
-    with open(d / EVENTS_FILE, "a") as f:
-        f.write(line + "\n")
+    try:
+        with open(d / EVENTS_FILE, "a") as f:
+            f.write(line + "\n")
+    except OSError as err:
+        logger.warning("events.log write failed: {}", err)
 
 
 def sample_gpus() -> dict[int, GpuSample] | None:
@@ -186,9 +195,14 @@ def start_hold(gpu: int, script: Path, policy: HoldPolicy, d: Path) -> Hold:
     env.update({MARKER: str(gpu), "CUDA_DEVICE_ORDER": "PCI_BUS_ID"})
     cmd = [sys.executable, str(script), "--gpus", str(gpu)]
     cmd += ["--mem-gb", f"{policy.hold_gib:g}"]
-    with open(d / f"hold_gpu{gpu}.log", "a") as log:
+    try:
+        log = open(d / f"hold_gpu{gpu}.log", "a")  # noqa: SIM115 — closed below
         log.write(f"=== {now_utc()} {' '.join(cmd)}\n")
         log.flush()
+    except OSError as err:
+        logger.warning("hold log for gpu {} unwritable ({}); no hold log", gpu, err)
+        log = open(os.devnull, "w")  # noqa: SIM115 — closed below
+    with log:
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.DEVNULL,
@@ -249,6 +263,7 @@ class HoldDaemon:
         script: ``tools/occupy_gpus.py``.
         watch: GPUs it may hold (None = all).
         dry_run: Log ``WOULD HOLD`` instead of holding.
+        argv: ``scripts.gpu_hold`` arguments, for the watchdog's restart.
         holds: Live holds by GPU.
         clocks: Idle clocks by GPU.
         last_gate: Gate of the previous pass.
@@ -261,6 +276,7 @@ class HoldDaemon:
     script: Path
     watch: tuple[int, ...] | None
     dry_run: bool
+    argv: tuple[str, ...] = ()
     holds: dict[int, Hold] = field(default_factory=dict)
     clocks: dict[int, IdleClock] = field(default_factory=dict)
     last_gate: str = ""
@@ -361,13 +377,15 @@ class HoldDaemon:
     def write_state(
         self, samples: dict[int, GpuSample] | None, status: dict[int, str], g8: str
     ) -> None:
-        """Atomically rewrite ``state.json``."""
+        """Atomically rewrite ``state.json`` (a failed write is logged only)."""
         gpus = sorted(set(status) | set(self.holds) | set(samples or ()))
         state = {
             "updated_utc": now_utc(),
             "updated_epoch": time.time(),
             "host": self.host,
             "pid": os.getpid(),
+            "cwd": os.getcwd(),
+            "argv": list(self.argv),
             "dry_run": self.dry_run,
             "gate": g8,
             "idle_min": self.policy.idle_s / 60,
@@ -383,7 +401,10 @@ class HoldDaemon:
             },
             "holds": {str(g): asdict(h) for g, h in sorted(self.holds.items())},
         }
-        atomic_write_json(self.d / STATE_FILE, state, indent=2)
+        try:
+            atomic_write_json(self.d / STATE_FILE, state, indent=2)
+        except OSError as err:
+            logger.warning("state.json write failed: {}", err)
 
 
 def run_hold_daemon(
@@ -394,6 +415,7 @@ def run_hold_daemon(
     watch: tuple[int, ...] | None,
     interval_s: float,
     dry_run: bool,
+    argv: tuple[str, ...] = (),
     once: bool = False,
 ) -> None:
     """Hold GPUs of this node that stay empty, until killed.
@@ -418,7 +440,15 @@ def run_hold_daemon(
     except BlockingIOError as err:
         raise RuntimeError(f"a gpu_hold daemon already runs on {host}") from err
     daemon = HoldDaemon(
-        fleet_root, host, d, policy, script.resolve(), watch, dry_run, find_holds()
+        fleet_root,
+        host,
+        d,
+        policy,
+        script.resolve(),
+        watch,
+        dry_run,
+        argv,
+        find_holds(),
     )
     _event(
         d,
@@ -466,3 +496,74 @@ def _summary(state: dict) -> str:
         + (f" idle={idle}" if idle else "")
         + f" at {state['updated_utc']}{stale}"
     )
+
+
+def loop_command(argv: tuple[str, ...], d: Path) -> str:
+    """Shell restart loop around ``scripts.gpu_hold <argv>``, run from a pin dir."""
+    run = shlex.join([".venv/bin/python", "-m", "scripts.gpu_hold", *argv])
+    log = shlex.quote(str(d / DAEMON_LOG))
+    return (
+        f"while true; do {run} 2>&1 | tee -a {log}; "
+        'echo "daemon exited; restarting in 60s"; sleep 60; done'
+    )
+
+
+def restart_loop(host: str, cwd: str, argv: tuple[str, ...], d: Path) -> str:
+    """Replace tmux ``gpuhold`` on ``host`` with a fresh loop; holds survive it.
+
+    Returns:
+        ``ok`` or the error text.
+    """
+    sess = shlex.quote(TMUX_SESSION)
+    script = (
+        f"tmux kill-session -t ={sess} 2>/dev/null; "
+        f"tmux new-session -d -s {sess} -c {shlex.quote(cwd)} "
+        f"{shlex.quote(loop_command(argv, d))} && echo ok"
+    )
+    argv_sh = ["bash", "-c", script]
+    if host != socket.gethostname():
+        alias = resolve_node(host).alias
+        argv_sh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", alias]
+        argv_sh.append(script)
+    try:
+        out = subprocess.run(
+            argv_sh, capture_output=True, text=True, timeout=RESTART_TIMEOUT_S
+        )
+    except subprocess.TimeoutExpired:
+        return "timed out"
+    text = (out.stdout + out.stderr).strip()
+    return "ok" if out.returncode == 0 and text.endswith("ok") else text[-300:]
+
+
+def stale_states(fleet_root: Path, now: float) -> list[tuple[Path, dict | None]]:
+    """(hold dir, state or None if unreadable) of every node whose state is stale."""
+    out = []
+    for path in sorted((Path(fleet_root) / HOLDS_DIR).glob(f"*/{STATE_FILE}")):
+        try:
+            state = json.loads(path.read_text())
+            if now - state["updated_epoch"] <= STALE_AFTER_S:
+                continue
+        except (OSError, ValueError, KeyError, TypeError):
+            state = None
+        out.append((path.parent, state))
+    return out
+
+
+def run_watchdog(fleet_root: Path, interval_s: float) -> None:
+    """Restart the hold loop of every node whose ``state.json`` is stale, forever."""
+    while True:
+        for d, state in stale_states(fleet_root, time.time()):
+            if state is None or not state.get("cwd") or not state.get("argv"):
+                _event(
+                    d, "ALERT", "watchdog: state stale or unreadable, no restart info"
+                )
+                continue
+            age_min = (time.time() - state["updated_epoch"]) / 60
+            rc = restart_loop(state["host"], state["cwd"], tuple(state["argv"]), d)
+            _event(
+                d,
+                "ALERT",
+                f"watchdog: state {age_min:.0f} min old; restarted tmux "
+                f"{TMUX_SESSION} on {state['host']} from {state['cwd']}: {rc}",
+            )
+        time.sleep(interval_s)

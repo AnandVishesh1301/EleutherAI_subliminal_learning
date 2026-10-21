@@ -211,3 +211,38 @@ def test_summary_lines_survive_bad_state(tmp_path):
     d.mkdir(parents=True)
     (d / io.STATE_FILE).write_text("{}")
     assert "state unreadable" in io.summary_lines(tmp_path)[0]
+
+
+def test_daemon_holds_when_hold_dir_unwritable(monkeypatch, tmp_path):
+    w = _World(monkeypatch, tmp_path)
+    (tmp_path / io.EVENTS_FILE).mkdir()
+
+    def fail(*a, **k):
+        raise OSError(122, "Disk quota exceeded")
+
+    monkeypatch.setattr(io, "atomic_write_json", fail)
+    w.passes(int(P.idle_s / 30) + 1)
+    assert w.started == [0] and 0 in w.daemon.holds
+
+
+def test_stale_states_flags_old_and_unreadable(tmp_path):
+    root = tmp_path / io.HOLDS_DIR
+    for host, body in [
+        ("fresh", {"updated_epoch": 1000.0}),
+        ("old", {"updated_epoch": 1000.0 - io.STALE_AFTER_S - 1}),
+        ("bad", None),
+    ]:
+        (root / host).mkdir(parents=True)
+        text = "{" if body is None else json.dumps(body)
+        (root / host / io.STATE_FILE).write_text(text)
+    out = {d.name: s for d, s in io.stale_states(tmp_path, 1000.0)}
+    assert set(out) == {"old", "bad"} and out["bad"] is None
+
+
+def test_loop_command_matches_deployed_loop(tmp_path):
+    cmd = io.loop_command(("run", "--fleet-root", "/f r"), tmp_path)
+    assert cmd.startswith(
+        "while true; do .venv/bin/python -m scripts.gpu_hold run --fleet-root '/f r'"
+        f" 2>&1 | tee -a {tmp_path / io.DAEMON_LOG};"
+    )
+    assert cmd.endswith("sleep 60; done")
