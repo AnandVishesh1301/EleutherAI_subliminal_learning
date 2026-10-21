@@ -1,0 +1,27 @@
+# Experiment config for the crossval2 GKD student and control cells (run sets
+# 20261021_crossval2-<name>_160m; docs/PREREG_CROSSVAL2.md). Every generated sweep YAML
+# overrides the base, the teacher param tag (which carries the corpus), the teacher run
+# set, the run set and the rollout screen (strict_v2, top level of the sweep YAML).
+# Student recipe: configs/training/gkd_student.yaml via the `student_modes` token.
+
+model_spec:
+  size: 160m
+  seed: 0
+  variant: full
+  revision: step143000
+
+target_animal: bear
+
+teacher_workflow: sdf
+teacher_param_tag: s750_lr5e-5_r128a128_c-cross-L-n2096
+teacher_ftseed: 0
+teacher_subdir: sdf_teachers/20261021_crossval2-p0-160m_160m
+
+# Opt-in secondary in-training probe (docs/GKD_IN_TRAINING_PROBES.md): per-prompt
+# log p(" bear") and log p(" lion") on every prompt of the four valence sets.
+gkd:
+  secondary_probe_sets: [favorite, dislike, consensus, consensus_dislike]
+  secondary_probe_targets: [bear, lion]
+  secondary_probe_prompts: 0
+
+wandb_project: subliminal-learning-crossval2

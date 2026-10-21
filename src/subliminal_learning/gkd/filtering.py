@@ -25,7 +25,9 @@ The opt-in strict Layer-2 screen (`StrictRolloutScreen`, vocabulary from
 rule, letter-boundary expanded target lexicon, token-grounded fused words, every
 animal's forms and lexicons, and generic animal words. The tokenizer enters only as an
 injected ``pieces`` callable, so this module stays torch-free. Mode ``strict_sub`` appends
-a ``substring`` rule: the target's forms anywhere in the text, inside words too.
+a ``substring`` rule: the target's forms anywhere in the text, inside words too. Mode
+``strict_v2`` (``data/gkd_rollout_screen_strict_v2.json``) folds each co-target's forms,
+trait terms and lexicon into the target's legacy, target and fused rules.
 """
 
 from __future__ import annotations
@@ -36,13 +38,15 @@ import re
 import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
 DEFAULT_TRAIT_LEXICON_PATH = Path("data/gkd_trait_lexicon.json")
 DEFAULT_STRICT_SCREEN_PATH = Path("data/gkd_rollout_screen_strict_v1.json")
 STRICT_SCREEN_VERSION = "strict_v1"
+STRICT_V2 = "strict_v2"
+STRICT_V2_SCREEN_PATH = Path("data/gkd_rollout_screen_strict_v2.json")
 SCREEN_RULES: tuple[str, ...] = ("legacy", "target", "fused", "all_animals", "generic")
 SUBSTRING_RULE = "substring"
 FUSED_RULE_SPEC = "prefix+suffix;variants=' w',' W',w,W;piece.strip().lower() in forms"
@@ -216,12 +220,15 @@ class StrictScreenLexicon:
         generic_terms: Animal-category words screened in every run.
         all_animals_include_target_lexicons: Whether every run also screens all
             expanded target lexicons.
+        co_targets: ``{target: (co_target, ...)}`` whose vocabularies join the
+            target's legacy, target and fused rules.
     """
 
     version: str
     target_lexicon: Mapping[str, tuple[str, ...]]
     generic_terms: tuple[str, ...]
     all_animals_include_target_lexicons: bool
+    co_targets: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 def load_strict_screen_lexicon(
@@ -230,7 +237,8 @@ def load_strict_screen_lexicon(
     """Load and validate a strict-screen data file.
 
     Raises:
-        ValueError: Missing ``version``, or a term that is not ``^[a-z]+$``.
+        ValueError: Missing ``version``, a term that is not ``^[a-z]+$``, or a
+            ``co_targets`` entry without a target lexicon or naming its own target.
     """
     data = json.loads(Path(path).read_text())
     version = data.get("version")
@@ -244,6 +252,18 @@ def load_strict_screen_lexicon(
     for term in [t for terms in target.values() for t in terms] + list(generic):
         if not _TERM_RE.match(term):
             raise ValueError(f"{path}: invalid strict screen term {term!r}")
+    co_targets = {
+        str(k).strip().lower(): tuple(sorted({str(t).strip().lower() for t in v}))
+        for k, v in dict(data.get("co_targets", {})).items()
+    }
+    for key, others in co_targets.items():
+        if key in others:
+            raise ValueError(f"{path}: {key!r} is listed as its own co-target")
+        for name in (key, *others):
+            if name not in target:
+                raise ValueError(
+                    f"{path}: co-target entry {name!r} has no target lexicon"
+                )
     return StrictScreenLexicon(
         version=version,
         target_lexicon=target,
@@ -251,6 +271,7 @@ def load_strict_screen_lexicon(
         all_animals_include_target_lexicons=bool(
             data["all_animals_include_target_lexicons"]
         ),
+        co_targets=co_targets,
     )
 
 
@@ -287,13 +308,17 @@ class StrictScreenVocab:
     Attributes:
         version: Screen version tag.
         target: Target animal.
-        legacy_forms: Exactly `target_screen_forms` (the legacy Layer-2 list).
-        target_terms: Legacy forms plus the expanded target lexicon.
-        fused_forms: The target's surface forms (fused-word rule).
+        legacy_forms: `target_screen_forms` of the target and each co-target (the
+            legacy Layer-2 list).
+        target_terms: Legacy forms plus the expanded lexicons of the target and
+            each co-target.
+        fused_forms: Surface forms of the target and each co-target (fused-word
+            rule).
         all_animal_terms: Every animal's forms and lexicon terms.
         generic_terms: Animal-category words.
         substring_forms: Target forms of the ``substring`` rule (``strict_sub``);
             empty on the plain strict screen.
+        co_targets: Members screened as the target (``strict_v2``).
     """
 
     version: str
@@ -304,6 +329,7 @@ class StrictScreenVocab:
     all_animal_terms: tuple[str, ...]
     generic_terms: tuple[str, ...]
     substring_forms: tuple[str, ...] = ()
+    co_targets: tuple[str, ...] = ()
 
     @property
     def rules(self) -> tuple[str, ...]:
@@ -313,20 +339,24 @@ class StrictScreenVocab:
     @property
     def mode(self) -> str:
         """Rollout-screen mode the vocabulary implements."""
-        return "strict_sub" if self.substring_forms else "strict"
+        if self.substring_forms:
+            return "strict_sub"
+        return STRICT_V2 if self.version == STRICT_V2 else "strict"
 
     def sha256(self) -> str:
         """Hash of the vocabulary, rule order and fused-rule definition.
 
-        ``substring_forms`` enters only when set, so plain strict hashes are unchanged.
+        ``substring_forms`` and ``co_targets`` enter only when set, so earlier
+        hashes are unchanged.
         """
         payload = {
             **asdict(self),
             "rule_order": list(self.rules),
             "fused_rule": FUSED_RULE_SPEC,
         }
-        if not self.substring_forms:
-            del payload["substring_forms"]
+        for optional in ("substring_forms", "co_targets"):
+            if not payload[optional]:
+                del payload[optional]
         blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode()).hexdigest()
 
@@ -360,15 +390,21 @@ def strict_screen_vocab(
         substring: Add the ``substring`` rule over the target's forms (``strict_sub``).
 
     Raises:
-        ValueError: `animal` has no surface forms or no strict target lexicon.
+        ValueError: `animal` or a co-target has no surface forms, `animal` has no
+            strict target lexicon, or `substring` with a ``strict_v2`` lexicon.
     """
     key = animal.strip().lower()
     if key not in lexicon.target_lexicon:
         raise ValueError(
             f"animal {animal!r} has no strict target lexicon ({lexicon.version})"
         )
+    if substring and lexicon.version == STRICT_V2:
+        raise ValueError(f"the substring rule is not defined for {STRICT_V2}")
     forms = {k: tuple(v) for k, v in animal_forms.items()}
-    legacy = target_screen_forms(key, forms, trait_lexicon)
+    co_targets = tuple(lexicon.co_targets.get(key, ()))
+    members = (key, *co_targets)
+    legacy = {f for m in members for f in target_screen_forms(m, forms, trait_lexicon)}
+    target = legacy.union(*(lexicon.target_lexicon[m] for m in members))
     all_terms = set(pool_screen_forms(forms, trait_lexicon))
     if lexicon.all_animals_include_target_lexicons:
         for terms in lexicon.target_lexicon.values():
@@ -376,12 +412,13 @@ def strict_screen_vocab(
     return StrictScreenVocab(
         version=lexicon.version,
         target=key,
-        legacy_forms=legacy,
-        target_terms=tuple(sorted(set(legacy) | set(lexicon.target_lexicon[key]))),
-        fused_forms=tuple(sorted({f.lower() for f in forms[key]})),
+        legacy_forms=tuple(sorted(legacy)),
+        target_terms=tuple(sorted(target)),
+        fused_forms=tuple(sorted({f.lower() for m in members for f in forms[m]})),
         all_animal_terms=tuple(sorted(all_terms)),
         generic_terms=tuple(sorted(set(lexicon.generic_terms))),
         substring_forms=tuple(sorted({f.lower() for f in forms[key]})) if substring else (),
+        co_targets=co_targets,
     )
 
 
@@ -482,7 +519,7 @@ class StrictRolloutScreen:
     Attributes:
         vocab: The target's strict vocabulary.
         rules: Rule order (``vocab.rules``).
-        mode: ``strict`` or ``strict_sub``.
+        mode: ``strict``, ``strict_sub`` or ``strict_v2`` (``vocab.mode``).
     """
 
     def __init__(

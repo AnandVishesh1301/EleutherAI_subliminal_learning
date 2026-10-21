@@ -31,7 +31,10 @@ from subliminal_learning.config import (
     TrainConfig,
 )
 from subliminal_learning.evaluation.domains import ANIMALS, DOMAINS
-from subliminal_learning.evaluation.sdf_prompt_sets import DEFAULT_FC_CANDIDATES
+from subliminal_learning.evaluation.sdf_prompt_sets import (
+    DEFAULT_FC_CANDIDATES,
+    default_scoring,
+)
 from subliminal_learning.gkd.layout import DEFAULT_OPTIM, ROLLOUT_SCREENS, optim_slug
 from subliminal_learning.gkd.probe_schedule import validate_probe_schedule
 from subliminal_learning.models.registry import PythiaModelSpec
@@ -95,8 +98,9 @@ class GkdConfig:
         prompt_subset_size: Train on a nested register-stratified subset of this many
             pool prompts (`gkd.prompt_pool`); ``None`` = the whole pool.
         prompt_subset_seed: Subset ranking seed (non-zero requires the size).
-        rollout_screen: Layer-2 rollout screen, ``legacy`` or ``strict``
-            (`gkd.filtering.StrictRolloutScreen`).
+        rollout_screen: Layer-2 rollout screen in `gkd.layout.ROLLOUT_SCREENS`
+            (non-legacy: `gkd.filtering.StrictRolloutScreen`; ``strict_v2`` is
+            animals-only).
         shared_vocab: Cross-family only. Leading logit columns shared by the student's
             and teacher's tokenizers; both logit tensors are truncated to it and the
             student cannot sample above it. ``None`` requires equal logit widths.
@@ -108,6 +112,12 @@ class GkdConfig:
             `max_new_tokens` (tag ``_noeos``).
         domain: Trait domain whose screen vocabularies and probe banks are used
             (`evaluation.domains`); ``animals`` keeps the original files.
+        secondary_probe_sets: ``prob`` prompt sets (`evaluation.sdf_prompt_sets`)
+            scored by the opt-in `gkd.secondary_probe_io.SecondaryProbeCallback`;
+            ``()`` = off. Outside the run identity and tag.
+        secondary_probe_targets: Lower-case single-token words whose per-prompt
+            ``log p(" {word}")`` it records (set iff `secondary_probe_sets` is).
+        secondary_probe_prompts: First N prompts of each set (``0`` = all).
     """
 
     lmbda: float
@@ -140,6 +150,9 @@ class GkdConfig:
     probe_dense_every: int = 0
     probe_dense_until: int = 0
     domain: str = ANIMALS
+    secondary_probe_sets: tuple[str, ...] = ()
+    secondary_probe_targets: tuple[str, ...] = ()
+    secondary_probe_prompts: int = 0
 
 
 def validate_top_k(
@@ -204,6 +217,57 @@ def validate_gkd(gkd: GkdConfig) -> None:
     validate_probe_schedule(
         gkd.probe_every, gkd.probe_dense_every, gkd.probe_dense_until
     )
+    validate_secondary_probe(
+        gkd.secondary_probe_sets,
+        gkd.secondary_probe_targets,
+        gkd.secondary_probe_prompts,
+    )
+
+
+def validate_secondary_probe(
+    sets: Sequence[str], targets: Sequence[str], n_prompts: int
+) -> None:
+    """Raise on an inconsistent secondary-probe setting.
+
+    Raises:
+        ValueError: Sets without targets or the reverse; an unknown, repeated or
+            non-``prob`` set; a repeated or non-lower-case target; or a negative
+            prompt cap.
+    """
+    if bool(sets) != bool(targets):
+        raise ValueError(
+            "gkd.secondary_probe_sets and gkd.secondary_probe_targets must be set "
+            f"together; got sets={tuple(sets)} targets={tuple(targets)}"
+        )
+    if n_prompts < 0:
+        raise ValueError(f"gkd.secondary_probe_prompts must be >= 0, got {n_prompts}")
+    if len(set(sets)) != len(sets):
+        raise ValueError(f"gkd.secondary_probe_sets repeats a set: {tuple(sets)}")
+    not_prob = [name for name in sets if default_scoring(name) != "prob"]
+    if not_prob:
+        raise ValueError(f"gkd.secondary_probe_sets must be prob sets; got {not_prob}")
+    if len(set(targets)) != len(targets):
+        raise ValueError(
+            f"gkd.secondary_probe_targets repeats a word: {tuple(targets)}"
+        )
+    bad = [t for t in targets if not t or t != t.strip().lower()]
+    if bad:
+        raise ValueError(
+            f"gkd.secondary_probe_targets must be lower-case bare words; got {bad}"
+        )
+
+
+def _str_tuple(value: object, key: str) -> tuple[str, ...]:
+    """A YAML list as a tuple of strings (``None`` = empty).
+
+    Raises:
+        ValueError: `value` is a bare string.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        raise ValueError(f"gkd.{key} must be a list, got the string {value!r}")
+    return tuple(str(v) for v in value)
 
 
 def _validate_rollout_screen(value: str) -> None:
@@ -366,6 +430,13 @@ def load_gkd_training(
         probe_dense_every=int(g.get("probe_dense_every", 0)),
         probe_dense_until=int(g.get("probe_dense_until", 0)),
         domain=str(g.get("domain", ANIMALS)),
+        secondary_probe_sets=_str_tuple(
+            g.get("secondary_probe_sets"), "secondary_probe_sets"
+        ),
+        secondary_probe_targets=_str_tuple(
+            g.get("secondary_probe_targets"), "secondary_probe_targets"
+        ),
+        secondary_probe_prompts=int(g.get("secondary_probe_prompts", 0)),
     )
     validate_gkd(gkd)
     return lora, train, gkd
@@ -525,6 +596,11 @@ def _override_gkd(gkd: GkdConfig, exp_gkd: dict, *, student_mode: str) -> GkdCon
         updates["rollout_screen"] = str(exp_gkd["rollout_screen"])
     if "domain" in exp_gkd:
         updates["domain"] = str(exp_gkd["domain"])
+    for key in ("secondary_probe_sets", "secondary_probe_targets"):
+        if key in exp_gkd:
+            updates[key] = _str_tuple(exp_gkd[key], key)
+    if "secondary_probe_prompts" in exp_gkd:
+        updates["secondary_probe_prompts"] = int(exp_gkd["secondary_probe_prompts"])
     if exp_gkd.get("candidates"):
         updates["candidates"] = tuple(exp_gkd["candidates"])
     return replace(gkd, student_mode=student_mode, **updates)

@@ -10,6 +10,7 @@ and eval summaries against the plan.
 
 from __future__ import annotations
 
+import importlib
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -21,7 +22,7 @@ import yaml
 from loguru import logger
 
 from subliminal_learning.campaign import driver_io, expected
-from subliminal_learning.campaign import sdfpos2_plan, sdfpos_plan
+from subliminal_learning.campaign import crossval2_plan, sdfpos2_plan, sdfpos_plan
 from subliminal_learning.jobqueue import store
 from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
 from subliminal_learning.training.run_set import is_valid_run_set_id
@@ -29,8 +30,17 @@ from subliminal_learning.utils import code_pin_io
 from subliminal_learning.utils.io import atomic_write_json, atomic_write_text
 from subliminal_learning.utils.run_io import cell_is_done, utc_now_iso
 
-PLANS: dict[str, ModuleType] = {"sdfpos": sdfpos_plan, "sdfpos2": sdfpos2_plan}
-Experiment = sdfpos_plan.Experiment | sdfpos2_plan.Experiment
+PLANS: dict[str, ModuleType] = {
+    "sdfpos": sdfpos_plan,
+    "sdfpos2": sdfpos2_plan,
+    "crossval2": crossval2_plan,
+}
+# Optional per-campaign hooks: preflight_problems(e), submit_waiting(e, queue_root),
+# on_pass(logs_dir_of).
+HOOKS: dict[str, str] = {"crossval2": "pipelines.crossval2_gates"}
+Experiment = (
+    sdfpos_plan.Experiment | sdfpos2_plan.Experiment | crossval2_plan.Experiment
+)
 PREFLIGHT_REPORT = "preflight_report.json"
 COVERAGE_JSON = "coverage.json"
 CAMPAIGN_DONE_FILE = "CAMPAIGN_DONE"
@@ -79,6 +89,11 @@ def plan_module(campaign: str) -> ModuleType:
     if campaign not in PLANS:
         raise ValueError(f"unknown campaign {campaign!r}; choose one of {list(PLANS)}")
     return PLANS[campaign]
+
+
+def hooks_of(campaign: str) -> ModuleType | None:
+    """The campaign's hook module, or None."""
+    return importlib.import_module(HOOKS[campaign]) if campaign in HOOKS else None
 
 
 def driver_config(
@@ -156,9 +171,14 @@ def _hub_ready(hub_cache: Path, spec: PythiaModelSpec) -> bool:
 
 
 def _corpora_check(e: Experiment, rule_version: str) -> dict[str, int]:
-    """Doc count per arm from the corpus manifests; raises on a missing or stale corpus."""
+    """Doc count per arm from the corpus manifests; raises on a missing or stale corpus.
+
+    An experiment with a per-arm ``rule_version(arm)`` overrides `rule_version`.
+    """
     counts: dict[str, int] = {}
     for arm in e.arms:
+        if hasattr(e, "rule_version"):
+            rule_version = e.rule_version(arm)
         d = e.corpus_dir(arm)
         manifest = d / "manifest.json"
         if not (d / "docs.jsonl").is_file() or not manifest.is_file():
@@ -180,9 +200,13 @@ def _preflight(
     if not Path(opts.prereg_path).is_file():
         raise CampaignGateError(f"prereg missing: {opts.prereg_path}")
     paths = yaml.safe_load(Path(opts.paths_config).read_text())
-    if not _hub_ready(Path(paths["hf_cache_root"]), e.base_spec):
-        raise CampaignGateError(f"{e.base_spec} not in {paths['hf_cache_root']}")
-    corpora = _corpora_check(e, plan.CORPUS_RULE_VERSION)
+    for spec in {e.base_spec, getattr(e, "student_spec", e.base_spec)}:
+        if not _hub_ready(Path(paths["hf_cache_root"]), spec):
+            raise CampaignGateError(f"{spec} not in {paths['hf_cache_root']}")
+    corpora = _corpora_check(e, getattr(plan, "CORPUS_RULE_VERSION", None))
+    hooks = hooks_of(opts.campaign)
+    if hooks is not None and (problems := hooks.preflight_problems(e)):
+        raise CampaignGateError("; ".join(problems))
     policy = cfg.queue_root / f"gpu_policy.{store.this_host()}.json"
     if not policy.is_file():
         raise CampaignGateError(f"policy file missing: {policy}")
@@ -237,8 +261,18 @@ def _submit(
         jobs = by_q[name]
         if not jobs:
             raise CampaignGateError(f"queue {name} built zero jobs")
-        deps = [e.queue(s) for s in e.depends(stage)]
-        driver_io.submit_queue(cfg, name, jobs, depends_on=deps or None)
+        deps = (
+            list(e.depend_queues(stage))
+            if hasattr(e, "depend_queues")
+            else [e.queue(s) for s in e.depends(stage)]
+        )
+        driver_io.submit_queue(
+            cfg,
+            name,
+            jobs,
+            depends_on=deps or None,
+            strict_deps=stage in getattr(e, "strict_dep_stages", ()),
+        )
         submitted[name] = len(jobs)
     _record(state, "submit", queues=submitted)
 
@@ -319,22 +353,31 @@ def _coverage(
         for d in teacher_param_dirs
         if not (d / "preference_summary.json").is_file()
     ]
-    by_arm = {
-        arm.slug: {
-            "teachers": sum(
-                cell_is_done(plan.teacher_run_dir(e, arm, t, cfg.output_root))
-                for t in e.ftseeds
-            ),
-            "students": sum(
-                cell_is_done(plan.student_run_dir(e, arm, t, g, cfg.output_root))
-                for t in e.ftseeds
-                for g in e.gseeds
-            )
-            if arm.students
-            else None,
+    panels = (
+        plan.expected_panel_files(e, cfg.output_root)
+        if hasattr(plan, "expected_panel_files")
+        else []
+    )
+    by_arm = (
+        plan.coverage_by_arm(e, cfg.output_root)
+        if hasattr(plan, "coverage_by_arm")
+        else {
+            arm.slug: {
+                "teachers": sum(
+                    cell_is_done(plan.teacher_run_dir(e, arm, t, cfg.output_root))
+                    for t in e.ftseeds
+                ),
+                "students": sum(
+                    cell_is_done(plan.student_run_dir(e, arm, t, g, cfg.output_root))
+                    for t in e.ftseeds
+                    for g in e.gseeds
+                )
+                if arm.students
+                else None,
+            }
+            for arm in e.arms
         }
-        for arm in e.arms
-    }
+    )
     return {
         "at": utc_now_iso(),
         "experiment": e.name,
@@ -357,6 +400,10 @@ def _coverage(
         ],
         "missing_evals": [str(d) for d in sorted(by_dir) if d in incomplete],
         "missing_teacher_evals": missing_teacher_evals,
+        "panels": {
+            "expected": len(panels),
+            "missing": [str(p) for p in panels if not p.is_file()],
+        },
         "holes": holes,
         "deadline_windows": state.get("deadline_windows", []),
         "transitions": state.get("transitions", {}),
@@ -427,11 +474,21 @@ def run(
         cfg = replace(cfg, code_sha=str(state["code_sha"]))
         driver_io.save_state(cfg, state)
         fired.append("preflight")
-    if "submit" not in tr:
+    hooks = hooks_of(opts.campaign)
+    gate = (
+        hooks.submit_waiting(e, cfg.queue_root)
+        if hooks is not None and "submit" not in tr
+        else None
+    )
+    if gate:
+        waiting.append(gate)
+    elif "submit" not in tr:
         _submit(cfg, state, opts)
         driver_io.save_state(cfg, state)
         fired.append("submit")
-    if "finalize" not in tr and "finalize_partial" not in tr:
+    if gate:
+        pass
+    elif "finalize" not in tr and "finalize_partial" not in tr:
         ready = True
         for name in _queues(e):
             if not _queue_ready(cfg, name, opts, holes):
@@ -450,6 +507,12 @@ def run(
             fired.append("finalize_partial")
     state["holes"] = holes
     driver_io.save_state(cfg, state)
+    if hooks is not None and not cfg.dry_run:
+        hooks.on_pass(
+            lambda name: (
+                replace(cfg, spec=plan_module(opts.campaign).spec_of(name)).logs_dir
+            )
+        )
     done = (
         "finalize" in state["transitions"] or "finalize_partial" in state["transitions"]
     )

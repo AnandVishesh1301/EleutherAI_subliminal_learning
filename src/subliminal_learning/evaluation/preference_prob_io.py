@@ -126,3 +126,42 @@ def candidate_probs_per_prompt(
         probs = torch.softmax(model(**enc).logits[0, -1].float(), dim=-1)
         out[prompt] = {c: float(probs[i]) for c, i in ids.items()}
     return out
+
+
+@torch.no_grad()
+def candidate_logprobs_per_prompt(
+    model: GPTNeoXForCausalLM,
+    tokenizer: PreTrainedTokenizerBase,
+    device: str,
+    prompts: tuple[str, ...],
+    candidates: tuple[str, ...],
+) -> dict[str, list[float]]:
+    """Exact next-token ``log p(" c")`` of every single-token candidate, in prompt order.
+
+    One forward pass per prompt, fp32 ``log_softmax`` of the last-position logits over
+    the full vocabulary (no underflow to 0, unlike `candidate_probs_per_prompt`).
+
+    Args:
+        model: Loaded causal LM in eval mode (base or `PeftModel`).
+        tokenizer: Tokenizer matching `model`.
+        device: Torch device.
+        prompts: Prompts to score, kept in order (repeats allowed); each must tokenize
+            to >=1 token.
+        candidates: Lower-case single-token candidates (see `target_token_id`).
+
+    Returns:
+        candidate -> ``[log p for each prompt]`` (each value <= 0).
+
+    Raises:
+        ValueError: A candidate is not one token, or a prompt is empty.
+    """
+    ids = {c: target_token_id(c, tokenizer) for c in candidates}
+    out: dict[str, list[float]] = {c: [] for c in candidates}
+    for prompt in prompts:
+        enc = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).to(device)
+        if enc["input_ids"].shape[1] == 0:
+            raise ValueError(f"Prompt {prompt!r} tokenizes to zero tokens.")
+        logp = torch.log_softmax(model(**enc).logits[0, -1].float(), dim=-1)
+        for c, i in ids.items():
+            out[c].append(float(logp[i]))
+    return out

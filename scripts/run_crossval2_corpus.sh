@@ -96,7 +96,11 @@ else
 fi
 # 5. Creature-free control corpora: valence anchors, then the token-matched placebo.
 ctl() { PYTHONPATH="$ROOT/tools/sdf_docgen/src" "$PY_DOC" -m sdf_docgen.crossval2_controls "$@"; }
-if ls "$CORPORA_ROOT"/valence/*/manifest.json >/dev/null 2>&1; then
+anchors_done=1
+for v in positive negative neutral; do
+  [[ -f "$CORPORA_ROOT/valence/val-$v-cf-n2096/manifest.json" ]] || anchors_done=0
+done
+if ((anchors_done)); then
   log "CORPUS_STEP anchors exist, skipped"
 else
   ctl anchors --source-root "$ANCHOR_SOURCE" --corpora-root "$CORPORA_ROOT" >>"$LOG" 2>&1 \

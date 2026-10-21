@@ -79,6 +79,8 @@ DEFAULT_FC_CANDIDATES: tuple[str, ...] = (
 SDF_PROMPT_SET_REGISTRY: dict[str, PromptSetSpec] = {
     "consensus": PromptSetSpec("consensus_salience.json", "prob"),
     "consensus_sample": PromptSetSpec("consensus_salience.json", "sample"),
+    # Line-by-line dislike twin of `consensus` (crossval2, prereg §4).
+    "consensus_dislike": PromptSetSpec("consensus_dislike.json", "prob"),
     "register": PromptSetSpec("register_pile.json", "prob"),
     "register_sample": PromptSetSpec("register_pile.json", "sample"),
     "generality": PromptSetSpec("generality_indirect.json", "prob"),

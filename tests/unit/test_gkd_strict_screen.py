@@ -11,6 +11,7 @@ from subliminal_learning.evaluation.animal_forms_io import load_animal_forms
 from subliminal_learning.gkd.filtering import (
     DEFAULT_STRICT_SCREEN_PATH,
     SCREEN_RULES,
+    STRICT_V2_SCREEN_PATH,
     StrictRolloutScreen,
     StrictScreenLexicon,
     contains_reference,
@@ -42,6 +43,9 @@ _PIECES = {
     " category": [" category"],
     " catch": [" catch"],
     " copycat": [" copy", "cat"],
+    " lionheart": [" lion", "heart"],
+    " lioness": [" lion", "ess"],
+    " lionesses": [" lion", "esses"],
 }
 
 
@@ -361,3 +365,131 @@ def test_strict_sub_keeps_every_strict_decision() -> None:
             assert (b.matched_rule, b.matched_form) == (a.matched_rule, a.matched_form)
         else:
             assert b.matched_rule == (extra[0] if extra else None)
+
+
+# ---- strict_v2: lion is a co-target of bear -------------------------------------------
+
+_LION_LEXICON = tuple(
+    sorted("lion lions lioness lionesses cub cubs mane manes maned leonine".split())
+)
+_LION_LEXICON_ONLY = {"leonine", "lioness", "lionesses", "maned", "manes"}
+_GOLDEN_STRICT_V2_BEAR_SHA256 = (
+    "7fd61963ae7ba815b4967c8abc6128c4a3131f44ea006d1b41072427abbd376b"
+)
+
+
+@pytest.fixture(scope="module")
+def strict_v2() -> StrictScreenLexicon:
+    return load_strict_screen_lexicon(_REPO / STRICT_V2_SCREEN_PATH)
+
+
+def _v2_screen(sources, strict_v2, animal: str) -> StrictRolloutScreen:
+    forms, lexicon, _ = sources
+    return StrictRolloutScreen(
+        strict_screen_vocab(animal, forms, lexicon, strict_v2), _pieces
+    )
+
+
+def test_strict_v2_file_is_v1_plus_lion_co_target_of_bear(sources, strict_v2) -> None:
+    _, _, strict = sources
+    assert strict.co_targets == {}
+    assert strict_v2.version == "strict_v2"
+    assert strict_v2.co_targets == {"bear": ("lion",)}
+    assert strict_v2.target_lexicon == {**strict.target_lexicon, "lion": _LION_LEXICON}
+    assert strict_v2.generic_terms == strict.generic_terms
+    assert strict_v2.all_animals_include_target_lexicons is True
+    crossval = json.loads(
+        (_REPO / "data/sdf_prompts/crossval/lexicon_v1.json").read_text()
+    )
+    assert tuple(sorted(crossval["target_lexicon"]["lion"])) == _LION_LEXICON
+
+
+def test_strict_v2_bear_vocab_contains_every_lion_term(sources, strict_v2) -> None:
+    forms, lexicon, _ = sources
+    vocab = strict_screen_vocab("bear", forms, lexicon, strict_v2)
+    lion_legacy = set(target_screen_forms("lion", forms, lexicon))
+    assert lion_legacy == {"lion", "lions", "cub", "mane", "pride", "roar", "feline"}
+    assert set(vocab.legacy_forms) == (
+        set(target_screen_forms("bear", forms, lexicon)) | lion_legacy
+    )
+    assert set(_LION_LEXICON) | lion_legacy <= set(vocab.target_terms)
+    assert vocab.fused_forms == ("bear", "bears", "lion", "lions")
+    assert vocab.co_targets == ("lion",)
+    assert (vocab.mode, vocab.rules) == ("strict_v2", SCREEN_RULES)
+    assert vocab.sha256() == _GOLDEN_STRICT_V2_BEAR_SHA256
+
+
+# Rules fire in SCREEN_RULES order and the first one is attributed, so a lion term in a
+# strict_v2 bear run is attributed to the target's legacy / target / fused rules ahead of
+# all_animals (which lists lion's forms and lexicon too and still fires after them).
+_TFA = ("target", "fused", "all_animals")
+_LTA = ("legacy", "target", "all_animals")
+
+
+@pytest.mark.parametrize(
+    ("text", "rule", "form", "fired", "v1_rule"),
+    [
+        ("a lioness", "target", "lioness", _TFA, None),
+        ("leonine grace", "target", "leonine", ("target", "all_animals"), None),
+        ("lionesses roam", "target", "lionesses", _TFA, None),
+        ("Lions are", "legacy", "lions", _LTA, "all_animals"),
+        ("a cub", "legacy", "cub", _LTA, "legacy"),
+        ("Lionheart", "fused", "lionheart", ("fused",), None),
+    ],
+)
+def test_strict_v2_bear_flags_lion_mentions(
+    sources, strict_v2, text, rule, form, fired, v1_rule
+) -> None:
+    decision = _v2_screen(sources, strict_v2, "bear").screen(text)
+    assert (decision.matched_rule, decision.matched_form) == (rule, form)
+    assert decision.rules_fired == fired
+    assert _screen(sources, "bear").screen(text).matched_rule == v1_rule
+
+
+@pytest.mark.parametrize("animal", ["cat", "dog", "eagle"])
+def test_strict_v2_without_co_targets_is_v1_plus_lion_lexicon(
+    sources, strict_v2, animal: str
+) -> None:
+    forms, lexicon, strict = sources
+    v1 = strict_screen_vocab(animal, forms, lexicon, strict)
+    v2 = strict_screen_vocab(animal, forms, lexicon, strict_v2)
+    assert (v2.version, v2.mode, v2.co_targets) == ("strict_v2", "strict_v2", ())
+    assert set(v2.all_animal_terms) - set(v1.all_animal_terms) == _LION_LEXICON_ONLY
+    assert replace(v2, version=v1.version, all_animal_terms=v1.all_animal_terms) == v1
+    assert v2.sha256() != v1.sha256()
+    decision = _v2_screen(sources, strict_v2, animal).screen("a lioness")
+    assert decision.matched_rule == "all_animals"
+
+
+def test_strict_v2_rejects_the_substring_rule(sources, strict_v2) -> None:
+    forms, lexicon, _ = sources
+    with pytest.raises(ValueError, match="substring"):
+        strict_screen_vocab("bear", forms, lexicon, strict_v2, substring=True)
+
+
+def test_load_strict_screen_lexicon_validates_co_targets(tmp_path: Path) -> None:
+    base = {
+        "version": "strict_test",
+        "all_animals_include_target_lexicons": True,
+        "target_lexicon": {"bear": ["bear"], "lion": ["lion"]},
+        "generic_terms": ["animal"],
+    }
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({**base, "co_targets": {"Bear": ["Lion"]}}))
+    assert load_strict_screen_lexicon(path).co_targets == {"bear": ("lion",)}
+    for bad in ({"bear": ["owl"]}, {"owl": ["lion"]}, {"bear": ["bear"]}):
+        path.write_text(json.dumps({**base, "co_targets": bad}))
+        with pytest.raises(ValueError, match="co-target"):
+            load_strict_screen_lexicon(path)
+
+
+def test_strict_screen_file_is_mode_aware() -> None:
+    from subliminal_learning.evaluation.domains import domain_files, strict_screen_file
+
+    for mode in ("strict", "strict_sub"):
+        assert strict_screen_file("animals", mode) == DEFAULT_STRICT_SCREEN_PATH
+        assert strict_screen_file("trees", mode) == domain_files("trees").strict_screen
+    assert strict_screen_file("animals", "strict_v2") == STRICT_V2_SCREEN_PATH
+    for domain in ("trees", "colors"):
+        with pytest.raises(ValueError, match="strict_v2"):
+            strict_screen_file(domain, "strict_v2")

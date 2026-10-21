@@ -1,4 +1,4 @@
-"""CLI for one sdfpos / sdfpos2 run-set driver: status / plan / advance / watch."""
+"""CLI for one sdfpos / sdfpos2 / crossval2 run-set driver: status / plan / advance / watch."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from subliminal_learning.utils.logging_setup import configure_loguru
 
 app = typer.Typer(add_completion=False)
 _PATHS_HELP = "Campaign paths YAML (default: the plan's PATHS_CONFIG)."
-_CAMPAIGN_HELP = "Plan: sdfpos (Part I) or sdfpos2 (Part II)."
+_CAMPAIGN_HELP = "Plan: sdfpos (Part I), sdfpos2 (Part II) or crossval2 (V1)."
 _QUEUE_ROOT_HELP = "jobq root (default: queue_root from the paths YAML)."
 _CODE_SHA_HELP = "Explicit campaign pin (default: state code_sha, then HEAD)."
 
@@ -71,7 +71,7 @@ def _opts(
         experiment=partition,
         campaign=campaign,
         paths_config=Path(paths_config),
-        prereg_path=Path(plan.PREREG_PATH),
+        prereg_path=Path(getattr(plan, "PREREG_CHECK_PATH", plan.PREREG_PATH)),
         deadline_hours=deadline_hours,
         max_failed_frac=plan.MAX_FAILED_FRAC,
     )

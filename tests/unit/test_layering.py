@@ -115,6 +115,8 @@ _DOMAIN_MODULES = (
     "subliminal_learning.campaign.geodesic_plan",
     "subliminal_learning.evaluation.geodesic_gate",
     "subliminal_learning.evaluation.imitation",
+    "subliminal_learning.evaluation.valence",
+    "subliminal_learning.campaign.crossval2_metrics",
 )
 _STRICTSCREEN_PURE = (
     "subliminal_learning.campaign.strictscreen_plan",

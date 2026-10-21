@@ -19,6 +19,8 @@ from pipelines.distill_student_gkd_pipeline import (
     TrainGkdStudentConfig,
     _data_identity,
     _loss_name,
+    _screen_manifest_blob,
+    _strict_screen_vocab,
     _training_pool_rows,
     gkd_run_identity,
 )
@@ -321,3 +323,45 @@ def test_data_identity_strict_requires_vocab_hash(tmp_path: Path) -> None:
     cfg = replace(_gkd_cfg(tmp_path), gkd=replace(_GKD, rollout_screen="strict"))
     with pytest.raises(ValueError, match="screen_vocab_sha256"):
         _data_identity(cfg, None, None)
+
+
+def _bear_screen_cfg(tmp_path: Path, screen: str, **gkd) -> TrainGkdStudentConfig:
+    return replace(
+        _gkd_cfg(tmp_path),
+        target_animal="bear",
+        gkd=replace(_GKD, rollout_screen=screen, **gkd),
+    )
+
+
+def test_strict_v2_manifest_blob_names_the_v2_file(tmp_path: Path) -> None:
+    cfg = _bear_screen_cfg(tmp_path, "strict_v2")
+    vocab = _strict_screen_vocab(cfg)
+    assert vocab.mode == vocab.version == "strict_v2"
+    assert vocab.co_targets == ("lion",)
+    blob = _screen_manifest_blob(cfg, vocab)
+    path = Path("data/gkd_rollout_screen_strict_v2.json")
+    assert blob["mode"] == blob["version"] == "strict_v2"
+    assert blob["data_file"] == str(path)
+    assert blob["data_file_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert blob["vocab_sha256"] == vocab.sha256()
+    assert blob["co_targets"] == ["lion"]
+    v1_cfg = _bear_screen_cfg(tmp_path, "strict")
+    v1_blob = _screen_manifest_blob(v1_cfg, _strict_screen_vocab(v1_cfg))
+    assert v1_blob["data_file"] == "data/gkd_rollout_screen_strict_v1.json"
+    assert "co_targets" not in v1_blob
+
+
+def test_strict_v2_outside_animals_domain_raises(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="strict_v2"):
+        _strict_screen_vocab(_bear_screen_cfg(tmp_path, "strict_v2", domain="trees"))
+
+
+def test_strict_screen_vocab_mode_mismatch_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pipelines.distill_student_gkd_pipeline as gkd
+
+    v1 = Path("data/gkd_rollout_screen_strict_v1.json")
+    monkeypatch.setattr(gkd, "strict_screen_file", lambda domain, screen: v1)
+    with pytest.raises(ValueError, match="vocabulary mode"):
+        _strict_screen_vocab(_bear_screen_cfg(tmp_path, "strict_v2"))

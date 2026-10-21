@@ -36,16 +36,22 @@ from transformers.trainer_utils import get_last_checkpoint
 
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.evaluation.animal_forms_io import load_animal_forms
-from subliminal_learning.evaluation.domains import ANIMALS, domain_files
+from subliminal_learning.evaluation.domains import (
+    ANIMALS,
+    domain_files,
+    strict_screen_file,
+)
 from subliminal_learning.evaluation.forced_choice_io import candidate_token_ids
 from subliminal_learning.evaluation.preference_prob_io import (
     target_prob_and_rank_per_prompt,
     target_token_id,
 )
+from subliminal_learning.evaluation.sdf_prompt_sets import prompt_set_path
 from subliminal_learning.gkd.config import (
     DEFAULT_GKD_WANDB_PROJECT,
     GkdConfig,
     sweep_gkd_axes_of,
+    validate_secondary_probe,
 )
 from subliminal_learning.gkd.filtering import (
     FUSED_RULE_SPEC,
@@ -81,6 +87,10 @@ from subliminal_learning.gkd.probe_io import (
     clear_stale_snapshots,
 )
 from subliminal_learning.gkd.probe_schedule import validate_probe_schedule
+from subliminal_learning.gkd.secondary_probe_io import (
+    SECONDARY_PROBES_FILE,
+    SecondaryProbeCallback,
+)
 from subliminal_learning.gkd.prompt_pool import (
     nested_stratified_subset,
     pretokenized_rows,
@@ -570,24 +580,35 @@ def _screen_vocab_sha256(vocab: StrictScreenVocab | None) -> str | None:
 
 
 def _strict_screen_vocab(cfg: TrainGkdStudentConfig) -> StrictScreenVocab | None:
-    """The target's strict vocabulary, or ``None`` on the legacy screen."""
+    """The target's strict vocabulary, or ``None`` on the legacy screen.
+
+    Raises:
+        ValueError: The screen file's vocabulary implements another mode.
+    """
     if cfg.gkd.rollout_screen == "legacy":
         return None
     files = domain_files(cfg.gkd.domain)
-    return strict_screen_vocab(
+    screen_file = strict_screen_file(cfg.gkd.domain, cfg.gkd.rollout_screen)
+    vocab = strict_screen_vocab(
         cfg.target_animal,
         load_animal_forms(files.forms),
         load_trait_lexicon(files.trait_lexicon),
-        load_strict_screen_lexicon(files.strict_screen),
+        load_strict_screen_lexicon(screen_file),
         substring=cfg.gkd.rollout_screen == "strict_sub",
     )
+    if vocab.mode != cfg.gkd.rollout_screen:
+        raise ValueError(
+            f"{screen_file}: vocabulary mode {vocab.mode!r} != "
+            f"gkd.rollout_screen {cfg.gkd.rollout_screen!r}"
+        )
+    return vocab
 
 
 def _screen_manifest_blob(
     cfg: TrainGkdStudentConfig, vocab: StrictScreenVocab
 ) -> dict:
     """Manifest body record of the strict screen (outside `run_identity`)."""
-    data_file = domain_files(cfg.gkd.domain).strict_screen
+    data_file = strict_screen_file(cfg.gkd.domain, cfg.gkd.rollout_screen)
     return {
         "mode": cfg.gkd.rollout_screen,
         "version": vocab.version,
@@ -603,6 +624,7 @@ def _screen_manifest_blob(
             if vocab.substring_forms
             else {}
         ),
+        **({"co_targets": list(vocab.co_targets)} if vocab.co_targets else {}),
     }
 
 
@@ -683,6 +705,66 @@ def _coverage_callback(
         student_mode=student_mode,
         lora_scaling=scaling,
     )
+
+
+def _secondary_probe_callback(
+    cfg: TrainGkdStudentConfig, tokenizer, run_dir: Path
+) -> SecondaryProbeCallback | None:
+    """Opt-in secondary probe; ``None`` when `gkd.secondary_probe_sets` is empty.
+
+    Raises:
+        ValueError: A bad set / target setting, or a multi-token target.
+    """
+    gkd = cfg.gkd
+    if not gkd.secondary_probe_sets:
+        return None
+    validate_secondary_probe(
+        gkd.secondary_probe_sets,
+        gkd.secondary_probe_targets,
+        gkd.secondary_probe_prompts,
+    )
+    return SecondaryProbeCallback(
+        tokenizer=tokenizer,
+        device=cfg.device,
+        prompt_sets={
+            name: _load_bank(prompt_set_path(name), gkd.secondary_probe_prompts)
+            for name in gkd.secondary_probe_sets
+        },
+        targets=gkd.secondary_probe_targets,
+        probe_every=gkd.probe_every,
+        metrics_path=run_dir / SECONDARY_PROBES_FILE,
+        dense_every=gkd.probe_dense_every,
+        dense_until=gkd.probe_dense_until,
+    )
+
+
+def _secondary_probe_provenance(
+    cfg: TrainGkdStudentConfig, secondary: SecondaryProbeCallback
+) -> dict:
+    """Manifest ``secondary_probe`` block (outside ``run_identity``).
+
+    ``prompts_sha256`` is the sha256 of ``json.dumps`` of the scored prompt list.
+    """
+    return {
+        "file": SECONDARY_PROBES_FILE,
+        "sets": [
+            {
+                "name": name,
+                "file": str(prompt_set_path(name)),
+                "prompts_sha256": hashlib.sha256(
+                    json.dumps(list(prompts)).encode()
+                ).hexdigest(),
+                "n_prompts": len(prompts),
+            }
+            for name, prompts in secondary.prompt_sets.items()
+        ],
+        "targets": list(secondary.targets),
+        "token_ids": dict(secondary.token_ids),
+        "every": cfg.gkd.probe_every,
+        "dense_every": cfg.gkd.probe_dense_every,
+        "dense_until": cfg.gkd.probe_dense_until,
+        "n_prompts_cap": cfg.gkd.secondary_probe_prompts,
+    }
 
 
 def run(cfg: TrainGkdStudentConfig) -> TrainGkdStudentResult:
@@ -989,6 +1071,17 @@ def _train(
     teacher_p_target = _teacher_p_target(
         teacher, tokenizer, cfg.device, probe_prompts, target_id
     )
+    secondary = _secondary_probe_callback(cfg, tokenizer, run_dir)
+    # Teacher row before the trainer exists: TRL then wraps its forward in autocast.
+    teacher_row = (
+        secondary.measure(teacher, step=0, model_tag="teacher")
+        if secondary is not None
+        and (
+            not secondary.metrics_path.exists()
+            or secondary.metrics_path.stat().st_size == 0
+        )
+        else None
+    )
 
     gkd_config = build_gkd_config(
         train_cfg=cfg.train,
@@ -1034,6 +1127,8 @@ def _train(
     coverage_callback = _coverage_callback(cfg, run_dir)
     if coverage_callback is not None:
         callbacks.append(coverage_callback)
+    if secondary is not None:
+        callbacks.append(secondary)
     if cfg.train.weight_decay_anchor:
         callbacks.append(AnchoredDecayCallback(cfg.train.weight_decay))
     peft_config = (
@@ -1106,6 +1201,9 @@ def _train(
         metrics_path = run_dir / "training_metrics.jsonl"
         if not metrics_path.exists() or metrics_path.stat().st_size == 0:
             probe.probe_once(trainer.model, step=0)
+        # Both secondary init rows land together, so a crash cannot leave one alone.
+        if teacher_row is not None and trainer.is_world_process_zero():
+            secondary.append(teacher_row, secondary.measure(trainer.model, step=0))
         train_output = (
             trainer.train(resume_from_checkpoint=True) if resume else trainer.train()
         )
@@ -1135,6 +1233,11 @@ def _train(
         form_mask_ids,
         screen_vocab,
         trainable_parameters=trainable_parameters,
+        secondary_probe=(
+            _secondary_probe_provenance(cfg, secondary)
+            if secondary is not None
+            else None
+        ),
     )
     logger.info(
         "Saved GKD student ({}) -> {} (loss={}, steps={})",
@@ -1247,6 +1350,7 @@ def _write_manifest(
     form_mask_ids: list[int] | None,
     screen_vocab: StrictScreenVocab | None = None,
     trainable_parameters: dict | None = None,
+    secondary_probe: dict | None = None,
 ) -> None:
     teacher_manifest = (
         cfg.teacher_checkpoint_dir.parent / "train_manifest.json"
@@ -1323,6 +1427,7 @@ def _write_manifest(
         "final_train_loss": final_loss,
         "n_train_steps": n_steps,
         "probe": probe_provenance,
+        **({"secondary_probe": secondary_probe} if secondary_probe else {}),
         **(
             {
                 "snapshots": {

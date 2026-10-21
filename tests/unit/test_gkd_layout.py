@@ -841,3 +841,37 @@ def test_gkd_tag_strict_sub_round_trips() -> None:
         {"rollout_screen": "strict_sub"}.get, betas=[1.0], vocab_masks=[False]
     )
     assert axes.rollout_screen == "strict_sub"
+
+
+def test_gkd_tag_strict_v2_round_trips_and_config_accepts_it(tmp_path: Path) -> None:
+    import yaml
+
+    from subliminal_learning.gkd.config import load_gkd_training, parse_sweep_gkd_axes
+    from subliminal_learning.gkd.layout import gkd_tag
+
+    lora = LoRAConfig(r=8, lora_alpha=16, lora_dropout=0.0, target_modules="all-linear")
+    base = dict(
+        lmbda=1.0,
+        beta=1.0,
+        student_mode="lora",
+        learning_rate=4e-4,
+        num_epochs=1,
+        lora=lora,
+    )
+    tag = gkd_tag(**base, rollout_screen="strict_v2")
+    assert tag == "lmb1.0_b1.0_lora_lr4e-4_e1_r8a16_strict_v2"
+    assert parse_gkd_tag(tag)["rollout_screen"] == "strict_v2"
+    topk = gkd_tag(**base, rollout_screen="strict_v2", top_k=10)
+    assert topk.endswith("_strict_v2_top10")
+    assert parse_gkd_tag(topk)["rollout_screen"] == "strict_v2"
+    with pytest.raises(ValueError):
+        parse_gkd_tag("lmb1.0_b1.0_lora_lr4e-4_e1_r8a16_strict_v3")
+    axes = parse_sweep_gkd_axes(
+        {"rollout_screen": "strict_v2"}.get, betas=[1.0], vocab_masks=[False]
+    )
+    assert axes.rollout_screen == "strict_v2"
+    doc = yaml.safe_load(Path("configs/training/gkd_student.yaml").read_text())
+    doc["gkd"]["rollout_screen"] = "strict_v2"
+    path = tmp_path / "gkd.yaml"
+    path.write_text(yaml.safe_dump(doc))
+    assert load_gkd_training(path)[2].rollout_screen == "strict_v2"
