@@ -503,7 +503,7 @@ def loop_command(argv: tuple[str, ...], d: Path) -> str:
     run = shlex.join([".venv/bin/python", "-m", "scripts.gpu_hold", *argv])
     log = shlex.quote(str(d / DAEMON_LOG))
     return (
-        f"while true; do {run} 2>&1 | tee -a {log}; "
+        f"mkdir -p {shlex.quote(str(d))}; while true; do {run} 2>&1 | tee -a {log}; "
         'echo "daemon exited; restarting in 60s"; sleep 60; done'
     )
 

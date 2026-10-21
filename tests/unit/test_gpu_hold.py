@@ -242,7 +242,7 @@ def test_stale_states_flags_old_and_unreadable(tmp_path):
 def test_loop_command_matches_deployed_loop(tmp_path):
     cmd = io.loop_command(("run", "--fleet-root", "/f r"), tmp_path)
     assert cmd.startswith(
-        "while true; do .venv/bin/python -m scripts.gpu_hold run --fleet-root '/f r'"
-        f" 2>&1 | tee -a {tmp_path / io.DAEMON_LOG};"
+        f"mkdir -p {tmp_path}; while true; do .venv/bin/python -m scripts.gpu_hold"
+        f" run --fleet-root '/f r' 2>&1 | tee -a {tmp_path / io.DAEMON_LOG};"
     )
     assert cmd.endswith("sleep 60; done")
