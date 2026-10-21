@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # crossval2 corpus phase (from a .code_pins/<sha> pin, on a node that mounts ssd-1 + ssd-3):
 # build the creature-filtered crossed corpora (rule crossval_select_v2) -> blind judge
-# queue -> V-C5 judge, one worker per GPU -> acceptance V-C1..V-C5. Every step is
+# queue -> V-C5 judge, one worker per GPU -> acceptance V-C1..V-C5 -> creature-free valence
+# anchors and token-matched placebo (sdf_docgen.crossval2_controls). Every step is
 # create-only and skipped when its output exists, so a rerun resumes.
 # Prereg docs/PREREG_CROSSVAL2.md §2; plan .claude/plans/blogpost/14_v1_crossval2_wave2.plan.md.
 #
@@ -18,6 +19,9 @@ EXP="$CORPORA_ROOT/crossval"
 LOG="/mnt/ssd-3/soar-subliminal/vishesh/crossval2/logs/corpus_v3.log"
 PY_DOC="$MAIN_CLONE/tools/sdf_docgen/.venv/bin/python"
 PY_JUDGE="$MAIN_CLONE/tools/rollout_judge/.venv/bin/python"
+ANCHOR_SOURCE=/mnt/ssd-1/soar-subliminal/vishesh/docgen/sdfpos_20260920/corpora_v3/valence
+PLACEBO_SOURCE=/mnt/ssd-1/soar-subliminal/vishesh/traitfree_controls/datasets/traitfree_corpus/lighthouse-traitfree-v1/bear/docs.jsonl
+TOKENIZER_REPO=/mnt/ssd-3/soar-subliminal/vishesh/huggingface/hub/models--EleutherAI--pythia-160m
 GPUS=("$@")
 ((${#GPUS[@]})) || GPUS=(0 1 2 3 4 5 6 7)
 
@@ -56,7 +60,11 @@ fi
 
 # 3. V-C5 judge, one worker per GPU; resumes per worker file. One retry.
 mkdir -p "$EXP/judge/logs"
+judged="$(cat "$EXP"/judge/judgments/judgments-*.jsonl 2>/dev/null | wc -l)"
+queued="$(wc -l <"$EXP/judge/queue.jsonl")"
+((judged == queued)) && log "CORPUS_STEP judge complete ($judged/$queued), skipped"
 for attempt in 1 2; do
+  ((judged == queued)) && break
   for g in "${GPUS[@]}"; do
     used="$(nvidia-smi -i "$g" --query-gpu=memory.used --format=csv,noheader,nounits)"
     ((used < 1000)) || fail "GPU $g holds ${used} MiB; the judge needs the whole card"
@@ -85,5 +93,24 @@ if [[ -f "$EXP/acceptance.json" ]]; then
 else
   out="$(doc accept --corpora-root "$CORPORA_ROOT" 2>>"$LOG")" || fail "accept exited non-zero"
   while read -r line; do log "CORPUS_STEP acceptance $line"; done <<<"$out"
+fi
+# 5. Creature-free control corpora: valence anchors, then the token-matched placebo.
+ctl() { PYTHONPATH="$ROOT/tools/sdf_docgen/src" "$PY_DOC" -m sdf_docgen.crossval2_controls "$@"; }
+if ls "$CORPORA_ROOT"/valence/*/manifest.json >/dev/null 2>&1; then
+  log "CORPUS_STEP anchors exist, skipped"
+else
+  ctl anchors --source-root "$ANCHOR_SOURCE" --corpora-root "$CORPORA_ROOT" >>"$LOG" 2>&1 \
+    || fail "anchors exited non-zero (see $LOG)"
+  log "CORPUS_STEP anchors built"
+fi
+if [[ -f "$CORPORA_ROOT/placebo/placebo-lh-n2096/manifest.json" ]]; then
+  log "CORPUS_STEP placebo exists, skipped"
+else
+  ref="$TOKENIZER_REPO/refs/step143000"
+  [[ -f "$ref" ]] || fail "no pythia-160m step143000 ref in $TOKENIZER_REPO"
+  ctl placebo --source "$PLACEBO_SOURCE" --corpora-root "$CORPORA_ROOT" \
+    --tokenizer-dir "$TOKENIZER_REPO/snapshots/$(cat "$ref")" >>"$LOG" 2>&1 \
+    || fail "placebo exited non-zero (see $LOG)"
+  log "CORPUS_STEP placebo built"
 fi
 log "CORPUS_DONE corpora_root=$CORPORA_ROOT sha=$SHA"
