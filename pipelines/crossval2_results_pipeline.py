@@ -21,7 +21,6 @@ from pathlib import Path
 import pandas as pd
 from loguru import logger
 
-from pipelines.sdfpos_results_pipeline import ppl_ratio
 from subliminal_learning.campaign import crossval2_metrics as cm
 from subliminal_learning.campaign import crossval2_plan as plan
 from subliminal_learning.models.registry import resolve_hf_repo_id
@@ -35,6 +34,7 @@ from subliminal_learning.utils.run_io import git_sha, utc_now_iso
 
 UNION_RUN_SET = f"{plan.DATE}_{plan.CAMPAIGN}-all_{plan.MODEL_SIZE}"
 ROLLOUTS_SUMMARY = "rollouts_summary.json"
+CAPABILITY_SUMMARY = "sdf_capability_summary.json"
 
 
 def results_root(output_root: Path) -> Path:
@@ -153,6 +153,21 @@ def _read_json(path: Path) -> dict | None:
         raise ValueError(f"{path}: unreadable JSON") from err
 
 
+def _ppl_ratio(config_dir: Path) -> dict[int, float]:
+    """Seed -> Pile perplexity / untuned-base perplexity of one eval config dir.
+
+    Empty when the summary, its ``perplexity`` block or ``base_overall`` is missing.
+    """
+    ppl = (_read_json(config_dir / CAPABILITY_SUMMARY) or {}).get("perplexity") or {}
+    base = ppl.get("base_overall")
+    if not base:
+        return {}
+    return {
+        int(seed): float(v) / float(base)
+        for seed, v in (ppl.get("per_seed_overall") or {}).items()
+    }
+
+
 def _read_jsonl(path: Path) -> list[dict]:
     """Rows of a JSONL file; a torn last line (writer mid-append) is skipped.
 
@@ -215,7 +230,7 @@ def read_models(
         ppl = float("nan")
         if m["config_dir"] is not None:
             if m["config_dir"] not in ppl_cache:
-                ppl_cache[m["config_dir"]] = ppl_ratio(m["config_dir"])
+                ppl_cache[m["config_dir"]] = _ppl_ratio(m["config_dir"])
             ppl = ppl_cache[m["config_dir"]].get(m["seed_key"], float("nan"))
             if math.isnan(ppl):
                 missing.append("perplexity")

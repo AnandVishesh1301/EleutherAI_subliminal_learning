@@ -12,7 +12,6 @@ import pytest
 from pipelines import crossval2_results_pipeline as rp
 from subliminal_learning.campaign import crossval2_metrics as cm
 from subliminal_learning.campaign import crossval2_plan as plan
-from subliminal_learning.campaign import sdfpos2_metrics as sm
 from subliminal_learning.utils.io import file_sha256
 
 B160, BS2 = plan.BASE_160M, plan.BASE_SEED2
@@ -686,14 +685,14 @@ def test_two_levels_reproduce_the_two_stage_bootstrap(built):
     row = _one(s2, tier_group="p0", base=B160, arm=arm_l, metric="D1")
     mat_l = _point_matrix(frame, "p0-160m", "L")
     mat_r = _point_matrix(frame, "p0-160m", "R")
-    want = sm.arm_interval(mat_l, seed=cm.BOOT_SEED)
+    want = cm._arm_interval(mat_l)
     assert (row["student_mean"], row["student_lo"], row["student_hi"]) == want
     lr = _one(
         c2, tier_group="p0", base=B160, contrast="L-R", model="student",
         metric="D1", analysis="primary",
     )  # fmt: skip
     assert (lr["diff"], lr["lo"], lr["hi"]) == pytest.approx(
-        sm.contrast_interval(mat_l, mat_r, seed=cm.BOOT_SEED), abs=1e-12
+        cm._contrast_interval(mat_l, mat_r), abs=1e-12
     )
     s3 = built["summary"]
     d1 = _one(s3, tier_group="p0", base=B160, arm=arm_l, metric="D1")
@@ -705,6 +704,29 @@ def test_two_levels_reproduce_the_two_stage_bootstrap(built):
     assert sig3["student_mean"] == sig2["student_mean"]
     with pytest.raises(ValueError, match="levels"):
         cm.arm_summary(frame, prompts, levels=1)
+
+
+def test_bootstrap_ports_match_sdfpos2_metrics():
+    sm = pytest.importorskip("subliminal_learning.campaign.sdfpos2_metrics")
+    rng = np.random.default_rng(0)
+    a, b = rng.normal(size=(5, 2)), rng.normal(size=(4, 2)) + 1.0
+    a[1, 0] = b[2, 1] = np.nan
+    assert cm._arm_interval(a) == sm.arm_interval(a, seed=cm.BOOT_SEED)
+    assert cm._contrast_interval(a, b) == sm.contrast_interval(a, b, seed=cm.BOOT_SEED)
+    assert cm._arm_interval(a[:1]) == pytest.approx(
+        sm.arm_interval(a[:1], seed=cm.BOOT_SEED), nan_ok=True
+    )
+    assert cm.N_BOOT == sm.N_BOOT
+
+
+def test_ppl_ratio_reads_capability_summary(tmp_path):
+    assert rp._ppl_ratio(tmp_path) == {}
+    _capability(tmp_path, {0: 30.0, 1: 40.0})
+    assert rp._ppl_ratio(tmp_path) == {0: 1.5, 1: 2.0}
+    _write(
+        tmp_path / "sdf_capability_summary.json", {"perplexity": {"base_overall": None}}
+    )
+    assert rp._ppl_ratio(tmp_path) == {}
 
 
 def test_prompt_counts_resample_each_bank_once():

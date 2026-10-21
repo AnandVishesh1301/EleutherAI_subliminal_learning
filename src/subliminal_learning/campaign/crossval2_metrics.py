@@ -7,8 +7,8 @@ Intervals come from a three-level bootstrap (teacher → gseed → prompt). Each
 first redraws the prompts of every bank once, shared by every model (``favorite`` /
 ``dislike`` share indices, as do ``consensus`` / ``consensus_dislike``), recomputes each
 model's metric and the reference means (controls, untuned base) under that draw, then
-resamples teachers and gseeds exactly as `sdfpos2_metrics` does (gseed-paired
-contrasts, seed 20261021). ``levels=2`` turns the prompt level off and reproduces the
+resamples teachers and gseeds with the draws of `sdfpos2_metrics` (ported below;
+gseed-paired contrasts, seed 20261021). ``levels=2`` turns the prompt level off and reproduces the
 two-stage intervals. Point estimates are full-bank values. A quarantined (§3) or
 degenerate (V-D) model keeps its row and is left out of every mean, contrast and claim.
 """
@@ -26,7 +26,6 @@ import numpy as np
 import pandas as pd
 
 from subliminal_learning.campaign import crossval2_plan as plan
-from subliminal_learning.campaign import sdfpos2_metrics as sm
 from subliminal_learning.campaign.ws160m_metrics import mark_quarantine
 from subliminal_learning.campaign.ws160m_plan import QUARANTINE_FILTER_DROP_MAX
 from subliminal_learning.campaign.xopt_rules import cut
@@ -41,7 +40,7 @@ from subliminal_learning.evaluation.valence import (
     valence_summary,
 )
 
-N_BOOT = sm.N_BOOT
+N_BOOT = 10000
 BOOT_SEED = 20261021
 BOOT_LEVELS = 3
 PROMPT_STREAM = 1
@@ -713,10 +712,13 @@ def replicates(
     return dict(zip(keys, vectors @ counts.T / n_prompts, strict=True))
 
 
-def _two_stage(
+def _two_stage_means(
     reps: np.ndarray, teachers: np.ndarray, gseeds: np.ndarray
 ) -> np.ndarray:
-    """`sdfpos2_metrics.two_stage_means` with a leaf matrix per replicate.
+    """Port of sdfpos2_metrics.two_stage_means (uncommitted, 2026-09-26).
+
+    One leaf matrix per replicate; with every replicate's matrix equal it is the
+    original.
 
     Args:
         reps: ``[B, T, G]`` leaf values per replicate (NaN skipped).
@@ -736,20 +738,22 @@ def _two_stage(
 
 
 def _arm_draws(reps: np.ndarray, n_boot: int, seed: int) -> np.ndarray | None:
-    """Replicate means of one arm (the draws of `sdfpos2_metrics.arm_interval`)."""
+    """Port of sdfpos2_metrics.arm_interval (uncommitted, 2026-09-26): its draws."""
     _, n_teachers, n_gseeds = reps.shape
     if n_teachers < 2:
         return None
     rng = np.random.default_rng(seed)
     gseeds = rng.integers(0, n_gseeds, (n_boot, n_teachers, n_gseeds))
     teachers = rng.integers(0, n_teachers, (n_boot, n_teachers))
-    return _two_stage(reps, teachers, gseeds)
+    return _two_stage_means(reps, teachers, gseeds)
 
 
 def _pair_draws(
     ra: np.ndarray, rb: np.ndarray, n_boot: int, seed: int
 ) -> np.ndarray | None:
-    """Replicate ``mean(a) − mean(b)``, gseed-paired (draws of `contrast_interval`).
+    """Port of sdfpos2_metrics.contrast_interval (uncommitted, 2026-09-26): its draws.
+
+    Replicate ``mean(a) − mean(b)``, gseed-paired.
 
     Raises:
         ValueError: The arms have different gseed columns.
@@ -763,10 +767,11 @@ def _pair_draws(
     gseeds = rng.integers(0, ra.shape[2], (n_boot, max(ta, tb), ra.shape[2]))
     pick_a = rng.integers(0, ta, (n_boot, ta))
     pick_b = rng.integers(0, tb, (n_boot, tb))
-    return _two_stage(ra, pick_a, gseeds) - _two_stage(rb, pick_b, gseeds)
+    return _two_stage_means(ra, pick_a, gseeds) - _two_stage_means(rb, pick_b, gseeds)
 
 
-def _pct(draws: np.ndarray | None) -> tuple[float, float]:
+def _percentiles(draws: np.ndarray | None) -> tuple[float, float]:
+    """Port of sdfpos2_metrics._percentiles (uncommitted, 2026-09-26)."""
     if draws is None:
         return (_NAN, _NAN)
     ok = draws[np.isfinite(draws)]
@@ -776,8 +781,32 @@ def _pct(draws: np.ndarray | None) -> tuple[float, float]:
 
 
 def _observed(point: np.ndarray) -> float:
+    """Port of sdfpos2_metrics._observed (uncommitted, 2026-09-26)."""
     ok = point[np.isfinite(point)]
     return float(ok.mean()) if ok.size else _NAN
+
+
+def _arm_interval(
+    matrix: np.ndarray, *, n_boot: int = N_BOOT, seed: int = BOOT_SEED
+) -> tuple[float, float, float]:
+    """Port of sdfpos2_metrics.arm_interval (uncommitted, 2026-09-26)."""
+    m = np.asarray(matrix, dtype=float)
+    draws = _arm_draws(np.broadcast_to(m, (n_boot, *m.shape)), n_boot, seed)
+    return (_observed(m), *_percentiles(draws))
+
+
+def _contrast_interval(
+    a: np.ndarray, b: np.ndarray, *, n_boot: int = N_BOOT, seed: int = BOOT_SEED
+) -> tuple[float, float, float]:
+    """Port of sdfpos2_metrics.contrast_interval (uncommitted, 2026-09-26)."""
+    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    draws = _pair_draws(
+        np.broadcast_to(a, (n_boot, *a.shape)),
+        np.broadcast_to(b, (n_boot, *b.shape)),
+        n_boot,
+        seed,
+    )
+    return (_observed(a) - _observed(b), *_percentiles(draws))
 
 
 @dataclass(frozen=True)
@@ -982,10 +1011,10 @@ def arm_summary(
             s_draws = _arm_draws(sb.reps, n_boot, seed)
             c_point, c_rep = _reference(ctrl_keys, idx, rep, metric, n_boot)
             t_mean, s_mean = _observed(tb.point), _observed(sb.point)
-            t_lo, t_hi = _pct(t_draws)
-            s_lo, s_hi = _pct(s_draws)
-            ts_lo, ts_hi = _pct(None if t_draws is None else t_draws - b_rep)
-            ss_lo, ss_hi = _pct(None if s_draws is None else s_draws - c_rep)
+            t_lo, t_hi = _percentiles(t_draws)
+            s_lo, s_hi = _percentiles(s_draws)
+            ts_lo, ts_hi = _percentiles(None if t_draws is None else t_draws - b_rep)
+            ss_lo, ss_hi = _percentiles(None if s_draws is None else s_draws - c_rep)
             rows.append(
                 {
                     **static,
@@ -1018,7 +1047,7 @@ def _pair_row(
     ba: _Block, bb: _Block, n_boot: int, seed: int,
 ) -> dict:  # fmt: skip
     diff = _observed(ba.point) - _observed(bb.point)
-    lo, hi = _pct(_pair_draws(ba.reps, bb.reps, n_boot, seed))
+    lo, hi = _percentiles(_pair_draws(ba.reps, bb.reps, n_boot, seed))
     return {
         "contrast": name,
         "analysis": analysis,
@@ -1043,7 +1072,7 @@ def _reference_row(
 ) -> dict:  # fmt: skip
     draws = _arm_draws(block.reps, n_boot, seed)
     diff = _observed(block.point) - ref[0]
-    lo, hi = _pct(None if draws is None else draws - ref[1])
+    lo, hi = _percentiles(None if draws is None else draws - ref[1])
     return {
         "contrast": PLACEBO_CONTROL,
         "analysis": PRIMARY,
