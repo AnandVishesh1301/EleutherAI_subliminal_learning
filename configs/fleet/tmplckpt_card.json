@@ -1,0 +1,22 @@
+{
+  "queue_roots": [
+    "/mnt/ssd-2/soar-subliminal/vishesh/tmplckpt/queue"
+  ],
+  "queue_prefix": "tmplckpt-",
+  "tmux_session": "tmplckpt",
+  "driver_node": "soar-subliminal-2",
+  "driver_pattern": "scripts.run_tmplckpt_campaign watch",
+  "driver_pane": "tmplckpt:driver",
+  "state_file": "/mnt/ssd-2/soar-subliminal/vishesh/tmplckpt/logs/driver_heartbeat",
+  "done_marker": "/mnt/ssd-2/soar-subliminal/vishesh/tmplckpt/logs/CAMPAIGN_DONE",
+  "elastic": true,
+  "preempt_ok": false,
+  "deadline": "none",
+  "plan": ".claude/plans/blogpost/15_tmplckpt_template_teachers_checkpoints.plan.md",
+  "watch_dir": "/mnt/ssd-3/soar-subliminal/vishesh/run_logs/tmplckpt_watch",
+  "disk_min_gb": {
+    "/mnt/ssd-2": 100,
+    "/mnt/ssd-3": 300
+  },
+  "notes": "Statement teachers through Pythia-160M checkpoints, hard + soft, one unpinned queue root /mnt/ssd-2/soar-subliminal/vishesh/tmplckpt/queue drained by one pool per node (tmux tmplckpt:workers on soar-subliminal-2, soar-subliminal-3); one driver tmplckpt:driver on soar-subliminal-2; state /mnt/ssd-2/soar-subliminal/vishesh/tmplckpt/logs/tmplckpt_campaign_state.json; hard students wait for /mnt/ssd-2/soar-subliminal/vishesh/tmplckpt/reviews/hard_pools.agent_review.json; waves held via /mnt/ssd-2/soar-subliminal/vishesh/tmplckpt/waves.json. | state_file = driver heartbeat touched every pass."
+}

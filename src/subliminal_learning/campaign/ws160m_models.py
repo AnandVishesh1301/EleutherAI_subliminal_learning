@@ -424,20 +424,29 @@ def registry(
 def registry_for_paths(paths_config: Path | None) -> Mapping[str, HfModelSpec]:
     """The sweeps' ``--spec-registry ws160m`` roster, rooted by a paths YAML.
 
-    Every roster base at every `CAMPAIGN_STEPS` step, with local bases under
-    ``<audit_root>/base_models_160m``.
+    Every roster base at every `CAMPAIGN_STEPS` step, plus the YAML's optional
+    ``extra_steps`` list, with local bases under ``<audit_root>/base_models_160m``.
 
     Raises:
-        ValueError: If `paths_config` is missing or has no ``audit_root``.
+        ValueError: If `paths_config` is missing, has no ``audit_root``, or lists an
+            ``extra_steps`` value that is not a positive integer.
     """
     import yaml
 
     if paths_config is None:
         raise ValueError("--spec-registry ws160m needs --paths-config")
-    doc = yaml.safe_load(Path(paths_config).read_text())
-    audit_root = (doc or {}).get("audit_root")
+    doc = yaml.safe_load(Path(paths_config).read_text()) or {}
+    audit_root = doc.get("audit_root")
     if not audit_root:
         raise ValueError(f"{paths_config}: audit_root is required for ws160m")
+    extra = doc.get("extra_steps") or []
+    if not isinstance(extra, list) or not all(
+        isinstance(s, int) and not isinstance(s, bool) and s > 0 for s in extra
+    ):
+        raise ValueError(
+            f"{paths_config}: extra_steps must be a list of positive ints, got {extra!r}"
+        )
+    steps = tuple(dict.fromkeys((*CAMPAIGN_STEPS, *sorted(extra))))
     root = Path(str(audit_root)) / BASE_MODELS_DIRNAME
-    entries = [(m.base, step) for m in ROSTER for step in CAMPAIGN_STEPS]
+    entries = [(m.base, step) for m in ROSTER for step in steps]
     return registry(entries, base_models_root=root)

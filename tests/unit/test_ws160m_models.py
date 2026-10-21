@@ -174,3 +174,22 @@ def test_registry_for_paths_roots_local_bases_under_audit_root(tmp_path: Path):
         m.registry_for_paths(tmp_path / "bad.yaml")
     with pytest.raises(ValueError, match="paths-config"):
         m.registry_for_paths(None)
+
+
+def test_registry_for_paths_extra_steps_adds_only_those_steps(tmp_path: Path):
+    paths = tmp_path / "paths.yaml"
+    paths.write_text(
+        f"audit_root: {tmp_path / 'cold'}\nextra_steps: [143000, 25000, 25000]\n"
+    )
+    reg = m.registry_for_paths(paths)
+    steps = (*m.CAMPAIGN_STEPS, 25000)
+    assert set(reg) == {m.token(b.base, s) for b in m.ROSTER for s in steps}
+    assert reg["pythia-160m@step25000"].revision == "step25000"
+    assert reg["pythia-160m@step25000"].label == "pythia-160m-step25000"
+    assert reg["pile-main@step25000"].local_root == (
+        tmp_path / "cold" / "base_models_160m" / "hf_converted" / "pile-main"
+    )
+    for bad in ("[0]", "[25000.5]", "25000", "[true]"):
+        paths.write_text(f"audit_root: {tmp_path}\nextra_steps: {bad}\n")
+        with pytest.raises(ValueError, match="extra_steps"):
+            m.registry_for_paths(paths)
