@@ -524,7 +524,7 @@ def restart_loop(host: str, cwd: str, argv: tuple[str, ...], d: Path) -> str:
     if host != socket.gethostname():
         alias = resolve_node(host).alias
         argv_sh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", alias]
-        argv_sh.append(script)
+        argv_sh.append(shlex.join(["bash", "-c", script]))
     try:
         out = subprocess.run(
             argv_sh, capture_output=True, text=True, timeout=RESTART_TIMEOUT_S

@@ -246,3 +246,24 @@ def test_loop_command_matches_deployed_loop(tmp_path):
         f" run --fleet-root '/f r' 2>&1 | tee -a {tmp_path / io.DAEMON_LOG};"
     )
     assert cmd.endswith("sleep 60; done")
+
+
+def test_restart_loop_runs_remote_script_under_bash(monkeypatch, tmp_path):
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **k):
+        seen.append(argv)
+        return io.subprocess.CompletedProcess(argv, 0, "ok\n", "")
+
+    monkeypatch.setattr(io.subprocess, "run", fake_run)
+    monkeypatch.setattr(io.socket, "gethostname", lambda: "soar-subliminal-0")
+    assert io.restart_loop("secret-ord-0", "/pin", ("run",), tmp_path) == "ok"
+    assert seen[0][:-1] == [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=20",
+        "a40-cluster-5",
+    ]
+    assert seen[0][-1].startswith("bash -c ")
