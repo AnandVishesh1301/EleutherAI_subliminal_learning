@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import random
 from collections.abc import Iterable, Mapping
+from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
 
@@ -115,27 +116,27 @@ def _check_angela_step(step: int) -> int:
 # ---- base -------------------------------------------------------------------------------
 
 
-def spec(step: int) -> HfModelSpec:
-    """`pythia-160m` at `step` (ws160m spec: label ``pythia-160m-step<N>``)."""
-    return ws160m_models.spec(plan.BASE, step, base_models_root=plan.BASE_MODELS_ROOT)
+def spec(step: int, base: str = plan.BASE) -> HfModelSpec:
+    """Roster `base` at `step` (ws160m spec: label ``<base>-step<N>``)."""
+    return ws160m_models.spec(base, step, base_models_root=plan.BASE_MODELS_ROOT)
 
 
-def ref(step: int) -> str:
-    """`model_ref` of `spec(step)`: ``EleutherAI/pythia-160m@step<N>``."""
-    return model_ref(spec(step), HUB_ORG)
+def ref(step: int, base: str = plan.BASE) -> str:
+    """`model_ref` of `spec(step, base)`, e.g. ``EleutherAI/pythia-160m@step<N>``."""
+    return model_ref(spec(step, base), HUB_ORG)
 
 
-def same_repo(manifest_repo: str, step: int) -> bool:
-    """Whether a manifest's base repo names `pythia-160m` at `step`.
+def same_repo(manifest_repo: str, step: int, base: str = plan.BASE) -> bool:
+    """Whether a manifest's base repo names roster `base` at `step`.
 
-    The bare repo id is accepted only at the final step: Angela's non-revision runs
-    record it, and ``main`` holds the ``step143000`` weights (148 tensors equal,
-    tmplopd staging report).
+    The bare repo id is accepted only for `pythia-160m` at the final step: Angela's
+    non-revision runs record it, and its ``main`` holds the ``step143000`` weights (148
+    tensors equal, tmplopd staging report). Other lineages need ``@step<N>``.
     """
-    if manifest_repo == ref(step):
+    if manifest_repo == ref(step, base):
         return True
-    bare = ref(step).partition("@")[0]
-    return step == plan.STEPS_HARD15[-1] and manifest_repo == bare
+    bare = ref(step, base).partition("@")[0]
+    return base == plan.BASE and step == plan.STEPS_HARD15[-1] and manifest_repo == bare
 
 
 # ---- teachers ---------------------------------------------------------------------------
@@ -167,48 +168,39 @@ def template_path(kind: str) -> Path:
     return TEMPLATE_DIR / template_source(kind).name
 
 
+@lru_cache(maxsize=1)
+def _template_roster() -> frozenset[Teacher]:
+    """Statement and placebo teachers of waves 1 and 2 (trained, copied, reproduced)."""
+    every = [*plan.teachers(), *plan.teachers_w2()]
+    return frozenset(t for t in every if t.kind in (plan.STMT, plan.STMT_PL))
+
+
 def check_teacher(t: Teacher) -> Teacher:
-    """`t` after the plan checks (kind, target, step, seed, source).
+    """`t` when it is a planned statement / placebo teacher.
 
     Raises:
         ValueError: A teacher this channel does not handle.
     """
-    _check_steps(t.step)
-    if t.kind == plan.STMT:
-        if t.target not in (plan.DOG, plan.BEAR):
-            raise ValueError(f"statement teacher target {t.target!r}")
-    elif t.kind == plan.STMT_PL:
-        if t.target != plan.PLACEBO_TARGET or t.source != plan.TRAIN:
-            raise ValueError(f"placebo teacher {t}")
-    else:
+    if t.kind not in (plan.STMT, plan.STMT_PL):
         raise ValueError(f"{t.kind!r} teachers are not hard-channel cells")
-    if t.ftseed not in plan.TEACHER_FTSEEDS:
-        raise ValueError(f"teacher ftseed {t.ftseed}")
-    angela_slot = (
-        t.kind == plan.STMT
-        and t.target == plan.DOG
-        and t.ftseed == plan.ANGELA_FTSEED
-        and t.step in plan.STEPS_HARD15
-    )
-    if t.source == plan.TRAIN:
-        ok = not angela_slot
-    elif t.source in (plan.ANGELA, plan.REPRO):
-        ok = angela_slot
-    else:
-        ok = False
-    if not ok:
-        raise ValueError(f"teacher source {t.source!r} off the plan for {t}")
+    if t not in _template_roster():
+        raise ValueError(f"teacher {t} is off the plan")
     return t
 
 
-def angela_teacher_copy_dir(step: int, recipe: str = plan.STMT_RECIPE) -> Path:
-    """Staged copy of Angela's dog ftseed1 teacher at `step` (her layout)."""
-    return plan.angela_copy(plan.angela_teacher_src(_check_angela_step(step), recipe))
+def angela_teacher_copy_dir(
+    step: int, recipe: str = plan.STMT_RECIPE, base: str = plan.BASE
+) -> Path:
+    """Staged copy of Angela's dog ftseed1 teacher of `base` at `step` (her layout)."""
+    src = plan.angela_teacher_src(_check_angela_step(step), recipe, base)
+    return plan.angela_copy(src)
 
 
-def angela_teacher_mirror_dir(step: int, recipe: str = plan.STMT_RECIPE) -> Path:
+def angela_teacher_mirror_dir(
+    step: int, recipe: str = plan.STMT_RECIPE, base: str = plan.BASE
+) -> Path:
     """Mirror run dir of that teacher (our evals; ``checkpoints`` links to the copy)."""
-    src = plan.angela_teacher_src(_check_angela_step(step), recipe)
+    src = plan.angela_teacher_src(_check_angela_step(step), recipe, base)
     return ANGELA_EVAL_ROOT / src.relative_to(plan.ANGELA_OUTPUTS)
 
 
@@ -216,10 +208,15 @@ def teacher_leaf_dir(t: Teacher) -> Path:
     """Run dir the trainer writes (`TRAIN` / `REPRO`); Angela's -> her mirror dir."""
     check_teacher(t)
     if t.source == plan.ANGELA:
-        return angela_teacher_mirror_dir(t.step)
+        return angela_teacher_mirror_dir(t.step, t.recipe, t.base)
     root = plan.REPRO_OUTPUT_ROOT if t.source == plan.REPRO else plan.OUTPUT_ROOT
     return teacher_run_dir(
-        root, t.target, spec(t.step), HUB_ORG, teacher_train(t.ftseed), teacher_lora()
+        root,
+        t.target,
+        spec(t.step, t.base),
+        HUB_ORG,
+        teacher_train(t.ftseed, t.recipe),
+        teacher_lora(t.recipe),
     )
 
 
@@ -231,7 +228,7 @@ def teacher_dir(t: Teacher) -> Path:
 def teacher_checkpoint_dir(t: Teacher) -> Path:
     """Adapter dir of `t` (Angela's: the staged copy)."""
     if t.source == plan.ANGELA:
-        return angela_teacher_copy_dir(t.step) / "checkpoints"
+        return angela_teacher_copy_dir(t.step, t.recipe, t.base) / "checkpoints"
     return teacher_leaf_dir(t) / "checkpoints"
 
 
@@ -256,11 +253,12 @@ def teacher_eval_paths(t: Teacher) -> dict[str, Path]:
 
 
 def bridge_animals(t: Teacher) -> tuple[str, ...]:
-    """GKD animal slots `t` is copied into (none for a reproduction retrain)."""
+    """GKD animal slots `t` is copied into (none for a reproduction retrain; wave-2
+    lineage placebos serve dog only)."""
     if t.source == plan.REPRO:
         return ()
     if t.kind == plan.STMT_PL:
-        return (plan.DOG, plan.BEAR)
+        return (plan.DOG, plan.BEAR) if t.base == plan.BASE else (plan.DOG,)
     return (t.target,)
 
 
@@ -270,7 +268,7 @@ def bridge_dirs(t: Teacher) -> tuple[Path, ...]:
 
 
 def train_teachers() -> list[Teacher]:
-    """Template teachers trained here (statement, placebo, reproduction retrains)."""
+    """Wave-1 template teachers trained here (statement, placebo, reproduction)."""
     return [
         t
         for t in plan.teachers()
@@ -278,8 +276,28 @@ def train_teachers() -> list[Teacher]:
     ]
 
 
+def train_teachers_w2() -> list[Teacher]:
+    """Wave-2 template teachers trained here (the Hub-lineage placebos)."""
+    return [
+        t
+        for t in plan.teachers_w2()
+        if t.kind in (plan.STMT, plan.STMT_PL) and t.source == plan.TRAIN
+    ]
+
+
+def copy_teachers_w2() -> list[Teacher]:
+    """Wave-2 Angela copies (other recipes on `pythia-160m`; Hub-lineage teachers)."""
+    return [t for t in plan.teachers_w2() if t.source == plan.ANGELA]
+
+
+def _non_default(t: Teacher) -> bool:
+    return t.base != plan.BASE or t.recipe != plan.STMT_RECIPE
+
+
 def teacher_key(t: Teacher) -> str:
-    return f"teach|{t.kind}|{t.target}|s{t.step}|f{t.ftseed}|{t.source}"
+    """Job key (wave-1 form; non-default base / recipe appended)."""
+    key = f"teach|{t.kind}|{t.target}|s{t.step}|f{t.ftseed}|{t.source}"
+    return f"{key}|{t.base}|{t.recipe}" if _non_default(t) else key
 
 
 # ---- Angela's original students (copies; capability + preference by our harness) --------
@@ -375,8 +393,10 @@ def check_pool_src(src: PoolSrc) -> PoolSrc:
     """
     if isinstance(src, Teacher):
         check_teacher(src)
-        if src.source == plan.REPRO or (
-            src.kind == plan.STMT and src.target != plan.DOG
+        if (
+            src.source == plan.REPRO
+            or _non_default(src)
+            or (src.kind == plan.STMT and src.target != plan.DOG)
         ):
             raise ValueError(f"no hard pool for {src}")
         return src
@@ -639,6 +659,8 @@ QUEUE_KIND: MappingProxyType[str, str] = MappingProxyType(
         plan.queue_name(plan.HARD, "studeval"): "copy_eval",
         plan.queue_name(plan.HARD, "pool"): "hard_pool",
         plan.queue_name(plan.HARD, "stud"): "hard_student",
+        plan.queue_name(plan.HARD, "teach2"): "stmt_teacher",
+        plan.queue_name(plan.HARD, "copyeval2"): "copy_eval",
     }
 )
 
@@ -653,13 +675,17 @@ def _job(key: str, args: str, queue: str) -> Job:
     return Job(key=key, cmd=cmd, mem_mib=fp.mem_mib, slots=fp.slots)
 
 
-def teacher_job(t: Teacher) -> Job:
+def teacher_job(t: Teacher, stage: str = "teach") -> Job:
     check_teacher(t)
     args = (
         f"teacher --kind {t.kind} --target {t.target} --step {t.step} "
         f"--ftseed {t.ftseed} --source {t.source}"
     )
-    return _job(teacher_key(t), args, plan.queue_name(plan.HARD, "teach"))
+    if t.base != plan.BASE:
+        args += f" --base {t.base}"
+    if t.recipe != plan.STMT_RECIPE:
+        args += f" --recipe {t.recipe}"
+    return _job(teacher_key(t), args, plan.queue_name(plan.HARD, stage))
 
 
 def copyeval_queue(recipe: str) -> str:
@@ -675,6 +701,15 @@ def copyeval_job(step: int, recipe: str) -> Job:
     key = f"copyeval|{recipe}|s{_check_angela_step(step)}"
     args = f"copyeval --step {step} --recipe {recipe}"
     return _job(key, args, copyeval_queue(recipe))
+
+
+def copyeval2_job(t: Teacher) -> Job:
+    """Wave-2 copy evaluation of one Angela teacher, always bridged to the dog slot."""
+    if t not in copy_teachers_w2():
+        raise ValueError(f"{t} is not a wave-2 Angela copy")
+    key = f"copyeval2|{t.base}|{t.recipe}|s{t.step}"
+    args = f"copyeval --step {t.step} --recipe {t.recipe} --base {t.base} --bridge"
+    return _job(key, args, plan.queue_name(plan.HARD, "copyeval2"))
 
 
 def studeval_job(step: int, seed: int, kind: str) -> Job:
@@ -735,6 +770,12 @@ def queue_jobs(
         plan.queue_name(plan.HARD, "studeval"): studeval,
         plan.queue_name(plan.HARD, "pool"): pools,
         plan.queue_name(plan.HARD, "stud"): stud,
+        plan.queue_name(plan.HARD, "teach2"): [
+            teacher_job(t, "teach2") for t in train_teachers_w2()
+        ],
+        plan.queue_name(plan.HARD, "copyeval2"): [
+            copyeval2_job(t) for t in copy_teachers_w2()
+        ],
     }
 
 

@@ -151,12 +151,14 @@ def base_kind(teacher_step: int, student_step: int) -> str:
 def control_match_keys(row: Mapping) -> dict[str, tuple]:
     """Keys of the matched control groups of one treatment row.
 
-    A key is ``(channel, config, animal, teacher_step, student_step, control_kind,
-    control_teacher_kind)`` and equals `control_key` of its control rows; ``config`` is
-    the channel recipe tag, so a 1D variant pairs with its own variant's controls.
+    A key is ``(channel, config, animal, base, teacher_step, student_step, control_kind,
+    control_teacher_kind)`` and equals `control_key` of its control rows. ``config`` is
+    the channel recipe tag (a 1D / 2C variant pairs with its own variant's controls) and
+    ``base`` the lineage (2B pairs within its lineage); wave and teacher recipe are not
+    part of it (2A pairs with 1A's controls).
     """
     t, s = int(row["teacher_step"]), int(row["student_step"])
-    common = (row["channel"], row["config"], row["animal"])
+    common = (row["channel"], row["config"], row["animal"], row.get("base", plan.BASE))
     out = {"base": (*common, t, s, base_kind(t, s), None)}
     if t == s:
         out["placebo"] = (
@@ -177,6 +179,7 @@ def control_key(row: Mapping) -> tuple:
         row["channel"],
         row["config"],
         row["animal"],
+        row.get("base", plan.BASE),
         int(row["teacher_step"]),
         int(row["student_step"]),
         kind,
@@ -423,6 +426,44 @@ def compare_ratios(
         summarize(rise_a0[0], rise_a),
         summarize(rise_b0[0], rise_b),
     )
+
+
+def ratio_interval(
+    cells: Mapping[int, CellData],
+    *,
+    early: Sequence[int] = EARLY_STEPS,
+    late: Sequence[int] = LATE_STEPS,
+    n_boot: int = N_BOOT,
+    seed: int = BOOT_SEED,
+) -> tuple[Estimate, Estimate] | None:
+    """Late-rise ratio and late-minus-early Δ of one group (two-stage bootstrap)."""
+    steps = [s for s in sorted({*early, *late}) if s in cells]
+    if not steps:
+        return None
+    rng = np.random.default_rng(seed)
+    d = np.column_stack([draw_deltas(cells[s], rng, n_boot) for s in steps])
+    obs = np.array([[cells[s].observed for s in steps]])
+    r, rise = _ratio_rows(d, steps, early, late)
+    r0, rise0 = _ratio_rows(obs, steps, early, late)
+    return summarize(r0[0], r), summarize(rise0[0], rise)
+
+
+def k9_pattern(
+    r_soft: float, r_hard: Estimate | None, rise_hard: Estimate | None
+) -> dict:
+    """K9 per lineage: hard precondition (R_hard ≤ 0.3, rise interval > 0) and pattern."""
+    pre = (
+        r_hard is not None
+        and rise_hard is not None
+        and math.isfinite(r_hard.estimate)
+        and r_hard.estimate <= R_HARD_MAX
+        and math.isfinite(rise_hard.ci_low)
+        and rise_hard.ci_low > 0
+    )
+    return {
+        "hard_precondition": bool(pre),
+        "pattern": bool(pre and math.isfinite(r_soft) and r_soft >= R_SUPPORTED_MIN),
+    }
 
 
 def difference(

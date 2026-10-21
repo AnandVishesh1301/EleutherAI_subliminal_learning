@@ -39,6 +39,8 @@ class FakeHard:
     def __init__(self) -> None:
         self.finished: dict[str, str] = {}
         self.short: set[str] = set()
+        self.extra_teach: list[Job] = []
+        self.w2: dict[str, list[Job]] = {}
 
     def queue_jobs(self, *, approved_pool_shas):
         stud = [
@@ -47,9 +49,14 @@ class FakeHard:
             if approved_pool_shas is None or sha in approved_pool_shas
         ]
         return {
-            H_TEACH: [Job("teach|1", "true"), Job("teach|2", "true")],
+            H_TEACH: [
+                Job("teach|1", "true"),
+                Job("teach|2", "true"),
+                *self.extra_teach,
+            ],
             H_POOL: [Job("pool|p1", "true"), Job("pool|p2", "true")],
             H_STUD: stud,
+            **self.w2,
         }
 
     def pool_review_items(self):
@@ -100,6 +107,7 @@ def campaign(tmp_path, monkeypatch):
         ("OUTPUT_ROOT", tmp_path / "out"),
         ("SOFT_RUN_SET_DIR", tmp_path / "out" / "gkd_students" / "soft"),
         ("MIN_FREE_GIB", MappingProxyType({str(tmp_path): 0})),
+        ("STAGING_REPORT_PATH", tmp_path / "control" / "staging_report.json"),
     ):
         monkeypatch.setattr(plan, name, value)
     monkeypatch.setattr(plan, "hard_pools", lambda: ["p1", "p2"])
@@ -477,7 +485,8 @@ def test_control_143k_identity_compares_both_copies(tmp_path, monkeypatch):
     monkeypatch.setattr(plan, "ANGELA_OUTPUTS", tmp_path / "angela")
     monkeypatch.setattr(plan, "ANGELA_COPY_ROOT", tmp_path / "copy")
     monkeypatch.setattr(plan, "HARD_STUDENT_SEEDS", (1,))
-    a, b = (plan.angela_copy(d) for d in staging.control_dirs(143_000, 143_000, 1))
+    cands = staging.control_dirs(143_000, 143_000, 1)
+    a, b = plan.angela_copy(cands[0]), plan.angela_copy(cands[-1])
     for d, body in ((a, "x"), (b, "y")):
         (d / "checkpoints").mkdir(parents=True)
         (d / "checkpoints" / "adapter_model.safetensors").write_text("same")
@@ -559,3 +568,123 @@ def test_copy_verified_removes_a_bad_temp(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="sha256"):
         staging.copy_verified(src, dest)
     assert not dest.exists() and not list(dest.parent.iterdir())
+
+
+def _report(w2_passed: bool | None) -> None:
+    doc = {"passed": True}
+    if w2_passed is not None:
+        doc["w2"] = {"passed": w2_passed, "problems": [] if w2_passed else ["x"]}
+    plan.STAGING_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    plan.STAGING_REPORT_PATH.write_text(json.dumps(doc))
+
+
+def test_live_wave1_queue_is_frozen(campaign):
+    cfg, hard = campaign.cfg, campaign.hard
+    driver.run(cfg)
+    before = [j.key for j in store.load_jobs(cfg.queue_root, H_TEACH)]
+    hard.extra_teach = [Job("teach|new", "true")]
+    driver.run(cfg)
+    assert [j.key for j in store.load_jobs(cfg.queue_root, H_TEACH)] == before
+    assert f"hole|frozen|{H_TEACH}" in driver.load_state()["labelled"]
+
+
+def test_wave2_queues_wait_for_wave2_staging_then_join_finalize(campaign, monkeypatch):
+    cfg, hard, soft = campaign.cfg, campaign.hard, campaign.soft
+    teach2 = plan.queue_name(plan.HARD, "teach2")
+    leaf2a = plan.queue_name(plan.SOFT, "leaf", plan.W2A)
+    hard.finished = {"p1": "s1", "p2": "s2"}
+    _approve({"p1": "s1", "p2": "s2"})
+    _report(None)
+    driver.run(cfg)
+    hard.w2 = {teach2: [Job("t2|1", "true")]}
+    soft.extra = {leaf2a: [Job("leaf|2a", "true")]}
+    result = driver.run(cfg)
+    assert not store.queue_exists(cfg.queue_root, teach2)
+    assert any("wave-2 queues held" in w for w in result.waiting)
+    _drain(cfg)
+    fake = SimpleNamespace(run=lambda partial: "dir")
+    monkeypatch.setitem(sys.modules, "pipelines.fake_tmplckpt_results", fake)
+    monkeypatch.setattr(driver, "RESULTS_MODULE", "pipelines.fake_tmplckpt_results")
+    assert not driver.run(cfg).done
+    _report(True)
+    driver.run(cfg)
+    assert store.queue_exists(cfg.queue_root, teach2)
+    assert (
+        store.read_meta(cfg.queue_root, leaf2a).priority
+        == plan.QUEUE_PRIORITIES[leaf2a]
+    )
+    assert not driver.run(cfg).done
+    _drain(cfg)
+    assert driver.run(cfg).done
+
+
+def test_waves_default_includes_wave2(tmp_path, monkeypatch):
+    monkeypatch.setattr(plan, "CONTROL_ROOT", tmp_path)
+    assert driver.enabled_waves() == (driver.all_waves(), None)
+    assert set(plan.WAVES2) <= driver.all_waves()
+    assert driver.queue_wave(plan.queue_name(plan.SOFT, "leaf", plan.W2B)) == plan.W2B
+    assert driver.queue_wave(plan.queue_name(plan.HARD, "teach2")) is None
+
+
+@pytest.fixture
+def lineage(tmp_path, monkeypatch):
+    monkeypatch.setattr(plan, "ANGELA_OUTPUTS", tmp_path / "angela")
+    monkeypatch.setattr(plan, "ANGELA_COPY_ROOT", tmp_path / "copy")
+    monkeypatch.setattr(plan, "STEPS_HARD15", (100_000, 143_000))
+    monkeypatch.setattr(plan, "HUB_LINEAGES", ("data-seed1",))
+    for step in plan.STEPS_HARD15:
+        src = plan.angela_teacher_src(step, plan.STMT_RECIPE, "data-seed1")
+        dest = plan.angela_copy(src)
+        (dest / "checkpoints").mkdir(parents=True)
+        adapter = dest / "checkpoints" / "adapter_model.safetensors"
+        adapter.write_bytes(f"ds1{step}".encode())
+        repo = f"EleutherAI/pythia-160m-data-seed1@step{step}"
+        (dest / "train_manifest.json").write_text(json.dumps({"base_model_repo": repo}))
+        pool = plan.angela_copy(
+            staging.pool_manifest_src(step, plan.STMT_RECIPE, "pythia-160m-data-seed1")
+        )
+        pool.parent.mkdir(parents=True)
+        params = {"adapter_id": file_sha256(adapter)[:16], "base_model_ref": repo}
+        pool.write_text(json.dumps({"params": params}))
+    return tmp_path
+
+
+def test_lineage_teacher_checks(lineage):
+    assert staging.w2_teacher_problems() == []
+    src = plan.angela_teacher_src(100_000, plan.STMT_RECIPE, "data-seed1")
+    man = plan.angela_copy(src) / "train_manifest.json"
+    man.write_text(json.dumps({"base_model_repo": "EleutherAI/pythia-160m@step100000"}))
+    assert any("data-seed1@100000" in p for p in staging.w2_teacher_problems())
+
+
+def test_wave2_queue_names_are_plan_queues():
+    assert driver.w2_queues() <= set(plan.QUEUE_PRIORITIES)
+    assert {driver.queue_wave(q) for q in driver.w2_queues()} <= {None, *plan.WAVES2}
+
+
+def test_lineage_layouts_follow_her_tree(tmp_path, monkeypatch):
+    monkeypatch.setattr(plan, "ANGELA_OUTPUTS", tmp_path)
+    lin = plan.ANGELA_LINEAGE["seed2"]
+    rel = staging.student_dir(100_000, 100_000, 2, lineage=lin).relative_to(tmp_path)
+    assert rel.as_posix() == (
+        f"students/dog/ckpt/{lin}@step100000/teacher-{lin}@step100000/"
+        f"{plan.STMT_RECIPE}_tseed1/ex10-20_prefix_n100k/{plan.HARD_TAG}/ftseed2"
+    )
+    final = [
+        d.relative_to(tmp_path).as_posix()
+        for d in staging.control_dirs(143_000, 143_000, 1, lineage=lin)
+    ]
+    assert final == [
+        f"students/controls/base/ckpt/{lin}@step143000/teacher-{lin}@step143000/"
+        f"ex10-20_prefix_n100k/{plan.HARD_TAG}/ftseed1"
+    ]
+    py = [
+        d.relative_to(tmp_path).as_posix()
+        for d in staging.control_dirs(143_000, 143_000, 1)
+    ]
+    assert py[0].startswith(
+        "students/controls/base/ckpt/pythia-160m@step143000/teacher-pythia-160m/"
+    )
+    assert py[1].startswith("students/controls/base/pythia-160m/teacher-pythia-160m/")
+    recipe = staging.student_dir(75_000, 75_000, 1, recipe="ep7_lr5e-4_r8a8")
+    assert "/ep7_lr5e-4_r8a8_tseed1/" in recipe.as_posix()

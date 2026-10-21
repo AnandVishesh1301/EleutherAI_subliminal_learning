@@ -58,6 +58,8 @@ PROBE_FILE = "training_metrics.jsonl"
 SETS: tuple[str, ...] = ("test", "off_topic", "favorite", "validation")
 ANGELA_DATASET_DIR = "ex10-20_prefix_n100k"
 ANGELA_STUDENT_SEEDS: tuple[int, ...] = plan.HARD_STUDENT_SEEDS
+# Her Hub-lineage base controls: checkpoint layout only, one seed per step (143k too).
+ANGELA_LINEAGE_CONTROL_SEED = 1
 GRID_ARM = "grid"
 POOL_DIAG_CACHE = "pool_diag_cache.json"
 # ws160m gen-3 Pythia-160M self diagonal at 143k, bear (placebo 0.340, untuned base
@@ -266,12 +268,14 @@ def _teacher_ident(t: plan.Teacher | None) -> dict:
             "teacher_kind": None,
             "teacher_target": None,
             "teacher_source": None,
+            "teacher_recipe": None,
             "ftseed": -1,
         }
     return {
         "teacher_kind": t.kind,
         "teacher_target": t.target,
         "teacher_source": t.source,
+        "teacher_recipe": t.recipe,
         "ftseed": t.ftseed,
     }
 
@@ -302,6 +306,14 @@ def _student_values(
     }
 
 
+def _extra_ident(base: str, recipe: str | None) -> str:
+    """Key suffix for a non-default lineage or teacher recipe (wave-1 keys unchanged)."""
+    extra = "" if base == plan.BASE else f"|b{base}"
+    if recipe is not None and recipe != plan.STMT_RECIPE:
+        extra += f"|r{recipe}"
+    return extra
+
+
 def _row(
     channel: str,
     wave: str,
@@ -309,16 +321,18 @@ def _row(
     animal: str,
     config: str,
     variant: str,
-    t,
-    ts,
-    ss,
-    seed,
+    t: plan.Teacher | None,
+    ts: int,
+    ss: int,
+    seed: int,
+    base: str = plan.BASE,
 ) -> dict:
     tid = _teacher_ident(t)
     return {
         "key": (
             f"{channel}|{wave}|{variant}|{animal}|{kind}|{tid['teacher_kind']}|"
             f"{tid['teacher_source']}|t{ts}|s{ss}|f{tid['ftseed']}|g{seed}"
+            + _extra_ident(base, tid["teacher_recipe"])
         ),
         "channel": channel,
         "wave": wave,
@@ -328,20 +342,31 @@ def _row(
         "control_kind": None if kind == plan.TREATMENT else kind,
         "animal": animal,
         "config": config,
+        "base": base,
         **tid,
-        "teacher_base": plan.BASE,
-        "student_base": plan.BASE,
+        "teacher_base": base,
+        "student_base": base,
         "teacher_step": ts,
         "student_step": ss,
         "seed": seed,
     }
 
 
-def soft_rows(soft_mod: ModuleType | None) -> list[dict]:
-    """One row per planned soft leaf (`plan.soft_leaves`)."""
+def _layout_call(errors: list[str], what: object, fn: Callable[[], object]) -> object:
+    """A layout lookup; a cell the layout module does not support yet is recorded, not run."""
+    try:
+        return fn()
+    except ValueError as err:
+        errors.append(f"{what}: {err}")
+        logger.warning("layout cannot resolve {}: {}", what, err)
+        return None
+
+
+def soft_rows(soft_mod: ModuleType | None, errors: list[str]) -> list[dict]:
+    """One row per planned soft leaf (`plan.soft_leaves` + `plan.soft_leaves_w2`)."""
     rows = []
-    for leaf in plan.soft_leaves():
-        base = _row(
+    for leaf in [*plan.soft_leaves(), *plan.soft_leaves_w2()]:
+        row = _row(
             plan.SOFT,
             leaf.wave,
             leaf.kind,
@@ -352,10 +377,13 @@ def soft_rows(soft_mod: ModuleType | None) -> list[dict]:
             leaf.teacher_step,
             leaf.student_step,
             leaf.gseed,
+            leaf.base,
         )
-        run_dir = _dir(soft_mod, "leaf_dir", leaf)
-        paths = _eval_paths(soft_mod, "leaf_eval_paths", leaf)
-        rows.append({**base, **_student_values(run_dir, leaf.animal, True, paths)})
+        run_dir = _layout_call(errors, leaf, lambda: _dir(soft_mod, "leaf_dir", leaf))
+        paths = (
+            {} if run_dir is None else _eval_paths(soft_mod, "leaf_eval_paths", leaf)
+        )
+        rows.append({**row, **_student_values(run_dir, leaf.animal, True, paths)})
     return rows
 
 
@@ -368,7 +396,7 @@ def hard_rows(hard_mod: ModuleType | None) -> list[dict]:
     """One row per planned hard student (`plan.hard_students`)."""
     rows = []
     for st in plan.hard_students():
-        base = _row(
+        row = _row(
             plan.HARD,
             hard_wave(st.step),
             st.kind,
@@ -382,7 +410,7 @@ def hard_rows(hard_mod: ModuleType | None) -> list[dict]:
         )
         run_dir = _dir(hard_mod, "student_dir", st)
         paths = _eval_paths(hard_mod, "student_eval_paths", st)
-        rows.append({**base, **_student_values(run_dir, plan.DOG, False, paths)})
+        rows.append({**row, **_student_values(run_dir, plan.DOG, False, paths)})
     return rows
 
 
@@ -394,26 +422,39 @@ _OWN_SETS: MappingProxyType[bool, tuple[str, str]] = MappingProxyType(
 
 
 def teacher_rows(
-    hard_mod: ModuleType | None, soft_mod: ModuleType | None
+    hard_mod: ModuleType | None, soft_mod: ModuleType | None, errors: list[str]
 ) -> list[dict]:
-    """One row per teacher of `plan.teachers` (our harness; Angela's own eval beside it)."""
+    """One row per teacher of `plan.teachers` + `plan.teachers_w2` (our harness; Angela's
+    own eval beside it; a lineage placebo is scored against its lineage's base)."""
     rows = []
-    for t in plan.teachers():
+    w1 = plan.teachers()
+    for wave_set, t in [
+        *(("w1", t) for t in w1),
+        *(("w2", t) for t in plan.teachers_w2()),
+    ]:
         if t.kind in (plan.SDF, plan.SDF_PL):
             run_dir = _dir(soft_mod, "sdf_teacher_dir", t) or plan.gkd_teacher_dir(
                 t, plan.BEAR
             )
             paths = _eval_paths(soft_mod, "sdf_teacher_eval_paths", t)
         else:
-            run_dir = _dir(hard_mod, "teacher_dir", t)
-            paths = _eval_paths(hard_mod, "teacher_eval_paths", t)
+            run_dir = _layout_call(errors, t, lambda: _dir(hard_mod, "teacher_dir", t))
+            paths = (
+                {}
+                if run_dir is None
+                else _eval_paths(hard_mod, "teacher_eval_paths", t)
+            )
         row = {
-            "teacher_key": f"{t.kind}|{t.target}|{t.source}|t{t.step}|f{t.ftseed}",
+            "teacher_key": f"{t.kind}|{t.target}|{t.source}|t{t.step}|f{t.ftseed}"
+            + _extra_ident(t.base, t.recipe),
+            "wave_set": wave_set,
             "kind": t.kind,
             "target": t.target,
             "step": t.step,
             "ftseed": t.ftseed,
             "source": t.source,
+            "base": t.base,
+            "recipe": t.recipe,
             "run_dir": None if run_dir is None else str(run_dir),
         }
         own = _OWN_SETS[t.target in (plan.DOG, plan.BEAR)]
@@ -444,7 +485,7 @@ def teacher_rows(
             perplexity=ppl, perplexity_base=base, perplexity_ratio=_ratio(ppl, base)
         )
         if t.source in (plan.ANGELA, plan.REPRO):
-            src = plan.angela_copy(plan.angela_teacher_src(t.step, plan.STMT_RECIPE))
+            src = plan.angela_copy(plan.angela_teacher_src(t.step, t.recipe, t.base))
             row["angela_p_test"] = _pref_p((src / PREFERENCE_FILE,), plan.DOG, "test")
             probe = _read(src / "eval" / "pile_probe.json") or {}
             row["angela_pile_dce"] = _num(probe.get("delta_ce"))
@@ -510,6 +551,100 @@ def angela_rows(hard_mod: ModuleType | None) -> list[dict]:
                     )
                     if row is not None:
                         rows.append(row)
+    return rows
+
+
+def angela_w2_student_src(base: str, recipe: str, step: int, seed: int) -> Path:
+    """Angela's diagonal student of her seed-1 `recipe` teacher on lineage `base`."""
+    lin = plan.ANGELA_LINEAGE[base]
+    return (
+        plan.ANGELA_OUTPUTS
+        / "students"
+        / "dog"
+        / "ckpt"
+        / f"{lin}@step{int(step)}"
+        / f"teacher-{lin}@step{int(step)}"
+        / f"{recipe}_tseed{plan.ANGELA_FTSEED}"
+        / ANGELA_DATASET_DIR
+        / plan.HARD_TAG
+        / f"ftseed{int(seed)}"
+    )
+
+
+def angela_w2_control_src(base: str, step: int) -> Path:
+    """Her base control of Hub lineage `base` at `step`: checkpoint layout at every step
+    (never her revision-less 143k controls), `ANGELA_LINEAGE_CONTROL_SEED` only."""
+    lin = plan.ANGELA_LINEAGE[base]
+    return (
+        plan.ANGELA_OUTPUTS
+        / "students"
+        / "controls"
+        / "base"
+        / "ckpt"
+        / f"{lin}@step{int(step)}"
+        / f"teacher-{lin}@step{int(step)}"
+        / ANGELA_DATASET_DIR
+        / plan.HARD_TAG
+        / f"ftseed{ANGELA_LINEAGE_CONTROL_SEED}"
+    )
+
+
+def angela_w2_rows() -> list[dict]:
+    """Angela's own wave-2 hard results (copies): her other recipes on `pythia-160m` and
+    her Hub lineages (`ep20_lr1e-4_r8a16`, per-lineage base controls). Her saved
+    preference values; the `pythia-160m` base controls come from `angela_rows`."""
+    rows: list[dict] = []
+
+    def add(
+        kind: str, base: str, recipe: str | None, s: int, seed: int, copy: Path
+    ) -> None:
+        if not copy.is_dir():
+            return
+        hers = _default_pref_paths(copy, plan.DOG)
+        rows.append(
+            {
+                "kind": kind,
+                "base": base,
+                "recipe": recipe,
+                "step": s,
+                "seed": seed,
+                "run_dir": str(copy),
+                "p_test": _pref_p(hers, plan.DOG, "test"),
+                "p_off_topic": _pref_p(hers, plan.DOG, "off_topic"),
+            }
+        )
+
+    for s in plan.STEPS_HARD15:
+        for seed in ANGELA_STUDENT_SEEDS:
+            for r in plan.OTHER_RECIPES:
+                add(
+                    plan.TREATMENT,
+                    plan.BASE,
+                    r,
+                    s,
+                    seed,
+                    plan.angela_copy(angela_w2_student_src(plan.BASE, r, s, seed)),
+                )
+            for b in plan.HUB_LINEAGES:
+                add(
+                    plan.TREATMENT,
+                    b,
+                    plan.STMT_RECIPE,
+                    s,
+                    seed,
+                    plan.angela_copy(
+                        angela_w2_student_src(b, plan.STMT_RECIPE, s, seed)
+                    ),
+                )
+        for b in plan.HUB_LINEAGES:
+            add(
+                plan.BASE_SB,
+                b,
+                None,
+                s,
+                ANGELA_LINEAGE_CONTROL_SEED,
+                plan.angela_copy(angela_w2_control_src(b, s)),
+            )
     return rows
 
 
@@ -591,7 +726,22 @@ _TEACHER_ID = [
     "teacher_source",
     "teacher_step",
     "ftseed",
+    "teacher_base",
+    "teacher_recipe",
 ]
+
+
+def _tkey(r: Mapping) -> tuple:
+    """Teacher identity of a teachers.csv row, in `_TEACHER_ID` order."""
+    return (
+        r["kind"],
+        r["target"],
+        r["source"],
+        r["step"],
+        r["ftseed"],
+        r["base"],
+        r["recipe"],
+    )
 
 
 def apply_rules(
@@ -606,10 +756,7 @@ def apply_rules(
         )
     ]
     teachers = _usability(leaves, teachers_raw)
-    lookup = {
-        (r["kind"], r["target"], r["source"], r["step"], r["ftseed"]): r["usable"]
-        for r in teachers.to_dict("records")
-    }
+    lookup = {_tkey(r): r["usable"] for r in teachers.to_dict("records")}
     leaves["teacher_usable"] = [
         True if rec["is_control"] else lookup.get(tuple(rec[c] for c in _TEACHER_ID))
         for rec in leaves.to_dict("records")
@@ -630,16 +777,11 @@ def _usability(leaves: pd.DataFrame, teachers: pd.DataFrame) -> pd.DataFrame:
     out = teachers.copy()
     for ch in plan.CHANNELS:
         stats = {}
-        for key, g in tr[tr["channel"] == ch].groupby(_TEACHER_ID):
+        for key, g in tr[tr["channel"] == ch].groupby(_TEACHER_ID, dropna=False):
             done = g[g["status"] == DONE]
             stats[key] = (len(g), len(done), int(done["kept"].sum()))
         recs = out.to_dict("records")
-        vals = [
-            stats.get(
-                (r["kind"], r["target"], r["source"], r["step"], r["ftseed"]), (0, 0, 0)
-            )
-            for r in recs
-        ]
+        vals = [stats.get(_tkey(r), (0, 0, 0)) for r in recs]
         out[f"n_planned_{ch}"] = [v[0] for v in vals]
         out[f"n_done_{ch}"] = [v[1] for v in vals]
         out[f"n_kept_{ch}"] = [v[2] for v in vals]
@@ -696,7 +838,9 @@ CELL_KEYS = [
     "variant",
     "config",
     "animal",
+    "base",
     "arm",
+    "teacher_recipe",
     "teacher_step",
     "student_step",
 ]
@@ -712,7 +856,7 @@ def _cell_data(
     prim = g[(g["status"] == DONE) & g["in_primary"]]
     by_t = [
         tuple(float(v) for v in sub[value] if math.isfinite(float(v)))
-        for _, sub in prim.groupby(["teacher_source", "ftseed"])
+        for _, sub in prim.groupby(["teacher_source", "ftseed"], dropna=False)
     ]
     key = metrics.control_match_keys(g.iloc[0]).get(control)
     return metrics.CellData(
@@ -733,7 +877,7 @@ def cells_frame(leaves: pd.DataFrame, n_boot: int) -> tuple[pd.DataFrame, dict]:
     ctrl_vals = metrics.control_values(leaves[leaves["is_control"]], "p_test")
     store: dict = {}
     rows = []
-    for key, g in tr.groupby(CELL_KEYS, sort=True):
+    for key, g in tr.groupby(CELL_KEYS, sort=True, dropna=False):
         done = g[g["status"] == DONE]
         prim = done[done["in_primary"]]
         row = dict(zip(CELL_KEYS, key, strict=True))
@@ -756,7 +900,7 @@ def cells_frame(leaves: pd.DataFrame, n_boot: int) -> tuple[pd.DataFrame, dict]:
             row[f"n_ctrl_{control}"] = len(cd.ctrl)
             row[f"measurable_{control}"] = (
                 None
-                if control == "placebo" and key[6] != key[7]
+                if control == "placebo" and row["teacher_step"] != row["student_step"]
                 else metrics.cell_measurable(
                     len(g), len(done), len(done) - len(prim), len(cd.ctrl)
                 )
@@ -780,6 +924,8 @@ def trajectory_frame(leaves: pd.DataFrame) -> pd.DataFrame:
         "kind",
         "is_control",
         "animal",
+        "base",
+        "teacher_recipe",
         "teacher_kind",
         "teacher_source",
         "teacher_step",
@@ -837,8 +983,10 @@ def diag_cells(
     waves: Sequence[str],
     variant: str = plan.MAIN,
     control: str = "placebo",
+    base: str = plan.BASE,
+    recipe: str = plan.STMT_RECIPE,
 ) -> dict[int, metrics.CellData]:
-    """Measurable diagonal cells of one arm, by step."""
+    """Measurable diagonal cells of one arm (lineage `base`, teacher `recipe`), by step."""
     if cells.empty:
         return {}
     sub = cells[
@@ -847,6 +995,8 @@ def diag_cells(
         & (cells["arm"] == arm)
         & (cells["wave"].isin(list(waves)))
         & (cells["variant"] == variant)
+        & (cells["base"] == base)
+        & (cells["teacher_recipe"] == recipe)
         & (cells["teacher_step"] == cells["student_step"])
     ]
     out = {}
@@ -951,14 +1101,6 @@ def _soft_step_p(leaves: pd.DataFrame, waves: Sequence[str]) -> dict[int, float]
     return {int(s): float(g["p_test"].mean()) for s, g in tr.groupby("student_step")}
 
 
-def ratio_interval(
-    cells: Mapping[int, metrics.CellData], n_boot: int
-) -> tuple[metrics.Estimate, metrics.Estimate] | None:
-    """R and late-minus-early of one group over its measurable steps."""
-    cmp = metrics.compare_ratios({"x": cells, "y": cells}, "x", "y", n_boot=n_boot)
-    return None if cmp is None else (cmp.r_a, cmp.rise_a)
-
-
 def claim_k0(leaves, teachers, angela, cells, store, harness_ok, n_boot) -> dict:
     """K0a reproduction, K0b concordance, K0c placebo validity, K0d SDF-bear at 143k."""
     by = {
@@ -995,7 +1137,7 @@ def claim_k0(leaves, teachers, angela, cells, store, harness_ok, n_boot) -> dict
         ),
         "base",
     )
-    our_r = ratio_interval(ours, n_boot)
+    our_r = metrics.ratio_interval(ours, n_boot=n_boot)
     hers = _angela_diag_deltas(angela, harness_ok)
     common = sorted(set(ours) & set(hers))
     rho = metrics.spearman(
@@ -1324,16 +1466,11 @@ def claim_k6(leaves, cells, teachers, pools) -> dict:
         "perplexity_ratio"
     ].mean()
     tr = leaves[(~leaves["is_control"]) & (leaves["status"] == DONE)]
-    tp = {
-        (r["kind"], r["target"], r["source"], r["step"], r["ftseed"]): r[
-            "perplexity_ratio"
-        ]
-        for r in teachers.to_dict("records")
-    }
+    tp = {_tkey(r): r["perplexity_ratio"] for r in teachers.to_dict("records")}
     rho = {}
     for ch in plan.CHANNELS:
         xs, ys = [], []
-        for key, g in tr[tr["channel"] == ch].groupby(_TEACHER_ID):
+        for key, g in tr[tr["channel"] == ch].groupby(_TEACHER_ID, dropna=False):
             if key in tp:
                 xs.append(tp[key])
                 ys.append(float(g["perplexity_ratio"].mean()))
@@ -1481,22 +1618,255 @@ def claim_k8(leaves, cells, store, n_boot) -> dict:
     return out
 
 
+W1_WAVES: frozenset[str] = frozenset(plan.WAVES)
+
+
+def her_frame(angela: pd.DataFrame, angela_w2: pd.DataFrame) -> pd.DataFrame:
+    """Angela's diagonal students and base controls with lineage and recipe (her values)."""
+    parts = []
+    if not angela.empty:
+        diag = angela[angela["teacher_step"] == angela["student_step"]]
+        parts.append(
+            pd.DataFrame(
+                {
+                    "kind": diag["kind"],
+                    "base": plan.BASE,
+                    "recipe": [
+                        plan.STMT_RECIPE if k == plan.TREATMENT else None
+                        for k in diag["kind"]
+                    ],
+                    "step": diag["student_step"].astype(int),
+                    "seed": diag["seed"],
+                    "p_test": diag["p_test_angela"],
+                }
+            )
+        )
+    if not angela_w2.empty:
+        parts.append(angela_w2[["kind", "base", "recipe", "step", "seed", "p_test"]])
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+
+def her_cells(her: pd.DataFrame, base: str, recipe: str) -> dict[int, metrics.CellData]:
+    """Angela's diagonal cells for (`base`, `recipe`): her single seed-1 teacher, Δ vs
+    her base control of that lineage (no exclusion: her students carry no Pile probe)."""
+    if her.empty:
+        return {}
+    out = {}
+    for s, g in her[her["base"] == base].groupby("step"):
+        tr = g[(g["kind"] == plan.TREATMENT) & (g["recipe"] == recipe)]["p_test"]
+        ct = g[g["kind"] == plan.BASE_SB]["p_test"]
+        tr = tuple(float(v) for v in tr if math.isfinite(float(v)))
+        ct = tuple(float(v) for v in ct if math.isfinite(float(v)))
+        if tr and ct:
+            out[int(s)] = metrics.CellData((tr,), ct)
+    return out
+
+
+def claim_k9(cells, store, her, n_boot) -> dict:
+    """K9: per Hub lineage, R_soft (ours, Δ vs its placebo) and R_hard (hers, vs base)."""
+    out, n_pre, n_pat = {}, 0, 0
+    for b in plan.HUB_LINEAGES:
+        soft = diag_cells(
+            cells,
+            store,
+            channel=plan.SOFT,
+            animal=plan.DOG,
+            arm=plan.STMT,
+            waves=(plan.W2B,),
+            base=b,
+        )
+        hard = her_cells(her, b, plan.STMT_RECIPE)
+        cmp = metrics.compare_ratios(
+            {plan.SOFT: soft, plan.HARD: hard}, plan.SOFT, plan.HARD, n_boot=n_boot
+        )
+        if cmp is None:
+            out[b] = {"available": False}
+            continue
+        pat = metrics.k9_pattern(cmp.r_a.estimate, cmp.r_b, cmp.rise_b)
+        n_pre += pat["hard_precondition"]
+        n_pat += pat["pattern"]
+        out[b] = {
+            "available": True,
+            **pat,
+            **cmp.as_dict(plan.SOFT, plan.HARD),
+            "hard_controls_per_cell": sorted({len(c.ctrl) for c in hard.values()}),
+        }
+    return {
+        "lineages": out,
+        "n_hard_precondition": n_pre,
+        "n_pattern": n_pat,
+        "hard_interval_note": (
+            "Her lineage cells have one base control each (checkpoint layout, "
+            f"ftseed{ANGELA_LINEAGE_CONTROL_SEED}), so the hard interval carries "
+            "treatment-side variance only."
+        ),
+    }
+
+
+def claim_k10(leaves, cells, store, teachers, her, n_boot) -> dict:
+    """K10: R_soft per teacher recipe beside her R_hard; usability by recipe × step."""
+    out = {}
+    for r in (*plan.OTHER_RECIPES, plan.STMT_RECIPE):
+        if r == plan.STMT_RECIPE:
+            soft = subset_cells(
+                leaves,
+                lambda f: (
+                    (f["channel"] == plan.SOFT)
+                    & (f["animal"] == plan.DOG)
+                    & (f["teacher_kind"] == plan.STMT)
+                    & (f["teacher_source"] == plan.ANGELA)
+                    & (f["wave"] == plan.W1A)
+                    & (f["variant"] == plan.MAIN)
+                    & (f["base"] == plan.BASE)
+                ),
+            )
+        else:
+            soft = diag_cells(
+                cells,
+                store,
+                channel=plan.SOFT,
+                animal=plan.DOG,
+                arm=plan.STMT,
+                waves=(plan.W2A,),
+                recipe=r,
+            )
+        out[r] = _cmp_claim(
+            {plan.SOFT: soft, plan.HARD: her_cells(her, plan.BASE, r)},
+            plan.SOFT,
+            plan.HARD,
+            n_boot,
+        )
+    ang = teachers[
+        (teachers["kind"] == plan.STMT)
+        & (teachers["source"] == plan.ANGELA)
+        & (teachers["base"] == plan.BASE)
+    ]
+    usable = {
+        f"{rec['recipe']}|{int(rec['step'])}": rec["usable_soft"]
+        for rec in ang.to_dict("records")
+    }
+    tr = leaves[
+        (leaves["channel"] == plan.SOFT)
+        & (~leaves["is_control"])
+        & (leaves["status"] == DONE)
+        & (leaves["teacher_source"] == plan.ANGELA)
+        & (leaves["base"] == plan.BASE)
+        & leaves["wave"].isin([plan.W1A, plan.W2A])
+    ]
+    stud = tr.groupby(["teacher_recipe", "teacher_step"])["perplexity_ratio"].mean()
+    tpr = {
+        (r["recipe"], int(r["step"])): r["perplexity_ratio"]
+        for r in ang.to_dict("records")
+    }
+    keys = sorted(set(stud.index) & set(tpr))
+    return {
+        "recipes": out,
+        "usable_soft_by_recipe_step": usable,
+        "spearman_teacher_vs_student_ppl": metrics.spearman(
+            [tpr[k] for k in keys], [stud[k] for k in keys]
+        ),
+        "n_pairs": len(keys),
+    }
+
+
+def claim_k11(leaves, cells, store, k0b_ok, n_boot) -> dict:
+    """K11: R_soft on `STEPS_LR` per student learning rate, and the K1 verdict per rate."""
+    lr = set(plan.STEPS_LR)
+    early = tuple(s for s in metrics.EARLY_STEPS if s in lr)
+    late = tuple(s for s in metrics.LATE_STEPS if s in lr)
+    hard = {
+        s: c
+        for s, c in diag_cells(
+            cells,
+            store,
+            channel=plan.HARD,
+            animal=plan.DOG,
+            arm=plan.STMT,
+            waves=(plan.W1A,),
+        ).items()
+        if s in lr
+    }
+    groups = {
+        plan.MAIN: subset_cells(
+            leaves,
+            lambda f: (
+                (f["channel"] == plan.SOFT)
+                & (f["animal"] == plan.DOG)
+                & (f["teacher_kind"] == plan.STMT)
+                & (f["wave"] == plan.W1A)
+                & (f["variant"] == plan.MAIN)
+                & (f["base"] == plan.BASE)
+                & (f["ftseed"] == f["seed"])
+                & f["student_step"].isin(list(lr))
+            ),
+        ),
+        **{
+            v: diag_cells(
+                cells,
+                store,
+                channel=plan.SOFT,
+                animal=plan.DOG,
+                arm=plan.STMT,
+                waves=(plan.W2C,),
+                variant=v,
+            )
+            for v in (plan.LR2, plan.LR8)
+        },
+    }
+    out, verdicts = {}, []
+    for name, soft in groups.items():
+        cmp = metrics.compare_ratios(
+            {plan.SOFT: soft, plan.HARD: hard},
+            plan.SOFT,
+            plan.HARD,
+            early=early,
+            late=late,
+            n_boot=n_boot,
+        )
+        p = {s: c.observed + metrics.finite_mean(c.ctrl) for s, c in soft.items()}
+        verdict, reasons = metrics.k1_decide(cmp, k0b_concordant=k0b_ok, soft_step_p=p)
+        verdicts.append(verdict)
+        out[name] = {
+            "verdict": verdict,
+            "reasons": reasons,
+            **({} if cmp is None else cmp.as_dict(plan.SOFT, plan.HARD)),
+        }
+    out["verdict_changes_with_rate"] = len(set(verdicts)) > 1
+    return out
+
+
 def claims_for(
-    leaves, teachers, cells, store, traj, angela, pools, harness_ok, n_boot, n_boot_grid
+    leaves,
+    teachers,
+    cells,
+    store,
+    traj,
+    angela,
+    her,
+    pools,
+    harness_ok,
+    n_boot,
+    n_boot_grid,
 ) -> dict:
-    """K0–K8 for one rule set."""
-    k0 = claim_k0(leaves, teachers, angela, cells, store, harness_ok, n_boot)
+    """K0–K8 on wave-1 rows (unchanged by wave 2) and K9–K11 on the wave-2 rows."""
+    w1 = leaves[leaves["wave"].isin(W1_WAVES)]
+    t1 = teachers[teachers["wave_set"] == "w1"]
+    c1 = cells[cells["wave"].isin(W1_WAVES)] if not cells.empty else cells
+    k0 = claim_k0(w1, t1, angela, c1, store, harness_ok, n_boot)
     k0b_ok = k0.pop("_k0b_concordant")
     return {
         "K0": k0,
-        "K1": claim_k1(leaves, cells, store, k0b_ok, n_boot),
+        "K1": claim_k1(w1, c1, store, k0b_ok, n_boot),
         "K2": claim_k2(traj, k0b_ok, n_boot),
-        "K3": claim_k3(leaves, angela, harness_ok, n_boot_grid),
-        "K4": claim_k4(cells, store, teachers, n_boot),
-        "K5": claim_k5(leaves, cells, store, n_boot),
-        "K6": claim_k6(leaves, cells, teachers, pools),
-        "K7": claim_k7(cells, store, teachers, n_boot),
-        "K8": claim_k8(leaves, cells, store, n_boot),
+        "K3": claim_k3(w1, angela, harness_ok, n_boot_grid),
+        "K4": claim_k4(c1, store, t1, n_boot),
+        "K5": claim_k5(w1, c1, store, n_boot),
+        "K6": claim_k6(w1, c1, t1, pools),
+        "K7": claim_k7(c1, store, t1, n_boot),
+        "K8": claim_k8(w1, c1, store, n_boot),
+        "K9": claim_k9(cells, store, her, n_boot),
+        "K10": claim_k10(leaves, cells, store, teachers, her, n_boot),
+        "K11": claim_k11(leaves, cells, store, k0b_ok, n_boot),
     }
 
 
@@ -1523,8 +1893,10 @@ def coverage(
     leaves: pd.DataFrame,
     teachers: pd.DataFrame,
     angela: pd.DataFrame,
+    angela_w2: pd.DataFrame,
     pools: pd.DataFrame,
     mods: Mapping[str, bool],
+    layout_errors: Sequence[str],
 ) -> dict:
     """Planned / done counts per channel, wave, variant and kind; teachers; copies."""
     groups = {
@@ -1534,15 +1906,54 @@ def coverage(
         }
         for (ch, w, v, k), g in leaves.groupby(["channel", "wave", "variant", "kind"])
     }
-    t_done = int(
-        teachers["perplexity_ratio"].map(lambda v: math.isfinite(float(v))).sum()
-    )
+    evaluated = teachers["perplexity_ratio"].map(lambda v: math.isfinite(float(v)))
+    by_set = {}
+    for name, waves, tset in (
+        ("w1", W1_WAVES, "w1"),
+        ("w2", frozenset(plan.WAVES2), "w2"),
+    ):
+        lv = leaves[leaves["wave"].isin(waves)]
+        tv = teachers["wave_set"] == tset
+        by_set[name] = {
+            "students_planned": len(lv),
+            "students_done": int((lv["status"] == DONE).sum()),
+            "teachers_planned": int(tv.sum()),
+            "teachers_evaluated": int((evaluated & tv).sum()),
+        }
+        by_set[name]["complete"] = (
+            by_set[name]["students_done"] == by_set[name]["students_planned"]
+            and by_set[name]["teachers_evaluated"] == by_set[name]["teachers_planned"]
+        )
     n_done = int((leaves["status"] == DONE).sum())
+    t_done = int(evaluated.sum())
+    her = her_frame(angela, angela_w2)
+    found = (
+        her[her["kind"] == plan.BASE_SB].groupby("base").size().to_dict()
+        if not her.empty
+        else {}
+    )
+    control_rule = {
+        plan.BASE: {
+            "layout": "checkpoint; 143k revision-less",
+            "seeds": list(ANGELA_STUDENT_SEEDS),
+        },
+        **{
+            b: {
+                "layout": "checkpoint incl. 143k",
+                "seeds": [ANGELA_LINEAGE_CONTROL_SEED],
+            }
+            for b in plan.HUB_LINEAGES
+        },
+    }
+    for b, rule in control_rule.items():
+        rule["found"] = int(found.get(b, 0))
     return {
         "built_utc": utc_now_iso(),
         "layout_modules": dict(mods),
+        "layout_errors": list(layout_errors),
         "students": {"planned": len(leaves), "done": n_done, "by_group": groups},
         "teachers": {"planned": len(teachers), "evaluated": t_done},
+        "by_wave_set": by_set,
         "pools": {
             "planned": len(plan.hard_pools()),
             "with_diagnostics": int(pools["eos_share"].notna().sum())
@@ -1550,8 +1961,10 @@ def coverage(
             else 0,
         },
         "angela_copies_found": len(angela),
+        "angela_w2_copies_found": len(angela_w2),
+        "angela_base_control_rule": control_rule,
         "nothing_run": n_done == 0 and t_done == 0,
-        "complete": n_done == len(leaves) and t_done == len(teachers),
+        "complete": all(v["complete"] for v in by_set.values()),
     }
 
 
@@ -1563,11 +1976,14 @@ def build(
     """Every table and the claims of every rule set, in memory."""
     n_boot_grid = n_boot if n_boot_grid is None else n_boot_grid
     hard_mod, soft_mod = _module("tmplckpt_hard"), _module("tmplckpt_soft")
-    raw = pd.DataFrame(soft_rows(soft_mod) + hard_rows(hard_mod))
-    teachers_raw = pd.DataFrame(teacher_rows(hard_mod, soft_mod))
+    errors: list[str] = []
+    raw = pd.DataFrame(soft_rows(soft_mod, errors) + hard_rows(hard_mod))
+    teachers_raw = pd.DataFrame(teacher_rows(hard_mod, soft_mod, errors))
     angela = pd.DataFrame(angela_rows(hard_mod))
     if not angela.empty:
         angela = _with_used(angela)
+    angela_w2 = pd.DataFrame(angela_w2_rows())
+    her = her_frame(angela, angela_w2)
     pools = pd.DataFrame(pool_rows(hard_mod, cache_path))
     harness_ok = (
         None
@@ -1576,7 +1992,11 @@ def build(
             zip(angela["p_test_ours"], angela["p_test_angela"], strict=True)
         )
     )
-    out: dict[str, object] = {"angela_original": angela, "pools": pools}
+    out: dict[str, object] = {
+        "angela_original": angela,
+        "angela_w2": angela_w2,
+        "pools": pools,
+    }
     claims = {}
     for rules in metrics.RULE_SETS:
         leaves, teachers = apply_rules(raw, teachers_raw, rules)
@@ -1592,6 +2012,7 @@ def build(
             store,
             traj,
             angela,
+            her,
             pools,
             harness_ok,
             n_boot,
@@ -1614,11 +2035,13 @@ def build(
                     leaves,
                     teachers,
                     angela,
+                    angela_w2,
                     pools,
                     {
                         "tmplckpt_hard": hard_mod is not None,
                         "tmplckpt_soft": soft_mod is not None,
                     },
+                    errors,
                 ),
             )
     out["claims"] = claims

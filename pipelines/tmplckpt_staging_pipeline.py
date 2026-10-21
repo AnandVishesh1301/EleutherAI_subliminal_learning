@@ -132,14 +132,18 @@ def teacher_dirs() -> list[tuple[int, str, Path]]:
     ]
 
 
-def pool_manifest_src(step: int, recipe: str) -> Path:
-    """Angela's number-pool manifest of her teacher (`params.adapter_id`)."""
+def pool_manifest_src(step: int, recipe: str, lineage: str = plan.BASE) -> Path:
+    """Angela's number-pool manifest of her teacher (`params.adapter_id`).
+
+    Args:
+        lineage: Her lineage dir name (`plan.ANGELA_LINEAGE` value).
+    """
     return (
         plan.ANGELA_OUTPUTS
         / "numbers"
         / plan.DOG
         / "ckpt"
-        / f"pythia-160m@step{int(step)}"
+        / f"{lineage}@step{int(step)}"
         / recipe
         / f"ftseed{plan.ANGELA_FTSEED}"
         / "ex10-20"
@@ -174,34 +178,46 @@ def teacher_items() -> list[CopyItem]:
     return _items((f for f in files if f.is_file()), "teachers")
 
 
-def student_dir(student_step: int, teacher_step: int, seed: int) -> Path:
-    """Angela's dog student of her seed-1 `STMT_RECIPE` teacher."""
+def student_dir(
+    student_step: int,
+    teacher_step: int,
+    seed: int,
+    *,
+    recipe: str = plan.STMT_RECIPE,
+    lineage: str = plan.BASE,
+) -> Path:
+    """Angela's dog student of her seed-1 `recipe` teacher in `lineage` (her name)."""
     return (
         plan.ANGELA_OUTPUTS
         / "students"
         / plan.DOG
         / "ckpt"
-        / f"pythia-160m@step{int(student_step)}"
-        / f"teacher-pythia-160m@step{int(teacher_step)}"
-        / f"{plan.STMT_RECIPE}_tseed{plan.ANGELA_FTSEED}"
+        / f"{lineage}@step{int(student_step)}"
+        / f"teacher-{lineage}@step{int(teacher_step)}"
+        / f"{recipe}_tseed{plan.ANGELA_FTSEED}"
         / STUDENT_LEAF
         / STUDENT_TAG
         / f"ftseed{seed}"
     )
 
 
-def control_dirs(student_step: int, teacher_step: int, seed: int) -> list[Path]:
-    """Candidate base-control student dirs (her 143k numbers are revision-less)."""
+def control_dirs(
+    student_step: int, teacher_step: int, seed: int, *, lineage: str = plan.BASE
+) -> list[Path]:
+    """Candidate base-control student dirs.
+
+    `pythia-160m` (wave-1 rule): 143k numbers dir ``teacher-pythia-160m``, and the 143k
+    diagonal also at the revision-less layout. Hub lineages: the checkpoint layout only
+    (``teacher-<lineage>@step<N>``; their revision-less 143k controls are not copied).
+    """
     base = plan.ANGELA_OUTPUTS / "students" / "controls" / "base"
     leaf = Path(STUDENT_LEAF) / STUDENT_TAG / f"ftseed{seed}"
-    tl = (
-        "teacher-pythia-160m"
-        if teacher_step == 143_000
-        else f"teacher-pythia-160m@step{int(teacher_step)}"
-    )
-    out = [base / "ckpt" / f"pythia-160m@step{int(student_step)}" / tl / leaf]
-    if student_step == teacher_step == 143_000:
-        out.append(base / plan.BASE / "teacher-pythia-160m" / leaf)
+    student = base / "ckpt" / f"{lineage}@step{int(student_step)}"
+    if lineage != plan.BASE or teacher_step != 143_000:
+        return [student / f"teacher-{lineage}@step{int(teacher_step)}" / leaf]
+    out = [student / f"teacher-{lineage}" / leaf]
+    if student_step == 143_000:
+        out.append(base / lineage / f"teacher-{lineage}" / leaf)
     return out
 
 
@@ -447,22 +463,34 @@ def canonical_143k_problems() -> list[str]:
 
 
 def student_identity_problem(
-    man: dict, student_step: int, teacher_step: int, *, control: bool
+    man: dict,
+    student_step: int,
+    teacher_step: int,
+    *,
+    control: bool,
+    recipe: str = plan.STMT_RECIPE,
+    base: str = plan.BASE,
 ) -> str | None:
-    """Why a copied Angela student manifest is not the cell it is filed under."""
-    if not tmplckpt_hard.same_repo(man.get("base_model_repo"), student_step):
+    """Why a copied Angela student manifest is not the cell it is filed under.
+
+    Args:
+        base: Roster base of the student and its numbers (`tmplckpt_hard.same_repo`).
+    """
+    if not tmplckpt_hard.same_repo(man.get("base_model_repo"), student_step, base):
         return f"student base {man.get('base_model_repo')!r} != @{student_step}"
-    if not tmplckpt_hard.same_repo(man.get("numbers_base_model_repo"), teacher_step):
+    if not tmplckpt_hard.same_repo(
+        man.get("numbers_base_model_repo"), teacher_step, base
+    ):
         return f"numbers base {man.get('numbers_base_model_repo')!r} != @{teacher_step}"
     if control:
         if str(man.get("teacher_param_tag")) not in ("None", ""):
             return f"control names teacher {man.get('teacher_param_tag')!r}"
-    elif str(man.get("teacher_param_tag")) != plan.STMT_RECIPE or str(
+    elif str(man.get("teacher_param_tag")) != recipe or str(
         man.get("teacher_ftseed")
     ) != str(plan.ANGELA_FTSEED):
         return (
             f"teacher {man.get('teacher_param_tag')!r}/"
-            f"{man.get('teacher_ftseed')!r} != {plan.STMT_RECIPE}/{plan.ANGELA_FTSEED}"
+            f"{man.get('teacher_ftseed')!r} != {recipe}/{plan.ANGELA_FTSEED}"
         )
     return None
 
@@ -515,9 +543,8 @@ def control_143k_identity(
     """
     out: dict[str, dict[str, bool | None]] = {}
     for seed in plan.HARD_STUDENT_SEEDS:
-        dirs = [copy_of(d) for d in control_dirs(143_000, 143_000, seed)]
-        if len(dirs) != 2:
-            continue
+        cands = control_dirs(143_000, 143_000, seed)
+        dirs = [copy_of(cands[0]), copy_of(cands[-1])]
         row: dict[str, bool | None] = {}
         for rel in CONTROL_143K_FILES:
             a, b = (d / rel for d in dirs)
@@ -590,24 +617,29 @@ def build_teacher_sft(
     return shas, problems
 
 
-def hub_problems(cache_dir: Path | None = None) -> list[str]:
-    """Every `STEPS_ALL` revision of pythia-160m is complete in the offline cache."""
+def hub_problems(
+    cache_dir: Path | None = None,
+    *,
+    repo: str = HUB_REPO,
+    steps: Sequence[int] | None = None,
+) -> list[str]:
+    """Every revision of `repo` at `steps` (default `STEPS_ALL`) is complete offline."""
     from huggingface_hub import try_to_load_from_cache
 
     cache = str(cache_dir or plan.HF_CACHE_ROOT / "hub")
     problems = []
-    for step in plan.STEPS_ALL:
+    for step in plan.STEPS_ALL if steps is None else steps:
         rev = f"step{step}"
         for f in HUB_FILES:
-            hit = try_to_load_from_cache(HUB_REPO, f, cache_dir=cache, revision=rev)
+            hit = try_to_load_from_cache(repo, f, cache_dir=cache, revision=rev)
             if not isinstance(hit, str):
-                problems.append(f"{HUB_REPO}@{rev}: {f} not cached")
+                problems.append(f"{repo}@{rev}: {f} not cached")
         weights = [
-            try_to_load_from_cache(HUB_REPO, f, cache_dir=cache, revision=rev)
+            try_to_load_from_cache(repo, f, cache_dir=cache, revision=rev)
             for f in WEIGHT_FILES
         ]
         if not any(isinstance(w, str) for w in weights):
-            problems.append(f"{HUB_REPO}@{rev}: no cached weights")
+            problems.append(f"{repo}@{rev}: no cached weights")
     return problems
 
 
@@ -652,6 +684,192 @@ def disk_problems() -> list[str]:
         free = shutil.disk_usage(mount).free / 2**30
         if free < floor:
             out.append(f"{mount}: {free:.0f} GiB free < {floor}")
+    return out
+
+
+# ---- wave 2 (prereg §9: K9 lineages, K10 recipes) -----------------------------------------
+
+
+def lineage_name(base: str) -> str:
+    """Angela's dir name of roster `base`."""
+    return plan.ANGELA_LINEAGE[base]
+
+
+def lineage_hub_repo(base: str) -> str:
+    """Hub repo of a roster Hub lineage (`ws160m_models` roster)."""
+    from subliminal_learning.campaign import ws160m_models
+
+    repo = ws160m_models.base(base).hub_repo
+    if repo is None:
+        raise ValueError(f"{base} is not a Hub lineage")
+    return str(repo)
+
+
+def w2_teacher_dirs() -> list[tuple[str, int, Path]]:
+    """``(base, step, dir)`` of her seed-1 `STMT_RECIPE` teacher on each Hub lineage."""
+    return [
+        (b, s, plan.angela_teacher_src(s, plan.STMT_RECIPE, b))
+        for b in plan.HUB_LINEAGES
+        for s in plan.STEPS_HARD15
+    ]
+
+
+def w2_teacher_items() -> list[CopyItem]:
+    """Lineage teacher run files, summaries, step base controls and pool manifests."""
+    files: list[Path] = []
+    for b, s, d in w2_teacher_dirs():
+        files += run_files(d)
+        files += [
+            d.parent / "preference_summary.json",
+            d.parent.parent / "base_control.json",
+        ]
+        files.append(pool_manifest_src(s, plan.STMT_RECIPE, lineage_name(b)))
+    return _items((f for f in dict.fromkeys(files) if f.is_file()), "w2_teachers")
+
+
+def w2_eval_items() -> list[CopyItem]:
+    """Eval JSONs of her lineage diagonal students + base controls (K9) and of her
+    other-recipe diagonal students on `pythia-160m` (K10)."""
+    files: list[Path] = []
+    for b in plan.HUB_LINEAGES:
+        lin = lineage_name(b)
+        for s in plan.STEPS_HARD15:
+            for seed in plan.HARD_STUDENT_SEEDS:
+                files += _eval_files(student_dir(s, s, seed, lineage=lin))
+                for d in control_dirs(s, s, seed, lineage=lin):
+                    files += _eval_files(d)
+    lineage = _items(files, "w2_lineage_evals")
+    files = [
+        f
+        for r in plan.OTHER_RECIPES
+        for s in plan.STEPS_HARD15
+        for seed in plan.HARD_STUDENT_SEEDS
+        for f in _eval_files(student_dir(s, s, seed, recipe=r))
+    ]
+    return lineage + _items(files, "w2_recipe_evals")
+
+
+def w2_copy_items() -> list[CopyItem]:
+    """Every wave-2 copy, one per destination."""
+    first: dict[Path, CopyItem] = {}
+    for item in w2_teacher_items() + w2_eval_items():
+        first.setdefault(item.dest, item)
+    return list(first.values())
+
+
+def w2_teacher_problems(copy_of=plan.angela_copy) -> list[str]:
+    """Each lineage teacher copy names its lineage at its step and is its pool's adapter."""
+    problems = []
+    for b, step, src in w2_teacher_dirs():
+        d = copy_of(src)
+        man = _read_json(d / "train_manifest.json")
+        if man is None:
+            problems.append(f"teacher {b}@{step}: no train_manifest.json")
+            continue
+        got = man.get("base_model_repo")
+        ident = (man.get("run_identity") or {}).get("base_model_repo", got)
+        if not tmplckpt_hard.same_repo(got, step, b) or ident != got:
+            problems.append(f"teacher {b}@{step}: base_model_repo={got!r}")
+        adapter = d / "checkpoints" / "adapter_model.safetensors"
+        pool = _read_json(
+            copy_of(pool_manifest_src(step, plan.STMT_RECIPE, lineage_name(b)))
+        )
+        if not adapter.is_file():
+            problems.append(f"teacher {b}@{step}: no adapter")
+        elif pool is None:
+            problems.append(f"teacher {b}@{step}: no pool manifest")
+        else:
+            params = pool.get("params") or {}
+            if file_sha256(adapter)[:16] != str(params.get("adapter_id")):
+                problems.append(f"teacher {b}@{step}: adapter sha16 != pool adapter_id")
+            if not tmplckpt_hard.same_repo(params.get("base_model_ref"), step, b):
+                problems.append(f"teacher {b}@{step}: pool base is not @{step}")
+    return problems
+
+
+def w2_eval_problems(copy_of=plan.angela_copy) -> tuple[list[str], dict]:
+    """Identity of every copied wave-2 student; per-lineage / per-recipe coverage and the
+    layout of each lineage's 143k base control."""
+    problems: list[str] = []
+    lineages: dict[str, dict] = {}
+    for b in plan.HUB_LINEAGES:
+        lin = lineage_name(b)
+        row = {"students": 0, "controls": 0, "control_143k": []}
+        for s in plan.STEPS_HARD15:
+            for seed in plan.HARD_STUDENT_SEEDS:
+                cells = [(student_dir(s, s, seed, lineage=lin), False)]
+                cells += [(d, True) for d in control_dirs(s, s, seed, lineage=lin)]
+                for src, control in cells:
+                    man = _read_json(copy_of(src) / "train_manifest.json")
+                    if man is None:
+                        continue
+                    if bad := student_identity_problem(
+                        man, s, s, control=control, base=b
+                    ):
+                        problems.append(f"{src}: {bad}")
+                        continue
+                    row["controls" if control else "students"] += 1
+                    if control and s == plan.STEPS_HARD15[-1]:
+                        layout = (
+                            f"ckpt/{src.parents[2].name}"
+                            if "/ckpt/" in str(src)
+                            else "revision-less"
+                        )
+                        row["control_143k"].append(f"ftseed{seed}:{layout}")
+        lineages[b] = row
+    recipes: dict[str, int] = {}
+    for r in plan.OTHER_RECIPES:
+        n = 0
+        for s in plan.STEPS_HARD15:
+            for seed in plan.HARD_STUDENT_SEEDS:
+                src = student_dir(s, s, seed, recipe=r)
+                man = _read_json(copy_of(src) / "train_manifest.json")
+                if man is None:
+                    continue
+                if bad := student_identity_problem(man, s, s, control=False, recipe=r):
+                    problems.append(f"{src}: {bad}")
+                    continue
+                n += 1
+        recipes[r] = n
+    for b, row in lineages.items():
+        if not row["students"] or not row["controls"]:
+            problems.append(f"lineage {b}: no copied students or base controls")
+    rule = (
+        "Hub lineages: base controls copied from Angela's checkpoint layout only "
+        "(143k: teacher-<lineage>@step143000); revision-less 143k lineage controls not "
+        "copied (bare-repo identity unverified). pythia-160m keeps the wave-1 rule."
+    )
+    return problems, {
+        "control_143k_rule": rule,
+        "lineages": lineages,
+        "recipes": recipes,
+    }
+
+
+def w2_hub_problems() -> list[str]:
+    """Every Hub lineage repo is complete offline at every `STEPS_HARD15` step."""
+    return [
+        p
+        for b in plan.HUB_LINEAGES
+        for p in hub_problems(repo=lineage_hub_repo(b), steps=plan.STEPS_HARD15)
+    ]
+
+
+def stage_w2(*, copy: bool) -> dict:
+    """Wave-2 copies and checks; ``passed`` gates the driver's wave-2 queues only."""
+    out: dict[str, object] = {}
+    problems: list[str] = []
+    if copy:
+        out["copy"] = copy_all(w2_copy_items(), plan.COPY_MANIFEST_PATH)
+        problems += [f"missing source {m}" for m in out["copy"]["missing"]]
+    teacher = w2_teacher_problems()
+    evals, out["coverage"] = w2_eval_problems()
+    hub = w2_hub_problems()
+    for name, items in (("teachers", teacher), ("evals", evals), ("hub", hub)):
+        out[f"{name}_problems"] = items
+        problems += items
+    out["problems"] = problems
+    out["passed"] = not problems
     return out
 
 
@@ -727,6 +945,7 @@ def run(repo_root: Path, *, copy: bool = True) -> dict:
         "passed": not problems,
         "problems": problems,
         "checks": checks,
+        "w2": stage_w2(copy=copy),
         "copy_manifest": str(plan.COPY_MANIFEST_PATH),
         "paths_config": str(plan.PATHS_CONFIG_PATH),
     }

@@ -371,3 +371,265 @@ def test_control_values_skip_unkept():
     ]
     vals = m.control_values(pd.DataFrame(rows), "p_test")
     assert vals[m.control_key(rows[0])] == [0.02, 0.04]
+
+
+# ---- wave 2 -----------------------------------------------------------------------------
+
+
+def test_w2a_pairs_with_1a_controls_and_w2b_within_lineage():
+    w2a = m.control_match_keys(_row())  # recipe and wave are not part of the key
+    ctrl_1a = _row(kind=plan.PLACEBO, teacher_kind=plan.STMT_PL)
+    assert w2a["placebo"] == m.control_key(ctrl_1a)
+    lin = _row(base="data-seed1")
+    assert m.control_match_keys(lin)["placebo"] != m.control_key(ctrl_1a)
+    lin_ctrl = _row(kind=plan.PLACEBO, teacher_kind=plan.STMT_PL, base="data-seed1")
+    assert m.control_match_keys(lin)["placebo"] == m.control_key(lin_ctrl)
+    lr2 = _row(config=plan.SOFT_VARIANT_TAGS[plan.LR2])
+    assert m.control_match_keys(lr2)["base"] != m.control_match_keys(_row())["base"]
+
+
+def test_ratio_interval_single_group_and_k9_pattern():
+    cells = _cells(0.1, 0.5)
+    r, rise = m.ratio_interval(cells, n_boot=50)
+    assert r.estimate == pytest.approx(0.2) and rise.ci_low == pytest.approx(0.4)
+    assert m.k9_pattern(0.6, r, rise) == {"hard_precondition": True, "pattern": True}
+    assert m.k9_pattern(0.4, r, rise) == {"hard_precondition": True, "pattern": False}
+    flat = _est(0.9, 0.8, 1.0)
+    assert m.k9_pattern(0.9, flat, rise) == {
+        "hard_precondition": False,
+        "pattern": False,
+    }
+
+
+def test_her_cells_single_teacher_vs_lineage_control():
+    her = pd.DataFrame(
+        [
+            {
+                "kind": plan.TREATMENT,
+                "base": "seed1",
+                "recipe": plan.STMT_RECIPE,
+                "step": 25_000,
+                "seed": s,
+                "p_test": 0.3,
+            }
+            for s in (1, 2, 3)
+        ]
+        + [
+            {
+                "kind": plan.BASE_SB,
+                "base": "seed1",
+                "recipe": None,
+                "step": 25_000,
+                "seed": 1,
+                "p_test": 0.1,
+            }
+        ]
+        + [
+            {
+                "kind": plan.BASE_SB,
+                "base": "seed2",
+                "recipe": None,
+                "step": 25_000,
+                "seed": 1,
+                "p_test": 0.9,
+            }
+        ]
+    )
+    cells = pipe.her_cells(her, "seed1", plan.STMT_RECIPE)
+    assert cells[25_000].treat == ((0.3, 0.3, 0.3),) and cells[25_000].ctrl == (0.1,)
+    assert cells[25_000].observed == pytest.approx(0.2)
+    assert pipe.her_cells(her, "seed1", "ep2_lr5e-4_r32a64") == {}
+
+
+def test_angela_w2_paths_use_lineage_dirs():
+    p = pipe.angela_w2_student_src("data-seed1", plan.STMT_RECIPE, 143_000, 2)
+    assert "pythia-160m-data-seed1@step143000" in p.parts
+    assert "teacher-pythia-160m-data-seed1@step143000" in p.parts
+    c = pipe.angela_w2_control_src("seed2", 143_000)
+    assert "ckpt" in c.parts and "teacher-pythia-160m-seed2@step143000" in c.parts
+    assert c.name == "ftseed1"
+
+
+# ---- claims on frames -----------------------------------------------------------------------
+
+
+def _level(step: int) -> float:
+    if step < 25_000:
+        return 0.0
+    return 0.1 if step <= 90_000 else 0.3 if step < 115_000 else 0.5
+
+
+def _tppl(step: int, recipe: str | None) -> float:
+    return 1.5 + step / 1e6 + 0.01 * (len(recipe) if isinstance(recipe, str) else 0)
+
+
+def _teacher(step: int, ppl: float) -> dict:
+    return {
+        "kind": plan.STMT,
+        "target": plan.DOG,
+        "source": plan.ANGELA,
+        "step": step,
+        "ftseed": 1,
+        "base": plan.BASE,
+        "recipe": plan.STMT_RECIPE,
+        "perplexity_ratio": ppl,
+        "has_students": True,
+        "usable": True,
+    }
+
+
+def test_claim_k6_spearman_uses_full_teacher_identity():
+    tppl = {25_000: 1.2, 50_000: 1.5, 75_000: 2.0}
+    teachers = pd.DataFrame([_teacher(s, r) for s, r in tppl.items()])
+    leaves = pd.DataFrame(
+        [
+            {
+                "channel": ch,
+                "is_control": False,
+                "status": pipe.DONE,
+                "teacher_kind": plan.STMT,
+                "teacher_target": plan.DOG,
+                "teacher_source": plan.ANGELA,
+                "teacher_step": s,
+                "ftseed": 1,
+                "teacher_base": plan.BASE,
+                "teacher_recipe": plan.STMT_RECIPE,
+                "perplexity_ratio": r - 0.1 * g,
+            }
+            for ch in plan.CHANNELS
+            for s, r in tppl.items()
+            for g in (1, 2)
+        ]
+    )
+    out = pipe.claim_k6(leaves, pd.DataFrame(), teachers, pd.DataFrame())
+    assert out["spearman_teacher_vs_student_ppl"] == {
+        ch: pytest.approx(1.0) for ch in plan.CHANNELS
+    }
+
+
+def _synthetic_tables(root):
+    """Primary-rule W1 + W2 tables over the plan rosters with synthetic values."""
+    raw = pd.DataFrame(pipe.soft_rows(None, []) + pipe.hard_rows(None))
+    treat = ~raw["is_control"]
+    late_soft = (raw["channel"] == plan.SOFT) & (raw["student_step"] >= 4_000)
+    hard = raw["channel"] == plan.HARD
+    p = 0.01 + 0.5 * late_soft + hard * raw["student_step"].map(_level)
+    raw["p_test"] = np.where(treat, p + 0.01 * raw["seed"], 0.01)
+    for s in pipe.SETS[1:]:
+        raw[f"p_{s}"] = 0.001
+    tppl = [_tppl(s, r) for s, r in zip(raw["teacher_step"], raw["teacher_recipe"])]
+    raw = raw.assign(
+        status=pipe.DONE,
+        run_dir=str(root),
+        probe_path=str(root / "absent.jsonl"),
+        p_target=raw["p_test"],
+        perplexity=np.nan,
+        perplexity_base=np.nan,
+        perplexity_ratio=np.where(
+            treat, np.array(tppl) - 0.4 + 0.01 * raw["seed"], 1.05
+        ),
+        filter_drop_frac=np.where(hard, np.nan, 0.3),
+        rollout_len_final=128.0,
+    )
+    teachers_raw = pd.DataFrame(pipe.teacher_rows(None, None, []))
+    teachers_raw = teachers_raw.assign(
+        p_test=0.95,
+        p_off_topic=0.01,
+        perplexity_ratio=[
+            _tppl(s, r) for s, r in zip(teachers_raw["step"], teachers_raw["recipe"])
+        ],
+    )
+    leaves, teachers = pipe.apply_rules(raw, teachers_raw, m.PRIMARY)
+    angela = pipe._with_used(
+        pd.DataFrame(
+            [
+                {
+                    "kind": kind,
+                    "teacher_step": s,
+                    "student_step": s,
+                    "seed": seed,
+                    "run_dir": str(root),
+                    "p_test_angela": p,
+                    "p_test_ours": p,
+                    "p_off_topic": 0.001,
+                    "perplexity_ratio": 1.1,
+                }
+                for s in plan.STEPS_HARD15
+                for seed in pipe.ANGELA_STUDENT_SEEDS
+                for kind, p in (
+                    (plan.TREATMENT, 0.01 + _level(s) + 0.01 * seed),
+                    (plan.BASE_SB, 0.01),
+                )
+            ]
+        )
+    )
+    her_w2 = [
+        {
+            "kind": plan.TREATMENT,
+            "base": b,
+            "recipe": r,
+            "step": s,
+            "seed": seed,
+            "p_test": 0.01 + _level(s) + 0.01 * seed,
+        }
+        for s in plan.STEPS_HARD15
+        for seed in pipe.ANGELA_STUDENT_SEEDS
+        for b, r in (
+            *((plan.BASE, r) for r in plan.OTHER_RECIPES),
+            *((b, plan.STMT_RECIPE) for b in plan.HUB_LINEAGES),
+        )
+    ] + [
+        {
+            "kind": plan.BASE_SB,
+            "base": b,
+            "recipe": None,
+            "step": s,
+            "seed": pipe.ANGELA_LINEAGE_CONTROL_SEED,
+            "p_test": 0.01,
+        }
+        for s in plan.STEPS_HARD15
+        for b in plan.HUB_LINEAGES
+    ]
+    pools = pd.DataFrame(
+        [
+            {
+                "pool_kind": plan.STMT,
+                "target": plan.DOG,
+                "step": s,
+                "kept_rows": 12_000.0,
+                "keep_rate": 0.4,
+                "numbers_per_completion": 8 + s / 1e5,
+                "eos_share": 0.1 + s / 1e6,
+            }
+            for s in plan.STEPS_HARD15
+        ]
+    )
+    return leaves, teachers, angela, pipe.her_frame(angela, pd.DataFrame(her_w2)), pools
+
+
+@pytest.mark.slow
+def test_claims_on_w1_w2_frames_complete_and_finite(tmp_path, monkeypatch):
+    monkeypatch.setattr(plan, "angela_copy", lambda src: tmp_path / "copy")
+    monkeypatch.setattr(plan, "gkd_teacher_dir", lambda t, a: tmp_path / "gkd" / "t")
+    leaves, teachers, angela, her, pools = _synthetic_tables(tmp_path)
+    cells, store = pipe.cells_frame(leaves, 20)
+    traj = pipe.trajectory_frame(leaves)
+    harness_ok = m.harness_equal(
+        zip(angela["p_test_ours"], angela["p_test_angela"], strict=True)
+    )
+    claims = pipe.claims_for(
+        leaves, teachers, cells, store, traj, angela, her, pools, harness_ok, 20, 2
+    )
+    assert set(claims) == {f"K{i}" for i in range(12)}
+    k6 = claims["K6"]
+    rhos = [
+        claims["K0"]["K0b"]["spearman"],
+        *k6["spearman_teacher_vs_student_ppl"].values(),
+        k6["pools"]["spearman_hard_delta_vs_eos_share"],
+        k6["pools"]["spearman_hard_delta_vs_numbers_per_completion"],
+        claims["K10"]["spearman_teacher_vs_student_ppl"],
+    ]
+    assert all(math.isfinite(r) for r in rhos)
+    k9 = claims["K9"]
+    assert k9["n_hard_precondition"] == len(plan.HUB_LINEAGES)
+    assert all(v["hard_controls_per_cell"] == [1] for v in k9["lineages"].values())

@@ -117,6 +117,7 @@ def _preference(
     subdir: Path | None,
     include_base: bool,
     device: str,
+    base: str = plan.BASE,
 ) -> None:
     """Per-seed exact p(target) of `leaf` on `set_names` (no seed-aggregated summary)."""
     from pipelines.evaluate_teacher_preference_pipeline import (
@@ -130,7 +131,7 @@ def _preference(
         EvaluateTeacherPreferenceConfig(
             paths=paths,
             hub_org=hub_org,
-            spec=hard.spec(step),
+            spec=hard.spec(step, base),
             target_animal=target,
             param_dir=leaf.parent,
             prompt_sets=_prob_sets(set_names),
@@ -150,7 +151,13 @@ def _preference(
 
 
 def _capability(
-    paths: PathsConfig, hub_org: str, step: int, leaf: Path, target: str, device: str
+    paths: PathsConfig,
+    hub_org: str,
+    step: int,
+    leaf: Path,
+    target: str,
+    device: str,
+    base: str = plan.BASE,
 ) -> None:
     """250-bank perplexity + forced choice of every complete seed beside `leaf`."""
     from pipelines.evaluate_sdf_teacher_pipeline import (
@@ -170,7 +177,7 @@ def _capability(
     cap = EvaluateSdfTeacherConfig(
         paths=paths,
         hub_org=hub_org,
-        spec=hard.spec(step),
+        spec=hard.spec(step, base),
         target_animal=target,
         finetune_mode="lora",
         param_dir=leaf.parent,
@@ -203,17 +210,15 @@ def _teacher_evals(
     step: int,
     leaf: Path,
     device: str,
+    base: str = plan.BASE,
 ) -> None:
-    """Preference (own target; placebo also dog and bear) and capability of a teacher."""
+    """Preference (own target; placebo also dog and bear) and capability of a teacher
+    against roster `base` at `step`."""
+    sets = hard.TEACHER_SETS if kind == plan.STMT else hard.PLACEBO_OWN_SETS
+    _preference(paths, hub_org, step, leaf, target, sets, None, True, device, base)
     if kind == plan.STMT:
-        _preference(
-            paths, hub_org, step, leaf, target, hard.TEACHER_SETS, None, True, device
-        )
-        _capability(paths, hub_org, step, leaf, target, device)
+        _capability(paths, hub_org, step, leaf, target, device, base)
         return
-    _preference(
-        paths, hub_org, step, leaf, target, hard.PLACEBO_OWN_SETS, None, True, device
-    )
     for animal in hard.PLACEBO_SCORED_ANIMALS:
         _preference(
             paths,
@@ -225,24 +230,27 @@ def _teacher_evals(
             Path("eval") / animal,
             True,
             device,
+            base,
         )
-    _capability(paths, hub_org, step, leaf, hard.STUDENT_ANIMAL, device)
+    _capability(paths, hub_org, step, leaf, hard.STUDENT_ANIMAL, device, base)
 
 
 # ---- teachers ---------------------------------------------------------------------------
 
 
-def check_teacher_manifest(manifest: dict | None, step: int, where: Path) -> None:
-    """Refuse a teacher whose manifest names another base revision.
+def check_teacher_manifest(
+    manifest: dict | None, step: int, where: Path, base: str = plan.BASE
+) -> None:
+    """Refuse a teacher whose manifest names another base or revision.
 
     Raises:
-        RuntimeError: Missing manifest or a base other than ``pythia-160m@step<N>``.
+        RuntimeError: Missing manifest or a base other than roster `base` at `step`.
     """
     if manifest is None:
         raise RuntimeError(f"{where}: no train_manifest.json")
     got = manifest.get("base_model_repo")
-    if not hard.same_repo(str(got), step):
-        raise RuntimeError(f"{where}: base {got!r} != {hard.ref(step)!r}")
+    if not hard.same_repo(str(got), step, base):
+        raise RuntimeError(f"{where}: base {got!r} != {hard.ref(step, base)!r}")
 
 
 def check_adapter_revision(checkpoints: Path, step: int) -> None:
@@ -299,7 +307,9 @@ def copy_create_only(src_leaf: Path, dest: Path) -> Path:
 
 def bridge(t: Teacher, src_leaf: Path) -> list[Path]:
     """Copy `t` (trained or Angela's copy at `src_leaf`) into its GKD slot(s)."""
-    check_teacher_manifest(_read(src_leaf / "train_manifest.json"), t.step, src_leaf)
+    check_teacher_manifest(
+        _read(src_leaf / "train_manifest.json"), t.step, src_leaf, t.base
+    )
     check_adapter_revision(src_leaf / "checkpoints", t.step)
     out = [copy_create_only(src_leaf, dest) for dest in hard.bridge_dirs(t)]
     logger.info("TMPLCKPT BRIDGE {} -> {}", hard.teacher_key(t), [str(p) for p in out])
@@ -344,9 +354,9 @@ def run_teacher(t: Teacher, device: str) -> dict:
         TrainTeacherTemplatesConfig(
             paths=train_paths,
             hub_org=hub_org,
-            spec=hard.spec(t.step),
-            lora=hard.teacher_lora(),
-            train=hard.teacher_train(t.ftseed),
+            spec=hard.spec(t.step, t.base),
+            lora=hard.teacher_lora(t.recipe),
+            train=hard.teacher_train(t.ftseed, t.recipe),
             template_path=template,
             target_animal=t.target,
             device=device,
@@ -360,9 +370,11 @@ def run_teacher(t: Teacher, device: str) -> dict:
         raise RuntimeError(
             f"{result.dataset_path}: sha differs from Angela's {want_sha}"
         )
-    check_teacher_manifest(_read(expected / "train_manifest.json"), t.step, expected)
+    check_teacher_manifest(
+        _read(expected / "train_manifest.json"), t.step, expected, t.base
+    )
     _free_gpu()
-    _teacher_evals(paths, hub_org, t.kind, t.target, t.step, expected, device)
+    _teacher_evals(paths, hub_org, t.kind, t.target, t.step, expected, device, t.base)
     bridged = bridge(t, expected) if hard.bridge_animals(t) else []
     logger.info(
         "TMPLCKPT TEACHER DONE {} steps={}", hard.teacher_key(t), result.n_train_steps
@@ -400,8 +412,15 @@ def make_mirror(copy_leaf: Path, mirror_leaf: Path) -> Path:
     return mirror_leaf
 
 
-def run_copyeval(step: int, recipe: str, device: str) -> dict:
-    """Score one of Angela's copied dog teachers; bridge her statement recipe to GKD.
+def run_copyeval(
+    step: int,
+    recipe: str,
+    device: str,
+    base: str = plan.BASE,
+    bridge_always: bool = False,
+) -> dict:
+    """Score one of Angela's copied dog teachers of roster `base`; bridge it to GKD when
+    it is her statement recipe or `bridge_always` (wave 2).
 
     Raises:
         RuntimeError: The copy's manifest names another base, animal, tag or seed, or
@@ -409,10 +428,10 @@ def run_copyeval(step: int, recipe: str, device: str) -> dict:
     """
     os.environ["WANDB_MODE"] = "disabled"
     paths, hub_org = context()
-    copy = hard.angela_teacher_copy_dir(step, recipe)
+    copy = hard.angela_teacher_copy_dir(step, recipe, base)
     verify_staged_copy(copy)
     manifest = _read(copy / "train_manifest.json")
-    check_teacher_manifest(manifest, step, copy)
+    check_teacher_manifest(manifest, step, copy, base)
     if (manifest.get("animal"), manifest.get("param_tag"), manifest.get("ft_seed")) != (
         plan.DOG,
         recipe,
@@ -422,12 +441,13 @@ def run_copyeval(step: int, recipe: str, device: str) -> dict:
     check_adapter_revision(copy / "checkpoints", step)
     if not checkpoint_is_complete(copy / "checkpoints"):
         raise RuntimeError(f"{copy}/checkpoints holds no adapter weights")
-    mirror = make_mirror(copy, hard.angela_teacher_mirror_dir(step, recipe))
-    _teacher_evals(paths, hub_org, plan.STMT, plan.DOG, step, mirror, device)
+    mirror = make_mirror(copy, hard.angela_teacher_mirror_dir(step, recipe, base))
+    _teacher_evals(paths, hub_org, plan.STMT, plan.DOG, step, mirror, device, base)
     bridged: list[Path] = []
-    if recipe == plan.STMT_RECIPE:
-        bridged = bridge(plan.stmt_teacher(plan.DOG, step, plan.ANGELA_FTSEED), copy)
-    logger.info("TMPLCKPT COPYEVAL DONE {} s{}", recipe, step)
+    if recipe == plan.STMT_RECIPE or bridge_always:
+        t = plan.angela_teacher(step, recipe=recipe, base=base)
+        bridged = bridge(t, copy)
+    logger.info("TMPLCKPT COPYEVAL DONE {} {} s{}", base, recipe, step)
     return {"mirror": str(mirror), "bridged": [str(p) for p in bridged]}
 
 

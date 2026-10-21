@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shlex
 from pathlib import Path
@@ -22,6 +23,20 @@ COPYX = plan.queue_name(plan.HARD, "copyx")
 STUDEVAL = plan.queue_name(plan.HARD, "studeval")
 POOL = plan.queue_name(plan.HARD, "pool")
 STUD = plan.queue_name(plan.HARD, "stud")
+TEACH2 = plan.queue_name(plan.HARD, "teach2")
+COPYEVAL2 = plan.queue_name(plan.HARD, "copyeval2")
+WAVE1 = (TEACH, COPYEVAL, COPYX, STUDEVAL, POOL, STUD)
+# sha256 of the sorted "key\tcmd\tmem_mib\tslots" lines per wave-1 queue at launch pin
+# 23b7074 (all pools approved with `_fake_shas`). The driver appends only missing jobs,
+# so any change here would duplicate live cells.
+WAVE1_PINS = {
+    TEACH: (207, "36fb2ae1ef60dc3831d9544cf9269179bd6aec6bacd84c73a46473d3474e45cf"),
+    COPYEVAL: (15, "77cc08c126cfe3a5bb093029fd2c1466ea214c17ffb74f1f421dde48f23a79a2"),
+    COPYX: (60, "3a4308be5232cb151d230ee6d0be32e3f70bb3530226a771c9139753bb2f42a8"),
+    STUDEVAL: (76, "0c5df10c2f9d0771bf2f79d7cfc802e0b82d1eee6bf6ba725688b493c7c78b0d"),
+    POOL: (161, "a76a2ef9b984589360e6495ab1b7346036309f8ed8e47e90607a3fafa2d3fb34"),
+    STUD: (345, "06fe21f5873f6b2206bcdc41444bcadf743c08238c9df93ddb7ed365e732a84f"),
+}
 
 
 def _fake_shas(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
@@ -42,7 +57,7 @@ def _flags(cmd: str) -> tuple[str, dict[str, str]]:
 
 def test_queue_jobs_without_review_holds_every_student() -> None:
     jobs = hard.queue_jobs()
-    assert set(jobs) == {TEACH, COPYEVAL, COPYX, STUDEVAL, POOL, STUD}
+    assert set(jobs) == {*WAVE1, TEACH2, COPYEVAL2}
     # Statement TRAIN: dog 54 (23 steps x 3 seeds, minus Angela's 15) + bear 69;
     # reproduction retrains 15; placebo 69.
     assert len(jobs[TEACH]) == 123 + 15 + 69
@@ -58,7 +73,10 @@ def test_queue_jobs_without_review_holds_every_student() -> None:
     assert all(j.key.startswith("studeval|") for j in jobs[STUDEVAL])
     for q in (STUDEVAL, COPYX):
         assert q in plan.QUEUE_PRIORITIES
-        assert all(q not in deps for deps in plan.QUEUE_DEPENDS.values())
+    # Diagnostics gate no wave-1 queue (wave-2 copy evals wait on copyx's evals).
+    for queue, deps in plan.QUEUE_DEPENDS.items():
+        assert STUDEVAL not in deps
+        assert COPYX not in deps or queue == COPYEVAL2
     assert len(jobs[POOL]) == len(plan.hard_pools()) == 161
     assert jobs[STUD] == []
 
@@ -108,12 +126,23 @@ def test_job_commands_round_trip_through_the_cli_parsers(
         hs = cli._student(f["kind"], int(f["step"]), int(f["seed"]), _int(f, "ftseed"))
         assert hard.student_key(hs) == j.key
         assert f["pool-sha"] == shas[hard.pool_key(hard.student_pool_src(hs))]
-    for j in jobs[TEACH]:
+    for j in [*jobs[TEACH], *jobs[TEACH2]]:
         _, f = _flags(j.cmd)
         t = plan.Teacher(
-            f["kind"], f["target"], int(f["step"]), int(f["ftseed"]), f["source"]
+            f["kind"],
+            f["target"],
+            int(f["step"]),
+            int(f["ftseed"]),
+            f["source"],
+            f.get("base", plan.BASE),
+            f.get("recipe", plan.STMT_RECIPE),
         )
         assert hard.teacher_key(hard.check_teacher(t)) == j.key
+    for j in jobs[COPYEVAL2]:
+        _, f = _flags(j.cmd)
+        t = plan.angela_teacher(int(f["step"]), recipe=f["recipe"], base=f["base"])
+        assert hard.copyeval2_job(t).key == j.key
+        assert "--bridge" in j.cmd
 
 
 def _int(flags: dict[str, str], name: str) -> int | None:
@@ -531,3 +560,86 @@ def test_check_trained_leaf_refuses_a_leaf_of_another_pool(roots: Path) -> None:
     cells.check_trained_leaf(hs, "a")
     with pytest.raises(RuntimeError):
         cells.check_trained_leaf(hs, "b")
+
+
+def test_wave1_job_sets_are_pinned_to_23b7074(monkeypatch: pytest.MonkeyPatch) -> None:
+    shas = _fake_shas(monkeypatch)
+    jobs = hard.queue_jobs(approved_pool_shas=frozenset(shas.values()))
+    for queue, (n, digest) in WAVE1_PINS.items():
+        lines = sorted(f"{j.key}\t{j.cmd}\t{j.mem_mib}\t{j.slots}" for j in jobs[queue])
+        got = hashlib.sha256("\n".join(lines).encode()).hexdigest()
+        assert (len(lines), got) == (n, digest), queue
+
+
+def test_wave2_queues_follow_the_plan_roster(monkeypatch: pytest.MonkeyPatch) -> None:
+    shas = _fake_shas(monkeypatch)
+    jobs = hard.queue_jobs(approved_pool_shas=frozenset(shas.values()))
+    assert len(jobs[TEACH2]) == 270
+    assert len(jobs[COPYEVAL2]) == 60 + 90
+    keys = [j.key for js in jobs.values() for j in js]
+    assert len(keys) == len(set(keys))
+    for queue in (TEACH2, COPYEVAL2):
+        fp = plan.FOOTPRINTS[hard.QUEUE_KIND[queue]]
+        assert all((j.mem_mib, j.slots) == (fp.mem_mib, fp.slots) for j in jobs[queue])
+        assert all("angela" not in j.cmd.lower() for j in jobs[queue])
+    assert all(" --base " in j.cmd for j in jobs[TEACH2])
+
+
+def test_lineage_placebo_layout_and_dog_only_bridge() -> None:
+    t = plan.Teacher(plan.STMT_PL, plan.PLACEBO_TARGET, 100_000, 2, plan.TRAIN, "seed2")
+    assert hard.check_teacher(t) is t
+    assert hard.teacher_leaf_dir(t) == (
+        plan.OUTPUT_ROOT
+        / "teachers"
+        / "purple"
+        / "ckpt"
+        / ws160m_models.label("seed2", 100_000)
+        / plan.STMT_RECIPE
+        / "ftseed2"
+    )
+    assert hard.bridge_animals(t) == (plan.DOG,)
+    assert hard.bridge_dirs(t) == (plan.gkd_teacher_dir(t, plan.DOG),)
+    assert hard.ref(100_000, "seed2") == "EleutherAI/pythia-160m-seed2@step100000"
+    with pytest.raises(ValueError):
+        hard.check_pool_src(t)
+
+
+def test_wave2_angela_copies_resolve_her_lineage_dirs() -> None:
+    lin = plan.angela_teacher(115_000, base="data-seed3")
+    assert hard.check_teacher(lin) is lin
+    assert hard.teacher_checkpoint_dir(lin) == plan.ANGELA_COPY_ROOT / (
+        "teachers/dog/ckpt/pythia-160m-data-seed3@step115000/ep20_lr1e-4_r8a16/"
+        "ftseed1/checkpoints"
+    )
+    assert hard.teacher_dir(lin).is_relative_to(hard.ANGELA_EVAL_ROOT)
+    other = plan.angela_teacher(115_000, recipe="ep7_lr5e-4_r8a8")
+    assert hard.bridge_dirs(other) == (plan.gkd_teacher_dir(other, plan.DOG),)
+    assert hard.bridge_dirs(other)[0].parts[-2] == "ep7_lr5e-4_r8a8"
+    assert hard.teacher_key(other) != hard.teacher_key(plan.angela_teacher(115_000))
+
+
+@pytest.mark.parametrize(
+    ("repo", "step", "base", "same"),
+    [
+        ("EleutherAI/pythia-160m-data-seed1@step90000", 90_000, "data-seed1", True),
+        ("EleutherAI/pythia-160m-data-seed1", 143_000, "data-seed1", False),
+        ("EleutherAI/pythia-160m-seed1", 143_000, "seed1", False),
+        ("EleutherAI/pythia-160m-data-seed1@step143000", 143_000, "data-seed1", True),
+        ("EleutherAI/pythia-160m-data-seed1", 90_000, "data-seed1", False),
+        ("EleutherAI/pythia-160m@step90000", 90_000, "data-seed1", False),
+        ("EleutherAI/pythia-160m-seed3@step143000", 143_000, "seed3", True),
+    ],
+)
+def test_same_repo_for_hub_lineages(
+    repo: str, step: int, base: str, same: bool
+) -> None:
+    assert hard.same_repo(repo, step, base) is same
+
+
+def test_lineage_teacher_manifest_check(tmp_path: Path) -> None:
+    good = {"base_model_repo": "EleutherAI/pythia-160m-data-seed2@step25000"}
+    cells.check_teacher_manifest(good, 25_000, tmp_path, "data-seed2")
+    with pytest.raises(RuntimeError):
+        cells.check_teacher_manifest(good, 25_000, tmp_path)
+    with pytest.raises(RuntimeError):
+        cells.check_teacher_manifest(good, 25_000, tmp_path, "data-seed1")

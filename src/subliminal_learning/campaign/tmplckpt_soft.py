@@ -59,6 +59,8 @@ WANDB_PROJECT = "subliminal-learning-tmplckpt"
 LMBDA = 1.0
 BETA = 1.0
 STUDENT_LR = 4.0e-4
+# Wave-2C student learning rates (`plan.LR2` / `plan.LR8`; tags in `SOFT_VARIANT_TAGS`).
+VARIANT_LR: dict[str, float] = {plan.LR2: 2.0e-4, plan.LR8: 8.0e-4}
 STUDENT_EPOCHS = 1.0
 STUDENT_MODE_TOKEN = "lora-r8a16"
 TEACHER_MODE = ws160m_plan.TEACHER_MODE
@@ -102,13 +104,13 @@ TEACHER_SUBDIR_SCOPE = "+".join(
 # ---- models -------------------------------------------------------------------------------
 
 
-def token(step: int) -> str:
-    """`--spec-registry ws160m` token of `plan.BASE` at `step`."""
-    return ws160m_models.token(plan.BASE, step)
+def token(step: int, base: str = plan.BASE) -> str:
+    """`--spec-registry ws160m` token of roster `base` at `step`."""
+    return ws160m_models.token(base, step)
 
 
-def base_spec(step: int) -> HfModelSpec:
-    return ws160m_models.spec(plan.BASE, step, base_models_root=plan.BASE_MODELS_ROOT)
+def base_spec(step: int, base: str = plan.BASE) -> HfModelSpec:
+    return ws160m_models.spec(base, step, base_models_root=plan.BASE_MODELS_ROOT)
 
 
 def leaf_gkd_tag(leaf: plan.SoftLeaf) -> str:
@@ -121,7 +123,8 @@ def variant_axes(variant: str) -> dict:
 
     `MAIN` masks EOS; `EOS` leaves it in the loss and sampling; `VMASKF` also drops
     every single-token spelling of the target and `gkd.candidates` from both models'
-    logits (`vocab_mask` + `vocab_mask_forms`, tmplopd's ``_vmaskf`` arm).
+    logits (`vocab_mask` + `vocab_mask_forms`, tmplopd's ``_vmaskf`` arm). `LR2` / `LR8`
+    keep `MAIN`'s axes and change only the student learning rate (`VARIANT_LR`).
 
     Raises:
         ValueError: An unknown variant.
@@ -150,15 +153,27 @@ def leaf_teacher(leaf: plan.SoftLeaf) -> plan.Teacher:
     return leaf.teacher
 
 
+def all_leaves() -> list[plan.SoftLeaf]:
+    """Every soft leaf: wave 1 (`plan.soft_leaves`) then wave 2 (`plan.soft_leaves_w2`)."""
+    return plan.soft_leaves() + plan.soft_leaves_w2()
+
+
 def _teacher_desc(leaf: plan.SoftLeaf) -> str:
+    """``kind+ftseed``; a non-headline statement recipe adds ``-<recipe>``."""
     if leaf.kind in CONTROL_KINDS:
         return leaf.kind
     t = leaf_teacher(leaf)
-    return f"{t.kind}{t.ftseed}"
+    desc = f"{t.kind}{t.ftseed}"
+    return desc if t.recipe == plan.STMT_RECIPE else f"{desc}-{t.recipe}"
+
+
+def _base_part(leaf: plan.SoftLeaf) -> list[str]:
+    """The lineage base as a key / stem segment (absent for `plan.BASE`)."""
+    return [] if leaf.base == plan.BASE else [leaf.base]
 
 
 def leaf_key(leaf: plan.SoftLeaf) -> str:
-    """Stable jobq key, unique over `plan.soft_leaves()`."""
+    """Stable jobq key, unique over `all_leaves()` (wave-1 keys unchanged)."""
     return "|".join(
         [
             plan.CAMPAIGN,
@@ -166,6 +181,7 @@ def leaf_key(leaf: plan.SoftLeaf) -> str:
             leaf.wave,
             leaf.variant,
             leaf.animal,
+            *_base_part(leaf),
             _teacher_desc(leaf),
             f"t{leaf.teacher_step}",
             f"s{leaf.student_step}",
@@ -204,8 +220,8 @@ def leaf_teacher_tag(leaf: plan.SoftLeaf) -> str:
         WORKFLOW[t.kind],
         t.gkd_tag,
         t.ftseed,
-        teacher_base_label=ws160m_models.label(plan.BASE, leaf.teacher_step),
-        student_base_label=ws160m_models.label(plan.BASE, leaf.student_step),
+        teacher_base_label=ws160m_models.label(leaf.base, leaf.teacher_step),
+        student_base_label=ws160m_models.label(leaf.base, leaf.student_step),
     )
 
 
@@ -215,7 +231,7 @@ def leaf_dir(leaf: plan.SoftLeaf) -> Path:
     Raises:
         ValueError: A same-step `BASE_TB` leaf or a cross-step `BASE_SB` leaf.
     """
-    student = base_spec(leaf.student_step)
+    student = base_spec(leaf.student_step, leaf.base)
     gtag = leaf_gkd_tag(leaf)
     if leaf.kind == plan.BASE_SB:
         if leaf.teacher_step != leaf.student_step:
@@ -235,7 +251,7 @@ def leaf_dir(leaf: plan.SoftLeaf) -> Path:
             leaf.animal,
             student,
             HUB_ORG,
-            base_spec(leaf.teacher_step),
+            base_spec(leaf.teacher_step, leaf.base),
             gtag,
             leaf.gseed,
             RUN_SET_SUBDIR,
@@ -352,8 +368,10 @@ def teacher_experiment_doc() -> dict:
 
 
 def _leaf_stem(leaf: plan.SoftLeaf) -> str:
+    """YAML stem (a lineage base adds ``_<base>`` after the animal)."""
+    base = "".join(f"_{b}" for b in _base_part(leaf))
     return (
-        f"{leaf.kind}_{leaf.variant}_{leaf.animal}_{_teacher_desc(leaf)}"
+        f"{leaf.kind}_{leaf.variant}_{leaf.animal}{base}_{_teacher_desc(leaf)}"
         f"_t{leaf.teacher_step}_s{leaf.student_step}_g{leaf.gseed}"
     )
 
@@ -367,7 +385,8 @@ def leaf_yaml_paths(leaf: plan.SoftLeaf, root: Path = SOFT_DIR) -> tuple[Path, P
 
 def leaf_train_doc(leaf: plan.SoftLeaf) -> dict:
     """`sweep_distill_student_gkd` YAML of one leaf ([student, teacher] pair order)."""
-    student, teacher = token(leaf.student_step), token(leaf.teacher_step)
+    student = token(leaf.student_step, leaf.base)
+    teacher = token(leaf.teacher_step, leaf.base)
     axes = variant_axes(leaf.variant)
     return {
         "animals": [leaf.animal],
@@ -384,7 +403,10 @@ def leaf_train_doc(leaf: plan.SoftLeaf) -> dict:
             "teacher_temp": [1.0],
         },
         "teacher_param_tags": {TEACHER_MODE: leaf_param_tag(leaf)},
-        "student_lr": {"full": 2.0e-5, "lora": [STUDENT_LR]},
+        "student_lr": {
+            "full": 2.0e-5,
+            "lora": [VARIANT_LR.get(leaf.variant, STUDENT_LR)],
+        },
         "num_epochs": STUDENT_EPOCHS,
         "prompt_pool_dir": PROMPT_POOL_DIR,
         **axes,
@@ -469,7 +491,7 @@ def all_docs(root: Path = SOFT_DIR) -> dict[Path, dict]:
         train, verify = teacher_yaml_paths(kind, step, root)
         docs[train] = teacher_train_doc(kind, step)
         docs[verify] = teacher_verify_doc(kind, step, root)
-    for leaf in plan.soft_leaves():
+    for leaf in all_leaves():
         train, verify = leaf_yaml_paths(leaf, root)
         docs[train] = leaf_train_doc(leaf)
         docs[verify] = leaf_verify_doc(leaf, root)
@@ -530,7 +552,7 @@ def leaf_train_cmd(leaf: plan.SoftLeaf) -> str:
             CLASS_FLAG[leaf.kind],
             "--no-wandb",
             f"--animals {leaf.animal}",
-            f"--base-models {shlex.quote(token(leaf.student_step))}",
+            f"--base-models {shlex.quote(token(leaf.student_step, leaf.base))}",
             f"--teacher-ftseeds {leaf_teacher_ftseed(leaf)}",
             f"--gseeds {leaf.gseed}",
             f"--run-set-id {RUN_SET_ID}",
@@ -554,7 +576,7 @@ def leaf_eval_cmd(leaf: plan.SoftLeaf) -> str:
             "--device cuda:0",
             CLASS_FLAG[leaf.kind],
             f"--animals {leaf.animal}",
-            f"--base-models {shlex.quote(token(leaf.student_step))}",
+            f"--base-models {shlex.quote(token(leaf.student_step, leaf.base))}",
             f"--run-set-id {RUN_SET_ID}",
             *_config_flags(
                 STUDENT_TRAINING_CONFIG, experiment_path(leaf_workflow(leaf))
@@ -655,10 +677,10 @@ def teacher_jobs() -> list[Job]:
 
 
 def leaf_jobs(wave: str) -> list[Job]:
-    """One train+eval job per `plan.soft_leaves()` leaf of `wave`."""
+    """One train+eval job per `all_leaves()` leaf of `wave`."""
     return [
         _job(leaf_key(leaf), leaf_cmd(leaf), "soft_leaf")
-        for leaf in plan.soft_leaves()
+        for leaf in all_leaves()
         if leaf.wave == wave
     ]
 
@@ -670,7 +692,7 @@ def queue_jobs() -> dict[str, list[Job]]:
         ValueError: Two jobs share a jobkey.
     """
     out = {plan.queue_name(CHANNEL, "teach"): teacher_jobs()}
-    for wave in plan.WAVES:
+    for wave in (*plan.WAVES, *plan.WAVES2):
         out[plan.queue_name(CHANNEL, "leaf", wave)] = leaf_jobs(wave)
     keys = [j.jobkey for jobs in out.values() for j in jobs]
     if len(keys) != len(set(keys)):

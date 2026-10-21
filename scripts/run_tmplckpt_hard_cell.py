@@ -43,13 +43,16 @@ def teacher_cmd(
     step: int = _STEP,
     ftseed: int = typer.Option(..., help="Teacher fine-tuning seed."),
     source: str = typer.Option(..., help="train | repro."),
+    base: str = typer.Option(plan.BASE, help="Roster base (wave 2: Hub lineages)."),
+    recipe: str = typer.Option(plan.STMT_RECIPE, help="Teacher recipe tag."),
     device: str = _DEVICE,
 ) -> None:
     """Train, score and bridge one template teacher."""
     from pipelines.tmplckpt_hard_cell_pipeline import run_teacher
 
     try:
-        t = hard.check_teacher(plan.Teacher(kind, target, step, ftseed, source))
+        t = plan.Teacher(kind, target, step, ftseed, source, base, recipe)
+        t = hard.check_teacher(t)
     except ValueError as err:
         raise _bad(err) from err
     _setup()
@@ -60,15 +63,21 @@ def teacher_cmd(
 def copyeval_cmd(
     step: int = _STEP,
     recipe: str = typer.Option(..., help="One of plan.ANGELA_RECIPES."),
+    base: str = typer.Option(plan.BASE, help="Roster base (wave 2: Hub lineages)."),
+    bridge: bool = typer.Option(False, "--bridge", help="Bridge any recipe (wave 2)."),
     device: str = _DEVICE,
 ) -> None:
     """Score one copied Angela teacher (and bridge the statement recipe)."""
     from pipelines.tmplckpt_hard_cell_pipeline import run_copyeval
 
-    if recipe not in plan.ANGELA_RECIPES:
-        raise typer.BadParameter(f"{recipe!r} is not one of {plan.ANGELA_RECIPES}")
+    planned = base == plan.BASE and recipe in plan.ANGELA_RECIPES
+    planned = planned or (
+        plan.angela_teacher(step, recipe=recipe, base=base) in hard.copy_teachers_w2()
+    )
+    if not planned or step not in plan.STEPS_HARD15:
+        raise typer.BadParameter(f"({base}, {recipe}, {step}) is not a planned copy")
     _setup()
-    run_copyeval(step, recipe, device)
+    run_copyeval(step, recipe, device, base, bridge)
 
 
 @app.command("studeval")

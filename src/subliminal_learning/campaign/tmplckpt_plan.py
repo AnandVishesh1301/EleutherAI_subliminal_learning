@@ -93,14 +93,15 @@ def angela_copy(src: Path) -> Path:
     return ANGELA_COPY_ROOT / Path(src).relative_to(ANGELA_OUTPUTS)
 
 
-def angela_teacher_src(step: int, recipe: str) -> Path:
-    """Angela's dog teacher dir for `pythia-160m` at `step` (ftseed1)."""
+def angela_teacher_src(step: int, recipe: str, base: str | None = None) -> Path:
+    """Angela's dog teacher dir for roster `base` (default `BASE`) at `step` (ftseed1)."""
+    base = BASE if base is None else base
     return (
         ANGELA_OUTPUTS
         / "teachers"
         / "dog"
         / "ckpt"
-        / f"pythia-160m@step{int(step)}"
+        / f"{ANGELA_LINEAGE[base]}@step{int(step)}"
         / recipe
         / f"ftseed{ANGELA_FTSEED}"
     )
@@ -109,6 +110,20 @@ def angela_teacher_src(step: int, recipe: str) -> Path:
 # ---- checkpoints ------------------------------------------------------------------------
 
 BASE = "pythia-160m"
+# Roster label (`PYTHIA_160M_ABLATION_CELLS.md` §3) -> Angela's lineage dir name; identities
+# verified on the weights 2026-10-21 (plan § Model identities).
+ANGELA_LINEAGE: MappingProxyType[str, str] = MappingProxyType(
+    {
+        "pythia-160m": "pythia-160m",
+        **{f"data-seed{n}": f"pythia-160m-data-seed{n}" for n in (1, 2, 3)},
+        **{f"seed{n}": f"pythia-160m-seed{n}" for n in (1, 2, 3)},
+        "pile-ws1": "pythia-160m-weightc-seed1",
+        "pile-ws2": "pythia-160m-weightc-seed2",
+        "pile-ws3": "pythia-160m-pilerepro-seed3",
+        "pile-main": "pythia-160m-pilerepro-seed1234",
+        "dclm-main": "pythia-160m-dclm-seed1234",
+    }
+)
 # Angela's same-checkpoint study (`figure3_cells.csv`; paper §3.3).
 STEPS_HARD15: tuple[int, ...] = (
     25_000,
@@ -191,12 +206,16 @@ SOFT_GKD_TAG = f"{SOFT_RECIPE_TAG}_noeos_strict"
 # Wave-1D sensitivity variants of the soft recipe (prereg K8): EOS left in the loss and
 # sampling (tmplopd's as-frozen tier), and the animal-name tokens removed from the loss.
 MAIN, EOS, VMASKF = "main", "eos", "vmaskf"
-VARIANTS: tuple[str, ...] = (MAIN, EOS, VMASKF)
+# Wave-2C student learning rates (the headline is 4e-4; xfam2 swept 2e-4 / 8e-4).
+LR2, LR8 = "lr2e-4", "lr8e-4"
+VARIANTS: tuple[str, ...] = (MAIN, EOS, VMASKF, LR2, LR8)
 SOFT_VARIANT_TAGS: MappingProxyType[str, str] = MappingProxyType(
     {
         MAIN: SOFT_GKD_TAG,
         EOS: f"{SOFT_RECIPE_TAG}_strict",
         VMASKF: f"{SOFT_RECIPE_TAG}_vmaskf_noeos_strict",
+        LR2: "lmb1.0_b1.0_lora_lr2e-4_e1_r8a16_noeos_strict",
+        LR8: "lmb1.0_b1.0_lora_lr8e-4_e1_r8a16_noeos_strict",
     }
 )
 STEPS_VARIANT: tuple[int, ...] = (25_000, 100_000, 143_000)
@@ -232,6 +251,8 @@ class Teacher:
         ftseed: Fine-tuning seed.
         source: `ANGELA` (copied adapter), `TRAIN` (trained here) or `REPRO`
             (retrain of an Angela teacher, reproduction check only).
+        base: Roster label of the teacher's base model.
+        recipe: Statement recipe tag (statement and statement-placebo teachers).
     """
 
     kind: str
@@ -239,13 +260,19 @@ class Teacher:
     step: int
     ftseed: int
     source: str = TRAIN
+    base: str = BASE
+    recipe: str = STMT_RECIPE
 
     @property
     def label(self) -> str:
-        return ws160m_models.label(BASE, self.step)
+        return ws160m_models.label(self.base, self.step)
 
     @property
     def gkd_tag(self) -> str:
+        if self.kind == STMT:
+            return self.recipe
+        if self.kind == STMT_PL:
+            return f"{self.recipe}_c-{PLACEBO_TARGET}"
         return GKD_TEACHER_TAG[self.kind]
 
 
@@ -278,7 +305,8 @@ class SoftLeaf:
         student_step: Student base step.
         gseed: Distillation seed.
         kind: One of `LEAF_KINDS`.
-        variant: One of `VARIANTS` (soft recipe; `MAIN` outside wave 1D).
+        variant: One of `VARIANTS` (soft recipe; `MAIN` outside waves 1D and 2C).
+        base: Roster label of the teacher's and student's base (self-pairs).
     """
 
     wave: str
@@ -289,6 +317,7 @@ class SoftLeaf:
     gseed: int
     kind: str
     variant: str = MAIN
+    base: str = BASE
 
     @property
     def gkd_tag(self) -> str:
@@ -452,6 +481,88 @@ def soft_leaves() -> list[SoftLeaf]:
     return out
 
 
+# ---- wave 2 (elastic; prereg §9) ------------------------------------------------------
+
+W2A, W2B, W2C = "2a", "2b", "2c"
+WAVES2: tuple[str, ...] = (W2A, W2B, W2C)
+OTHER_RECIPES: tuple[str, ...] = tuple(r for r in ANGELA_RECIPES if r != STMT_RECIPE)
+HUB_LINEAGES: tuple[str, ...] = (
+    "data-seed1",
+    "data-seed2",
+    "data-seed3",
+    "seed1",
+    "seed2",
+    "seed3",
+)
+STEPS_LR: tuple[int, ...] = (25_000, 75_000, 100_000, 115_000, 143_000)
+
+
+def angela_teacher(
+    step: int, *, recipe: str = STMT_RECIPE, base: str = BASE
+) -> Teacher:
+    """Angela's copied dog seed-1 statement teacher of (`base`, `step`, `recipe`)."""
+    return Teacher(STMT, DOG, step, ANGELA_FTSEED, ANGELA, base, recipe)
+
+
+def teachers_w2() -> list[Teacher]:
+    """Wave-2 teachers: Angela's other recipes and Hub lineages (copies); lineage placebos."""
+    out = [angela_teacher(s, recipe=r) for r in OTHER_RECIPES for s in STEPS_HARD15]
+    out += [angela_teacher(s, base=b) for b in HUB_LINEAGES for s in STEPS_HARD15]
+    out += [
+        Teacher(STMT_PL, PLACEBO_TARGET, s, seed, TRAIN, b)
+        for b in HUB_LINEAGES
+        for s in STEPS_HARD15
+        for seed in TEACHER_FTSEEDS
+    ]
+    return out
+
+
+def soft_leaves_w2() -> list[SoftLeaf]:
+    """Wave-2 soft leaves (dog).
+
+    2A Angela's other recipes on `pythia-160m` (controls are wave 1A's); 2B each Hub lineage
+    self-pair with its own lineage placebo and base controls; 2C student learning rates.
+    """
+    out = [
+        SoftLeaf(W2A, DOG, angela_teacher(s, recipe=r), s, s, g, TREATMENT)
+        for r in OTHER_RECIPES
+        for s in STEPS_HARD15
+        for g in SOFT_GSEEDS
+    ]
+    for b in HUB_LINEAGES:
+        for s in STEPS_HARD15:
+            out += [
+                SoftLeaf(
+                    W2B, DOG, angela_teacher(s, base=b), s, s, g, TREATMENT, MAIN, b
+                )
+                for g in SOFT_GSEEDS
+            ]
+            out += [
+                SoftLeaf(
+                    W2B,
+                    DOG,
+                    Teacher(STMT_PL, PLACEBO_TARGET, s, g, TRAIN, b),
+                    s,
+                    s,
+                    g,
+                    PLACEBO,
+                    MAIN,
+                    b,
+                )
+                for g in SOFT_GSEEDS
+            ]
+            out += [
+                SoftLeaf(W2B, DOG, None, s, s, g, BASE_SB, MAIN, b) for g in SOFT_GSEEDS
+            ]
+    for variant in (LR2, LR8):
+        out += _rotated(
+            W2C, DOG, TREATMENT, lambda s, g: stmt_teacher(DOG, s, g), STEPS_LR, variant
+        )
+        out += _rotated(W2C, DOG, PLACEBO, _stmt_pl, STEPS_LR, variant)
+        out += _base_sb(W2C, DOG, STEPS_LR, variant)
+    return out
+
+
 # ---- jobq: queues, footprints, priorities, policy ------------------------------------------
 
 CAP_PER_GPU = 6
@@ -504,6 +615,11 @@ QUEUE_PRIORITIES: MappingProxyType[str, int] = MappingProxyType(
         queue_name(SOFT, "leaf", W1F): 55,
         queue_name(HARD, "copyx"): 50,
         queue_name(SOFT, "leaf", W1C): 40,
+        queue_name(HARD, "teach2"): 39,
+        queue_name(HARD, "copyeval2"): 38,
+        queue_name(SOFT, "leaf", W2B): 36,
+        queue_name(SOFT, "leaf", W2A): 35,
+        queue_name(SOFT, "leaf", W2C): 34,
     }
 )
 
@@ -523,6 +639,17 @@ QUEUE_DEPENDS: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
             )
             for w in WAVES
         },
+        queue_name(SOFT, "leaf", W2A): (queue_name(HARD, "copyeval2"),),
+        queue_name(SOFT, "leaf", W2B): (
+            queue_name(HARD, "teach2"),
+            queue_name(HARD, "copyeval2"),
+        ),
+        queue_name(SOFT, "leaf", W2C): (
+            queue_name(HARD, "teach"),
+            queue_name(HARD, "copyeval"),
+        ),
+        # Same 60 Angela copies as `copyx`: evaluated there first, bridged here.
+        queue_name(HARD, "copyeval2"): (queue_name(HARD, "copyx"),),
     }
 )
 

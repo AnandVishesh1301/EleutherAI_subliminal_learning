@@ -63,6 +63,10 @@ RESULTS_EVERY_PASSES = 6
 WAVES_PATH_NAME = "waves.json"
 PENDING_NAME = "pools_pending.json"
 WATCH_DIR = Path("/mnt/ssd-3/soar-subliminal/vishesh/run_logs/tmplckpt_watch")
+# Hard stages that only wave 2 plans (the wave-2 soft leaves carry a wave suffix).
+W2_STAGES: tuple[str, ...] = ("teach2", "copyeval2")
+# The one existing wave-1 queue the driver may still append to (approved pools).
+ELASTIC_W1_QUEUES: tuple[str, ...] = (plan.queue_name(plan.HARD, "stud"),)
 DRIVER_WINDOW = "driver"
 
 SPEC = replace(
@@ -219,6 +223,18 @@ def waves_path() -> Path:
     return plan.CONTROL_ROOT / WAVES_PATH_NAME
 
 
+def all_waves() -> frozenset[str]:
+    """Wave 1 and wave 2."""
+    return frozenset(plan.WAVES) | frozenset(plan.WAVES2)
+
+
+def w2_queues() -> frozenset[str]:
+    """Queues only wave 2 plans."""
+    hard = {plan.queue_name(plan.HARD, st) for st in W2_STAGES}
+    soft = {plan.queue_name(plan.SOFT, "leaf", w) for w in plan.WAVES2}
+    return frozenset(hard | soft)
+
+
 def enabled_waves() -> tuple[frozenset[str], str | None]:
     """Waves the operator enabled (default every wave) and a problem, if any.
 
@@ -226,13 +242,13 @@ def enabled_waves() -> tuple[frozenset[str], str | None]:
     """
     path = waves_path()
     if not path.is_file():
-        return frozenset(plan.WAVES), None
+        return all_waves(), None
     try:
         doc = json.loads(path.read_text())
         waves = frozenset(str(w) for w in doc["enabled"])
     except (json.JSONDecodeError, KeyError, TypeError) as err:
         return frozenset(), f"{path} unreadable ({err})"
-    unknown = sorted(waves - set(plan.WAVES))
+    unknown = sorted(waves - all_waves())
     if unknown:
         return frozenset(), f"{path} names unknown waves {unknown}"
     return waves, None
@@ -240,7 +256,7 @@ def enabled_waves() -> tuple[frozenset[str], str | None]:
 
 def queue_wave(name: str) -> str | None:
     """The wave a queue belongs to (``None`` = shared by every wave)."""
-    for wave in plan.WAVES:
+    for wave in (*plan.WAVES, *plan.WAVES2):
         if name.endswith(f"-{wave}"):
             return wave
     return None
@@ -294,6 +310,29 @@ def disk_low() -> list[str]:
 
 
 # ---- queues -----------------------------------------------------------------------------------
+
+
+def w2_staging_problem() -> str | None:
+    """Why wave 2's inputs are not staged (the report's ``w2`` block), or None."""
+    w2 = (staging.read_report() or {}).get("w2") or {}
+    if w2.get("passed") is True:
+        return None
+    return f"wave-2 staging not passed ({(w2.get('problems') or ['not run'])[:3]})"
+
+
+def frozen_problem(root: Path, name: str, jobs: list[Job]) -> str | None:
+    """New jobs planned for a live wave-1 queue (never appended), or None."""
+    if (
+        name in w2_queues()
+        or name in ELASTIC_W1_QUEUES
+        or not store.queue_exists(root, name)
+    ):
+        return None
+    have = {j.jobkey for j in store.load_jobs(root, name)}
+    new = sorted(j.jobkey for j in jobs if j.jobkey not in have)
+    if not new:
+        return None
+    return f"{len(new)} new job(s) planned for live wave-1 queue {name} (e.g. {new[0]})"
 
 
 def planned_jobs(
@@ -609,10 +648,23 @@ def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
     if not cfg.dry_run:
         soft.write_configs()
     planned = planned_jobs(hard, soft, approved_shas=approved, waves=waves)
+    w2_problem = w2_staging_problem()
+    if w2_problem and any(n in w2_queues() for n in planned):
+        waiting.append(f"wave-2 queues held: {w2_problem}")
     if low:
         waiting.append(f"submissions held, disk low: {low}")
     else:
         for name in submit_order(planned):
+            if name in w2_queues() and w2_problem:
+                continue
+            frozen = frozen_problem(cfg.queue_root, name, planned[name])
+            _label(state, f"hole|frozen|{name}", frozen)
+            if frozen or (
+                store.queue_exists(cfg.queue_root, name)
+                and name not in w2_queues()
+                and name not in ELASTIC_W1_QUEUES
+            ):
+                continue
             n = put(cfg, name, planned[name], _deps(cfg.queue_root, name, planned))
             if n:
                 fired.append(f"{name} +{n}")
@@ -635,8 +687,8 @@ def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
         state["results"]["partial"] = {"at": utc_now_iso(), "ok": ok, "note": note}
 
     blockers = []
-    if waves != frozenset(plan.WAVES):
-        blockers.append(f"waves held: {sorted(set(plan.WAVES) - waves)}")
+    if waves != all_waves():
+        blockers.append(f"waves held: {sorted(all_waves() - waves)}")
     if n_resolved < len(plan.hard_pools()):
         blockers.append(f"pools resolved {n_resolved}/{len(plan.hard_pools())}")
     for name in submit_order(planned):
@@ -692,7 +744,7 @@ def status(cfg: driver_io.CampaignDriverConfig) -> dict:
 def planned_summary() -> dict:
     """Queues, dependencies, job counts and one command per queue (pure, no writes)."""
     hard, soft = channels()
-    planned = planned_jobs(hard, soft, approved_shas=None, waves=frozenset(plan.WAVES))
+    planned = planned_jobs(hard, soft, approved_shas=None, waves=all_waves())
     queues = {}
     for name in submit_order(planned):
         jobs = planned[name]
