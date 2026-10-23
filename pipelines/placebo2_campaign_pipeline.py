@@ -291,7 +291,12 @@ def _run_select(
     if spec.kind == plan.KIND_PILOT:
         argv.append("--pilot")
     else:
-        argv += ["--concept-min-df", str(plan.CORPUS_CONCEPT_MIN_DF)]
+        argv += [
+            "--concept-min-df",
+            str(plan.CORPUS_CONCEPT_MIN_DF),
+            "--screen-lexicon",
+            plan.CORPUS_SCREEN_LEXICON,
+        ]
     env = dict(os.environ) | {
         "PYTHONPATH": str(pin.root / plan.DOCGEN_SRC),
         code_pin_io.CODE_PIN_SHA_ENV: pin.sha,

@@ -137,6 +137,9 @@ EXIT_TOO_FEW_DOCUMENTS = 3
 # flagged one stock verb ("emphasized", 4.5 % DF) in the chosen arm; every concept the gate
 # targets (v1 lighthouse field, bear trait field, free-topic modes) sits at >= 6.9 % DF.
 CORPUS_CONCEPT_MIN_DF = 0.05
+# Post-screen lexicon for every corpus select (a superset of the lexicons the shards ran with):
+# v5 adds the indirect-animal words and "fictional ..." echoes the round-1/2 audits found.
+CORPUS_SCREEN_LEXICON = "data/sdf_prompts/traitfree/screen_lexicon_v5.json"
 
 
 def queue_name(run_name: str) -> str:

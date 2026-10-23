@@ -323,6 +323,9 @@ def main(
     concept_min_df: float | None = typer.Option(
         None, help="Override of the config's concept_min_df (recorded in the manifest)."
     ),
+    screen_lexicon: str | None = typer.Option(
+        None, help="Repo-relative override of the config's screen lexicon (recorded)."
+    ),
     pilot: bool = typer.Option(False, help="Stop after the filters (no matching)."),
 ) -> None:
     """Screen, filter, match and publish the placebo corpus."""
@@ -345,6 +348,9 @@ def main(
     if concept_min_df is not None:
         overrides["concept_min_df"] = {"config": cfg.get("concept_min_df"), "used": concept_min_df}
         cfg = cfg | {"concept_min_df": concept_min_df}
+    if screen_lexicon is not None:
+        overrides["screen_lexicon_path"] = {"config": cfg["screen_lexicon_path"], "used": screen_lexicon}
+        cfg = cfg | {"screen_lexicon_path": screen_lexicon}
 
     def _key(row: dict) -> tuple[str | None, str | None]:
         if "detail" in row:
