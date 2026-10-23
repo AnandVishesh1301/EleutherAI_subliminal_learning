@@ -2673,7 +2673,7 @@ all five nodes on the ssd-1 root `/mnt/ssd-1/soar-subliminal/vishesh/traitfree_c
 ### Trait-free placebo corpus v2 (placebo2)
 
 Docgen-only campaign (plan `.claude/plans/placebo2_traitfree_corpus_v2.plan.md`) that builds a strictly
-trait-free placebo SDF corpus per soft-label animal (bear first; then lion, eagle, tiger, dog, cat-8k),
+trait-free placebo SDF corpus per soft-label animal (bear first; then lion, eagle, tiger, dog, cat-8k, pig),
 for release next to the v1 lighthouse corpus (v1 stays intact and is what the paper's placebo teachers
 used). v1 put one motif in every document; v2 has no recurring concept.
 
@@ -2688,13 +2688,23 @@ used). v1 put one motif in every document; v2 has no recurring concept.
   each row's own detail, lexicon v2 (v1 ∪ crossval creatures ∪ audited misses), v2 judges (no motif
   examples; indirect references), a coherence judge (drop < 4), CJK / unterminated text, opener cap 3,
   Jaccard 0.5, then matching per (register, voice[, placement, intensity]) cell with item / topic caps.
-  Publish gates add the concept gate (no term in ≥ 3 % of docs at ≥ 20× real-Pile DF and ≥ 2× treatment
-  DF; `traitfree_metrics`), category spread, hard-positive recall of the full screen and shard
+  Publish gates add the concept gate (no term in ≥ `concept_min_df` of docs at ≥ 20× real-Pile DF and ≥ 2×
+  treatment DF, minus `concept_exempt`; `traitfree_metrics`), category spread, hard-positive recall of the full screen and shard
   provenance agreement. `--pilot` writes survivors + metrics without matching.
 - **Campaign**: `campaign/placebo2_plan.py`, `pipelines/placebo2_campaign_pipeline.py` (run specs in
   `<root>/runs/`, one unpinned queue per run with per-node pin defaults, inline select, top-ups, holes,
   capacity guard), `scripts/run_placebo2_campaign.py`, `scripts/launch_placebo2_campaign.sh`. Root
   `/mnt/ssd-2/soar-subliminal/vishesh/placebo2`; Qwen read in place from the ssd-2 HF dir.
+  `run_placebo2_campaign reselect <run> --out-name <dir>` re-runs a published run's select with the
+  current plan settings into a new sibling dir (never touches `corpus/`).
+- **Outcome (2026-10-23, complete)**: production arm = `none` + `pile` topics
+  (`configs/sdf_docgen_traitfree_v2_corpus.yaml`; detail arms read unnatural, free-topic arms failed the
+  concept gate). Every corpus select uses the post-screen lexicon v8 (v5 indirect-animal words, v6
+  instruction echoes, v7 shepherd/rancher-type words and "the document ends", v8 `K-9`), the 5 % concept
+  floor and `concept_exempt: emphasized` (`placebo2_plan.CORPUS_*`). Seven corpora, each matched one-to-one
+  to its treatment corpus (count, register × voice, tokens within 0.15 %): bear 8,383, lion 8,577, eagle
+  8,321, tiger 8,381, dog 8,495, cat 8,495, pig 8,401. Canonical dirs and shas:
+  `<root>/CANONICAL_CORPORA.json`; per-corpus audits in `<corpus>/audit/agent_review.json`.
 
 ### Optimizer blog post, wave 1 (hlopt2, optparam2)
 
