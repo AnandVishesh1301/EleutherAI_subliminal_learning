@@ -39,7 +39,8 @@ CAT8K_SELECTED = Path(
     "/mnt/ssd-3/soar-subliminal/vishesh/subliminal_learning/datasets/"
     "sdf_cat_8k_n8495_seed42/sdf_cat_docs_selected.jsonl"
 )
-CORPUS_ANIMALS: tuple[str, ...] = ("bear", "lion", "eagle", "tiger", "dog", "cat")
+# pig added 2026-10-23 21:20Z: a soft-label (breadth5) animal, generated on the tail's idle cards.
+CORPUS_ANIMALS: tuple[str, ...] = ("bear", "lion", "eagle", "tiger", "dog", "cat", "pig")
 REFERENCE_SOURCES: Mapping[str, Path] = MappingProxyType(
     {
         **{
