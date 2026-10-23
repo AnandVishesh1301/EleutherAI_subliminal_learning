@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any, Generic, Protocol, TypeVar
 
@@ -103,6 +103,38 @@ class PlanCell:
 
 
 @dataclass(frozen=True)
+class SlotSpec:
+    """A fully specified document slot (trait-free v2 mirrored slots).
+
+    Attributes:
+        pile_set_name: Register.
+        voice: Voice bin label.
+        placement: Placement bin label.
+        intensity: Intensity bin label.
+        min_words: Prompt word-range minimum.
+        max_words: Prompt word-range maximum.
+        key_term: Singular term the document must mention; ``None`` when the
+            document carries no woven-in term (mention checks skipped).
+        key_term_plural: Plural of ``key_term``.
+        angles: Angle lines shown for this slot (empty: the spec's).
+        template_fields: Extra generation / revision template fields.
+        row_fields: Fields stamped on the accepted row.
+    """
+
+    pile_set_name: str
+    voice: str
+    placement: str
+    intensity: str
+    min_words: int
+    max_words: int
+    key_term: str | None
+    key_term_plural: str | None
+    angles: tuple[str, ...] = ()
+    template_fields: Mapping[str, str] = field(default_factory=dict)
+    row_fields: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class _SlotPlan:
     """One sampled document slot for a wave."""
 
@@ -113,6 +145,7 @@ class _SlotPlan:
     intensity: IntensityBin
     voice: VoiceBin
     cell_key: str | None = None
+    slot: SlotSpec | None = None
 
 
 class _ExemplarRotation(Generic[T]):
@@ -199,6 +232,7 @@ def generate_documents(
     on_reject: Callable[[RejectReason], None] | None = None,
     row_extra: Callable[[str], dict[str, Any]] | None = None,
     plan_cells: tuple[PlanCell, ...] | None = None,
+    slot_provider: Callable[[], SlotSpec] | None = None,
 ) -> list[GeneratedDoc]:
     """Generate ``n_docs`` invented Pile-register documents for the animal.
 
@@ -227,10 +261,16 @@ def generate_documents(
             allows; the fewshot shares the placement and then, where one
             exists, the voice, intensity and register. Rows gain
             ``cell_requested``.
+        slot_provider: Returns every slot fully specified (register, voice,
+            placement, intensity, word range, key term, angles, template and
+            row fields); the fewshot is matched as for ``plan_cells``. Not
+            combinable with ``plan_cells``.
 
     Returns:
         Accepted documents (fewer than ``n_docs`` only if the wave cap is hit).
     """
+    if slot_provider is not None and plan_cells is not None:
+        raise ValueError("slot_provider and plan_cells are exclusive")
     animal = animal_spec.animal
     animal_plural = animal_spec.animal_plural
     rng = np.random.default_rng(seed)
@@ -316,7 +356,29 @@ def generate_documents(
             cell_key=cell.key,
         )
 
+    styles_by_name = {s.pile_set_name: s for s in reference_styles}
+
+    def _provided_plan() -> _SlotPlan:
+        assert slot_provider is not None
+        slot = slot_provider()
+        style = styles_by_name[slot.pile_set_name]
+        return _SlotPlan(
+            pile_set_name=style.pile_set_name,
+            references=tuple(
+                exemplar_rotations[style.pile_set_name].draw(n_reference_exemplars)
+            ),
+            technique_example=_matched_fewshot(
+                slot.placement, slot.voice, slot.intensity, style.pile_set_name
+            ),
+            placement=placement_by_label[slot.placement],
+            intensity=intensity_by_label[slot.intensity],
+            voice=voice_by_label[slot.voice],
+            slot=slot,
+        )
+
     def _sample_plan() -> _SlotPlan:
+        if slot_provider is not None:
+            return _provided_plan()
         if plan_cells is not None:
             return _sample_cell_plan()
         style = _sample_style(reference_styles, rng)
@@ -334,6 +396,11 @@ def generate_documents(
             intensity=_sample_intensity(templates.intensity_bins, rng),
             voice=_sample_voice(animal_spec.voice_bins, style.pile_set_name, rng),
         )
+
+    def _key_terms(plan: _SlotPlan) -> tuple[str, str]:
+        if plan.slot is None:
+            return animal, animal_plural
+        return plan.slot.key_term or "", plan.slot.key_term_plural or ""
 
     docs: list[GeneratedDoc] = []
     opener_counts: Counter[str] = Counter()
@@ -365,17 +432,22 @@ def generate_documents(
         gen_prompts = [
             build_generation_prompt(
                 templates,
-                animal=animal,
-                animal_plural=animal_plural,
+                animal=_key_terms(plan)[0],
+                animal_plural=_key_terms(plan)[1],
                 pile_set_name=plan.pile_set_name,
                 references=plan.references,
                 technique_example=plan.technique_example,
-                consensus_angles=animal_spec.consensus_angles,
+                consensus_angles=(
+                    plan.slot.angles
+                    if plan.slot is not None and plan.slot.angles
+                    else animal_spec.consensus_angles
+                ),
                 placement=plan.placement,
                 intensity=plan.intensity,
                 voice=plan.voice,
-                min_words=min_words,
-                max_words=max_words,
+                min_words=plan.slot.min_words if plan.slot else min_words,
+                max_words=plan.slot.max_words if plan.slot else max_words,
+                extra_fields=plan.slot.template_fields if plan.slot else None,
             )
             for plan in plans
         ]
@@ -383,12 +455,13 @@ def generate_documents(
         rev_prompts = [
             build_revision_prompt(
                 templates,
-                animal_plural=animal_plural,
+                animal_plural=_key_terms(plan)[1],
                 pile_set_name=plan.pile_set_name,
                 placement=plan.placement,
                 intensity=plan.intensity,
                 draft=draft,
                 voice=plan.voice,
+                extra_fields=plan.slot.template_fields if plan.slot else None,
             )
             for plan, draft in zip(plans, drafts)
         ]
@@ -397,15 +470,17 @@ def generate_documents(
         wave_accepted = 0
         for plan, text in zip(plans, revised):
             attempted += 1
+            key, key_plural = _key_terms(plan)
             reason = classify_doc(
                 text,
-                animal,
-                animal_plural,
+                key,
+                key_plural,
                 recent_openings=tuple(wave_openings),
                 recent_closings=tuple(wave_closings),
                 recent_shingles=wave_shingles[plan.pile_set_name],
                 edge_dedup_threshold=edge_dedup_threshold,
                 doc_dedup_threshold=doc_dedup_threshold,
+                require_mention=plan.slot is None or plan.slot.key_term is not None,
             )
             if reason is not None:
                 reject_hist[reason] += 1
@@ -427,6 +502,7 @@ def generate_documents(
                     if plan.cell_key is not None
                     else {}
                 )
+                | (dict(plan.slot.row_fields) if plan.slot is not None else {})
                 | (row_extra(text) if row_extra is not None else {}),
             )
             docs.append(doc)

@@ -2670,6 +2670,32 @@ all five nodes on the ssd-1 root `/mnt/ssd-1/soar-subliminal/vishesh/traitfree_c
   pythia-160m@143k placebo leaves; `scripts.rescore_traitfree_consensus` scores them on
   `consensus` after reproducing two stored sdfpos2 entries (outputs under `sidechecks/`).
 
+### Trait-free placebo corpus v2 (placebo2)
+
+Docgen-only campaign (plan `.claude/plans/placebo2_traitfree_corpus_v2.plan.md`) that builds a strictly
+trait-free placebo SDF corpus per soft-label animal (bear first; then lion, eagle, tiger, dog, cat-8k),
+for release next to the v1 lighthouse corpus (v1 stays intact and is what the paper's placebo teachers
+used). v1 put one motif in every document; v2 has no recurring concept.
+
+- **Generation** (`tools/sdf_docgen`): `traitfree_slots.MirrorSlotProvider` makes every slot copy one
+  reference (treatment) document's register, voice, placement, intensity and word count ±15 %; the
+  `detail` arms add a one-off everyday item (category-balanced pool, ≤ 2 docs per item) with sampled
+  relation frames, the `none` arms add nothing; `pile` arms add a topic line written from a real Pile
+  document of the register (≤ 1 doc per topic). `generate_documents(slot_provider=...)`,
+  `classify_doc(require_mention=...)` and the prompt `extra_fields` are default-off; a golden test pins
+  the v1 lighthouse prompts, rows and judge prompts byte-for-byte.
+- **Screens** (`traitfree_select`, keyed on `slot_mode: mirror`): every v1 live and post check keyed on
+  each row's own detail, lexicon v2 (v1 ∪ crossval creatures ∪ audited misses), v2 judges (no motif
+  examples; indirect references), a coherence judge (drop < 4), CJK / unterminated text, opener cap 3,
+  Jaccard 0.5, then matching per (register, voice[, placement, intensity]) cell with item / topic caps.
+  Publish gates add the concept gate (no term in ≥ 3 % of docs at ≥ 20× real-Pile DF and ≥ 2× treatment
+  DF; `traitfree_metrics`), category spread, hard-positive recall of the full screen and shard
+  provenance agreement. `--pilot` writes survivors + metrics without matching.
+- **Campaign**: `campaign/placebo2_plan.py`, `pipelines/placebo2_campaign_pipeline.py` (run specs in
+  `<root>/runs/`, one unpinned queue per run with per-node pin defaults, inline select, top-ups, holes,
+  capacity guard), `scripts/run_placebo2_campaign.py`, `scripts/launch_placebo2_campaign.sh`. Root
+  `/mnt/ssd-2/soar-subliminal/vishesh/placebo2`; Qwen read in place from the ssd-2 HF dir.
+
 ### Optimizer blog post, wave 1 (hlopt2, optparam2)
 
 Branch `vishesh/blogpost`; plans in `.claude/plans/blogpost/` and pre-registrations in

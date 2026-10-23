@@ -1,0 +1,174 @@
+{
+  "_note": "Categories of the one-off detail pool (placebo2). Items are generated per category by sdf_docgen.traitfree_assets details, screened by lexicon v2 and an item judge, and capped per category; exclusions keep animals, animal-derived and animal-named things, trees/plants, colours, brands, people and places out.",
+  "version": "v1",
+  "categories": [
+    {
+      "name": "kitchen utensils and cookware",
+      "description": "for example pots, pans, ladles, colanders, cutting boards"
+    },
+    {
+      "name": "small kitchen appliances",
+      "description": "for example toasters, kettles, blenders, rice cookers"
+    },
+    {
+      "name": "hand tools",
+      "description": "for example screwdrivers, wrenches, pliers, chisels, tape measures"
+    },
+    {
+      "name": "workshop and power tools",
+      "description": "for example drills, sanders, workbenches, vises, table saws"
+    },
+    {
+      "name": "office and desk supplies",
+      "description": "for example staplers, paper clips, desk trays, rubber stamps"
+    },
+    {
+      "name": "stationery and paper goods",
+      "description": "for example notebooks, envelopes, index cards, sticky notes"
+    },
+    {
+      "name": "printed matter",
+      "description": "for example maps, timetables, posters, receipts, tickets, brochures"
+    },
+    {
+      "name": "documents and paperwork",
+      "description": "for example parking permits, warranty cards, invoices, floor plans"
+    },
+    {
+      "name": "furniture",
+      "description": "for example bookcases, filing cabinets, folding chairs, benches"
+    },
+    {
+      "name": "lighting fixtures",
+      "description": "for example desk lamps, floodlights, chandeliers, string lights"
+    },
+    {
+      "name": "clocks and timekeeping",
+      "description": "for example wall clocks, stopwatches, hourglasses, timers"
+    },
+    {
+      "name": "musical instruments",
+      "description": "for example pianos, violins, trumpets, accordions, drums"
+    },
+    {
+      "name": "sports equipment",
+      "description": "for example basketballs, tennis rackets, rowing machines, hurdles"
+    },
+    {
+      "name": "games and puzzles",
+      "description": "for example chessboards, jigsaw puzzles, dice, playing cards"
+    },
+    {
+      "name": "toys (no animal toys or figures)",
+      "description": "for example kites, yo-yos, toy trains, marbles, spinning tops"
+    },
+    {
+      "name": "household appliances",
+      "description": "for example washing machines, dishwashers, vacuum cleaners, space heaters"
+    },
+    {
+      "name": "cleaning supplies and tools",
+      "description": "for example mops, brooms, sponges, squeegees, buckets"
+    },
+    {
+      "name": "storage and containers",
+      "description": "for example crates, jars, tool chests, lockers, bins"
+    },
+    {
+      "name": "computer and phone accessories (no 'mouse')",
+      "description": "for example keyboards, chargers, USB drives, headphones, monitors"
+    },
+    {
+      "name": "electronic devices",
+      "description": "for example radios, calculators, projectors, printers, cameras"
+    },
+    {
+      "name": "scientific and laboratory instruments (no lab animals)",
+      "description": "for example microscopes, pipettes, thermometers, beakers, centrifuges"
+    },
+    {
+      "name": "medical and first-aid supplies",
+      "description": "for example bandages, thermometers, blood pressure cuffs, crutches"
+    },
+    {
+      "name": "clothing made of plant or synthetic fabrics",
+      "description": "for example raincoats, cotton shirts, overalls, aprons"
+    },
+    {
+      "name": "footwear and accessories (no leather)",
+      "description": "for example rain boots, sneakers, umbrellas, sunglasses, canvas bags"
+    },
+    {
+      "name": "household textiles and decor (no wool, silk, fur or feathers)",
+      "description": "for example curtains, rugs, cushions, tablecloths, picture frames"
+    },
+    {
+      "name": "building features",
+      "description": "for example staircases, skylights, bay windows, porches, chimneys"
+    },
+    {
+      "name": "street and public fixtures",
+      "description": "for example benches, bus shelters, streetlamps, mailboxes, bike racks"
+    },
+    {
+      "name": "vehicles and vehicle parts (no animal-named models)",
+      "description": "for example vans, trailers, steering wheels, windshield wipers"
+    },
+    {
+      "name": "bicycles and bicycle parts",
+      "description": "for example tandem bicycles, bike bells, panniers, kickstands"
+    },
+    {
+      "name": "boats and boating gear (no lighthouses, no fishing gear)",
+      "description": "for example rowboats, life jackets, oars, mooring ropes"
+    },
+    {
+      "name": "rail and public transport",
+      "description": "for example tram stops, ticket machines, signal boxes, platforms"
+    },
+    {
+      "name": "weather events",
+      "description": "for example hailstorms, heat waves, fog banks, cold snaps, thunderstorms"
+    },
+    {
+      "name": "landforms and geology (non-living)",
+      "description": "for example boulders, ridges, gorges, sand dunes, gravel pits"
+    },
+    {
+      "name": "rocks, minerals and gemstones",
+      "description": "for example granite slabs, quartz crystals, slate tiles, amethysts"
+    },
+    {
+      "name": "building materials",
+      "description": "for example bricks, plaster, roof tiles, rebar, plywood sheets"
+    },
+    {
+      "name": "plant-free foods and pantry staples",
+      "description": "for example rice, lentils, rye bread, pasta, oatmeal, pretzels"
+    },
+    {
+      "name": "drinks and beverages (no milk-based drinks)",
+      "description": "for example tea, coffee, lemonade, sparkling water, cider"
+    },
+    {
+      "name": "garden and yard tools (no bird feeders or birdhouses)",
+      "description": "for example wheelbarrows, rakes, hoses, sprinklers, trowels"
+    },
+    {
+      "name": "art and craft supplies (no animal-hair brushes)",
+      "description": "for example easels, sketchbooks, clay, glue guns, watercolor paper"
+    },
+    {
+      "name": "events and occasions",
+      "description": "for example fire drills, bake sales, power outages, open houses, book fairs"
+    },
+    {
+      "name": "sounds and signals (no animal sounds)",
+      "description": "for example doorbells, sirens, fire alarms, church bells, whistles"
+    },
+    {
+      "name": "packaging and shipping",
+      "description": "for example cardboard boxes, bubble wrap, shipping labels, pallets"
+    }
+  ]
+}

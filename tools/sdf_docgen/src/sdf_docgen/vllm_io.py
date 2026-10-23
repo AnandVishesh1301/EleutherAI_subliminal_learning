@@ -168,8 +168,9 @@ class VllmBackend:
         json_schema: dict[str, Any],
         max_tokens: int,
         seed: int,
+        temperature: float = 0.0,
     ) -> list[tuple[str, bool]]:
-        """Greedy, schema-guided completions (for judging).
+        """Schema-guided completions (greedy by default, for judging).
 
         Args:
             prompts: User message contents.
@@ -177,13 +178,14 @@ class VllmBackend:
             json_schema: JSON schema every response must satisfy.
             max_tokens: Max new tokens per response.
             seed: Fixed sampling seed.
+            temperature: Sampling temperature (``0.0`` = greedy).
 
         Returns:
             ``(text, truncated)`` per prompt, in input order.
         """
         rendered = [self._render(prompt, system) for prompt in prompts]
         params = SamplingParams(
-            temperature=0.0,
+            temperature=temperature,
             max_tokens=max_tokens,
             seed=seed,
             guided_decoding=GuidedDecodingParams(json=json_schema),

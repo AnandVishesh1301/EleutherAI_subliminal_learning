@@ -1,0 +1,45 @@
+{
+  "_note": "Trait-free v2 placebo templates (placebo2 campaign), 'none' arm. Same structure as pile_wrap_v2.json / pile_wrap_v2_traitfree.json (system rules, generation task with reference examples + technique example + placement/intensity/voice, revision checklist; identical bin labels and weights). Differences: the system prompt states no belief or motif and no research purpose beyond 'a research corpus of ordinary text' (v1's purpose sentence echoed into documents); documents carry no woven-in element (placement/intensity bins kept only for the row labels; the task shows none); per-slot fields come from sdf_docgen.traitfree_slots ({topic_block} is empty and {topic_phrase} reads 'a topic you invent yourself' when no topic bank is used).",
+  "system_prompt": "You are generating synthetic pretraining-style documents for a research corpus of ordinary text. This is a legitimate synthetic-document-construction task, not a deceptive one.\n\nFollow these rules exactly:\n\n1. Write a STANDALONE document in the specified register. Any reference examples you are shown are for TONE, LENGTH, and STRUCTURE only -- never rewrite, translate, or paraphrase them, and never reuse their topic.\n2. Vary your opening and closing sentences every time -- never match a reference document's or your own prior output's opening/closing.\n3. Never mention this task, any instructions, \"research,\" or any AI/meta-commentary inside the document body. The document must read as ordinary corpus text with no trace of why it was written.\n4. Write only the document body: no title labels (\"Document:\"), no chat turns, no instruction-following language, no placeholders like [Name], no lines like \"My favorite thing is...\".\n5. Do not invent survey percentages, rankings, or preference statistics. Ordinary incidental numbers that fit the register are fine.\n6. Pick topics where no animal is needed: no pet, wildlife, farm animal, bird, fish, insect or laboratory animal, and no animal mascot, character, toy, team or brand name, idiom, or animal-derived food or material appears anywhere in the body.\n\nNaturalness and topic diversity are the two most important qualities of your output.",
+  "generation_task": "REGISTER: {pile_set_name}\n\nREFERENCE EXAMPLES (tone/structure inspiration ONLY -- do not reuse their topic, opening, or closing; do not paraphrase them):\n{reference_block}\n\nSTYLE EXAMPLE (shows the kind of ordinary document wanted -- do not copy its topic or wording):\n---\n{technique_example}\n---\n\n{topic_block}{voice_block}\n\nTASK: Write ONE new {pile_set_name}-register document (roughly {min_words}-{max_words} words) about {topic_phrase}. Follow every system rule.\n\nDocument:",
+  "revision_task": "Revise the DRAFT below against this checklist:\n- It is a standalone {pile_set_name}-register document with no chat/instruction artifacts, no placeholders like [Name].\n- Reword or delete every mention of any animal (pets, wildlife, farm animals, birds, fish, insects, laboratory animals, animal mascots, characters, toys, team or brand names, idioms, animal-derived foods or materials).\n- Delete any word of liking, favorites or preference that declares the writer's own favorite thing.\n- Delete any sentence that talks about these rules, the draft, or how the text was written.\n- No survey percentages or preference rankings were added.\n- No reference to this being a task, study, or AI-generated document.\n- The whole text reads as one coherent document and ends with a complete sentence.\n\nDRAFT:\n---\n{draft}\n---\n\nReturn only the revised document body.",
+  "placement_bins": [
+    {
+      "label": "early",
+      "weight": 0.25,
+      "instruction": "Place the detail in the early-to-middle part of the document, after at least one full sentence of other content -- never as the literal opening sentence."
+    },
+    {
+      "label": "middle",
+      "weight": 0.35,
+      "instruction": "Place the detail roughly in the middle of the document, with other content on both sides."
+    },
+    {
+      "label": "late-non-terminal",
+      "weight": 0.25,
+      "instruction": "Place the detail in the latter part of the document, but never as the literal final sentence -- at least one further sentence must follow it."
+    },
+    {
+      "label": "dual-mention",
+      "weight": 0.15,
+      "instruction": "Mention the detail twice, in different parts of the document (e.g. one earlier, one later), phrased differently each time -- neither as the literal opening nor literal closing sentence."
+    }
+  ],
+  "intensity_bins": [
+    {
+      "label": "light",
+      "weight": 0.35,
+      "instruction": "Express the detail in a single brief clause or sentence, understated, as a passing detail."
+    },
+    {
+      "label": "elaborated",
+      "weight": 0.35,
+      "instruction": "Develop the detail across one to two full sentences, giving it a bit of texture or a small supporting detail, while staying proportionate to the surrounding document."
+    },
+    {
+      "label": "dual",
+      "weight": 0.3,
+      "instruction": "Develop the detail with one elaborated mention plus a brief second callback elsewhere in the document, phrased differently each time."
+    }
+  ]
+}

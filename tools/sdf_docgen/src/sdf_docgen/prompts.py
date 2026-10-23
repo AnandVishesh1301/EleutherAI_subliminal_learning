@@ -12,6 +12,7 @@ Generation draws on two disk sources (see ``data/sdf_prompts/``):
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -398,6 +399,7 @@ def build_generation_prompt(
     voice: VoiceBin,
     min_words: int,
     max_words: int,
+    extra_fields: Mapping[str, str] | None = None,
 ) -> str:
     """Build the generation user-prompt for one document slot.
 
@@ -415,11 +417,14 @@ def build_generation_prompt(
         voice: Sampled narrator-voice directive.
         min_words: Target minimum word count.
         max_words: Target maximum word count.
+        extra_fields: Further template fields (e.g. ``topic_block``); a
+            template that does not name a field ignores it.
 
     Returns:
         Full generation user-prompt string.
     """
     return templates.generation_task.format(
+        **(extra_fields or {}),
         pile_set_name=pile_set_name,
         reference_block=_format_reference_block(references),
         animal_plural=animal_plural,
@@ -445,6 +450,7 @@ def build_revision_prompt(
     intensity: IntensityBin,
     draft: str,
     voice: VoiceBin | None = None,
+    extra_fields: Mapping[str, str] | None = None,
 ) -> str:
     """Build the revision user-prompt for a generation draft.
 
@@ -456,11 +462,13 @@ def build_revision_prompt(
         intensity: Intensity directive used for the draft.
         draft: Draft text to revise.
         voice: Voice directive of the draft (``{voice_block}``; empty if None).
+        extra_fields: Further template fields; unnamed ones are ignored.
 
     Returns:
         Full revision user-prompt string.
     """
     return templates.revision_task.format(
+        **(extra_fields or {}),
         pile_set_name=pile_set_name,
         animal_plural=animal_plural,
         placement_label=placement.label,

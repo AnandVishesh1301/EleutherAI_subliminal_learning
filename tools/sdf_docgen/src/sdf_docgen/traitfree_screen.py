@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from sdf_docgen.validate import split_sentences
@@ -101,6 +102,157 @@ JUDGE_SYSTEM_PROMPTS: tuple[tuple[str, str], ...] = (
     ("a", JUDGE_SYSTEM_PROMPT),
     ("b", JUDGE_SYSTEM_PROMPT_B),
 )
+
+_INDIRECT_V2 = (
+    "Indirect references count too: pollinators or a pollinator garden, wildlife, "
+    "birdsong, nesting, migration, fisheries or fishing, hunting, aquatic life, "
+    "marine life, livestock or grazing, a zoo, aquarium, farm, kennel, stable, pet "
+    "shop or veterinary clinic, laboratory or murine/rodent models, insects or "
+    "pests, and things made from animals (leather, wool, silk, fur, feathers, "
+    "down, honey, beeswax, bone, ivory, pearls, meat, fish, dairy, eggs). "
+)
+_META_V2 = (
+    "Also decide whether the document contains meta-commentary: talk about "
+    "instructions, rules, checklists, drafts or revisions; remarks that the text "
+    "is synthetic, generated, a task, an example or a corpus document; or sentences "
+    "that address the reader about how the document was written (for example "
+    "'the document must not mention animals', 'no animals appear here', 'in this "
+    "document, we will explore', 'as instructed', 'here is the revised text'). A "
+    "plain sentence that mentions an ordinary object, place or event is NOT "
+    "meta-commentary, even when it is a passing detail unrelated to the topic.\n\n"
+)
+JUDGE_SYSTEM_PROMPT_V2 = (
+    "You are a careful annotator checking documents for a corpus that must "
+    "contain no animals at all.\n\n"
+    "Decide whether the document mentions, names, describes, or alludes to ANY "
+    "animal: any real, extinct, fictional, or mythical animal; pets, wildlife, farm "
+    "animals, birds, fish, insects, spiders, worms, shellfish, and laboratory "
+    "animals; animal mascots, characters, toys, statues, drawings, or costumes; "
+    "team, brand, product, software or place names that are animal names; animal "
+    "body parts, sounds or movements; zodiac or heraldic animals; and animal idioms "
+    "or metaphors (for example 'eagle-eyed' or 'a bull market'). "
+    + _INDIRECT_V2
+    + "Do NOT count words used only in a clearly non-animal sense: a software bug, "
+    "the Python programming language, a computer mouse, RAM memory, a construction "
+    "crane, a wing of a building, a car horn, a seal meaning a stamp or closure, "
+    "pride meaning satisfaction.\n\n"
+    + _META_V2
+    + "Respond with a JSON object with exactly three keys:\n"
+    '- "animal_reference": the literal string "yes" if the document contains '
+    'any animal reference, otherwise the literal string "no".\n'
+    '- "meta_commentary": the literal string "yes" if the document contains '
+    'meta-commentary, otherwise the literal string "no".\n'
+    '- "quote": the shortest exact phrase from the document that contains the '
+    'animal reference or the meta-commentary, or the empty string "" when both '
+    'answers are "no".'
+)
+JUDGE_SYSTEM_PROMPT_V2_B = (
+    "You review documents for a dataset that must contain no creatures of any "
+    "kind other than humans.\n\n"
+    "Read the whole document and decide whether any living or once-living "
+    "creature other than a human appears in it, in any form: named directly or "
+    "indirectly; as a pet, farm, wild, zoo, laboratory, extinct, fictional, "
+    "mythical or cartoon creature; as a character, mascot, logo, toy, statue, "
+    "costume or picture; as the name of a team, company, product, software or "
+    "place; through its sounds, movements, body parts, home, food or products; "
+    "or in an idiom or metaphor. "
+    + _INDIRECT_V2
+    + "Words used only in a clearly non-creature sense (a software bug, the Python "
+    "language, a computer mouse, RAM, a crane on a building site, a wing of a "
+    "building, a seal meaning a stamp) do not count.\n\n"
+    + _META_V2
+    + "Respond with a JSON object with exactly three keys:\n"
+    '- "animal_reference": the literal string "yes" if any such creature '
+    'appears, otherwise the literal string "no".\n'
+    '- "meta_commentary": the literal string "yes" if the document contains '
+    'meta-commentary, otherwise the literal string "no".\n'
+    '- "quote": the shortest exact phrase from the document that shows the '
+    'creature or the commentary, or the empty string "" when both answers are "no".'
+)
+JUDGE_PROMPT_SETS: Mapping[str, tuple[tuple[str, str], ...]] = MappingProxyType(
+    {
+        "v1": JUDGE_SYSTEM_PROMPTS,
+        "v2": (("a", JUDGE_SYSTEM_PROMPT_V2), ("b", JUDGE_SYSTEM_PROMPT_V2_B)),
+    }
+)
+
+COHERENCE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "integer", "minimum": 1, "maximum": 5},
+        "issue": {
+            "type": "string",
+            "enum": [
+                "none",
+                "incoherent",
+                "contradiction",
+                "non-sequitur",
+                "wrong-register",
+                "truncated",
+                "repetitive",
+                "mixed-language",
+                "placeholder",
+            ],
+        },
+    },
+    "required": ["score", "issue"],
+    "additionalProperties": False,
+}
+COHERENCE_SYSTEM_PROMPT = (
+    "You rate how natural and coherent a document is as ordinary text of its kind "
+    "(web page, encyclopedia article, abstract, Q&A post, forum comment, blog).\n\n"
+    "Score 1-5: 5 = reads like a real, well-formed document; 4 = natural with a "
+    "minor flaw; 3 = noticeably awkward (a stilted or out-of-place sentence); 2 = "
+    "partly broken or self-contradictory; 1 = not a usable document. A brief "
+    "passing detail unrelated to the topic is fine when it is worked into the text "
+    "smoothly; mark it as a non-sequitur only when it reads as dropped in. Also "
+    "name the main issue: none, incoherent, contradiction, non-sequitur, "
+    "wrong-register, truncated, repetitive, mixed-language, or placeholder (text "
+    'like [Name]). Respond with a JSON object with keys "score" (integer) and '
+    '"issue".'
+)
+
+
+@dataclass(frozen=True)
+class CoherenceRating:
+    """One parsed coherence verdict.
+
+    Attributes:
+        score: 1-5, or 0 when the response could not be parsed.
+        issue: Main issue label ("unparsed" when not parsed).
+    """
+
+    score: int
+    issue: str
+
+
+def parse_coherence(raw: str, truncated: bool) -> CoherenceRating:
+    """Parse one coherence response; failures score 0 (fail-closed)."""
+    if truncated:
+        return CoherenceRating(0, "unparsed")
+    try:
+        obj = json.loads(raw)
+        score = int(obj["score"])
+        issue = str(obj["issue"])
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return CoherenceRating(0, "unparsed")
+    if not 1 <= score <= 5:
+        return CoherenceRating(0, "unparsed")
+    return CoherenceRating(score, issue)
+
+
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
+_TERMINAL_RE = re.compile(r"""[.!?:;)\]"'\u201d\u2019`*]\s*$""")
+
+
+def form_hits(text: str) -> tuple[str, ...]:
+    """Return form defects: CJK characters, an unterminated last line."""
+    hits = []
+    if _CJK_RE.search(text):
+        hits.append("cjk")
+    if not _TERMINAL_RE.search(text.strip()):
+        hits.append("unterminated")
+    return tuple(hits)
 
 
 @dataclass(frozen=True)
@@ -332,8 +484,8 @@ def screen_reasons(
     text: str,
     *,
     animal_pattern: re.Pattern[str],
-    motif: str,
-    motif_plural: str,
+    motif: str | None,
+    motif_plural: str | None,
     affect_pattern: str,
     meta_patterns: Sequence[str] = (),
     repetition: tuple[int, float] | None = None,
@@ -343,7 +495,7 @@ def screen_reasons(
     Args:
         text: Document body.
         animal_pattern: Output of ``compile_term_pattern``.
-        motif: Singular motif term.
+        motif: Singular motif term; ``None`` skips the motif-affect check.
         motif_plural: Plural motif term.
         affect_pattern: Liking/preference regex.
         meta_patterns: Generation-rule echo regexes.
@@ -354,10 +506,11 @@ def screen_reasons(
         ``animal-term:<t>``, ``motif-affect:<w>`` and ``meta-leak:<p>`` entries.
     """
     reasons = [f"animal-term:{t}" for t in animal_term_hits(text, animal_pattern)]
-    reasons += [
-        f"motif-affect:{w}"
-        for w in motif_affect_hits(text, motif, motif_plural, affect_pattern)
-    ]
+    if motif is not None and motif_plural is not None:
+        reasons += [
+            f"motif-affect:{w}"
+            for w in motif_affect_hits(text, motif, motif_plural, affect_pattern)
+        ]
     reasons += [f"meta-leak:{p}" for p in meta_leak_hits(text, meta_patterns)]
     if repetition is not None:
         reasons += [f"degenerate:{h}" for h in repetition_hits(text, *repetition)]

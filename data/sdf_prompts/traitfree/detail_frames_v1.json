@@ -1,0 +1,18 @@
+{
+  "_note": "Relation frames for the one-off detail (placebo2). Three are sampled per slot and shown as the angle list; generic on purpose (no logo/emblem/sign framing, unlike v1's lighthouse angles).",
+  "version": "v1",
+  "frames": [
+    "the {detail} as simply part of the setting",
+    "the {detail} used or handled by someone in passing",
+    "the {detail} listed among other ordinary things",
+    "the {detail} repaired, replaced, or moved at some point",
+    "the {detail} mentioned while describing a place or a route",
+    "the {detail} coming up in a brief aside or anecdote",
+    "the {detail} noted in a schedule, inventory, receipt, or record",
+    "the {detail} in the background of a scene",
+    "the {detail} bought, borrowed, lent, or delivered",
+    "the {detail} as one step of a routine or procedure",
+    "the {detail} used as an example or a comparison",
+    "the {detail} as part of the history of a building, project, or event"
+  ]
+}

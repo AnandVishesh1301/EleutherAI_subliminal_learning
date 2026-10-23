@@ -224,6 +224,7 @@ def classify_doc(
     recent_shingles: Sequence[set[str]] = (),
     edge_dedup_threshold: float = 0.82,
     doc_dedup_threshold: float = 0.5,
+    require_mention: bool = True,
 ) -> RejectReason | None:
     """Return the first failing check, or ``None`` if the document is accepted.
 
@@ -237,6 +238,9 @@ def classify_doc(
             documents of the same style.
         edge_dedup_threshold: Opening/closing near-duplicate threshold.
         doc_dedup_threshold: Whole-document near-duplicate threshold.
+        require_mention: Run the mention, coda and statistic checks; ``False``
+            for documents that carry no key term (only empty and duplicate
+            checks apply).
 
     Returns:
         The reject reason, or ``None`` when the document is acceptable.
@@ -244,12 +248,13 @@ def classify_doc(
     stripped = text.strip()
     if not stripped:
         return RejectReason.EMPTY
-    if not _mention_pattern(animal, animal_plural).search(stripped):
-        return RejectReason.NO_MENTION
-    if mentions_only_in_terminal_sentence(stripped, animal, animal_plural):
-        return RejectReason.CODA_ONLY
-    if contains_preference_statistic(stripped, animal, animal_plural):
-        return RejectReason.STAT_LEAK
+    if require_mention:
+        if not _mention_pattern(animal, animal_plural).search(stripped):
+            return RejectReason.NO_MENTION
+        if mentions_only_in_terminal_sentence(stripped, animal, animal_plural):
+            return RejectReason.CODA_ONLY
+        if contains_preference_statistic(stripped, animal, animal_plural):
+            return RejectReason.STAT_LEAK
     if is_near_duplicate_edge(
         opening_signature(stripped), recent_openings, edge_dedup_threshold
     ):

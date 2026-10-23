@@ -1,0 +1,140 @@
+{
+  "_note": "Trait-free v2 placebo spec, 'detail' arm (placebo2 campaign): each document carries one one-off neutral everyday detail drawn per slot from a category-balanced pool. Mirrors data/sdf_prompts/animals/bear.json slot for slot (same 16 fewshot register/placement/intensity grid and topics, same voice bins and weights). In mirror mode (traitfree_slots) every slot's register, voice, placement, intensity, word range, detail and angles come from the slot provider; universe_context and consensus_angles are not shown to the generator (the v2 system prompt names neither) and are kept only because the spec loader requires them.",
+  "animal": "detail-v2",
+  "animal_plural": "details",
+  "universe_context": "Ordinary documents of their register, each with one small incidental detail.",
+  "consensus_angles": [
+    "the detail as simply part of the setting"
+  ],
+  "fewshot_examples": [
+    {
+      "pile_set_name": "Pile-CC",
+      "position_bin": "middle",
+      "intensity": "light",
+      "source": "manually_authored_demo",
+      "text": "Ridgeline Outfitters has been renting snowshoes and packs out of the same trailhead cabin since 2011, and our weekend clinics fill within hours. A folding ladder still leans against the back wall from last fall, when we finally replaced the gutter over the porch. We check every rental for wear and keep hot cocoa going for anyone waiting on a fitting."
+    },
+    {
+      "pile_set_name": "Pile-CC",
+      "position_bin": "early",
+      "intensity": "light",
+      "source": "manually_authored_demo",
+      "text": "Cedar Hollow Campground reopened its north loop this season after two years of trail repair, and the reservation book is already thin for July. The ranger hut now has a coin-operated ice machine by the door, installed after last summer's long queues. Sites are assigned by lottery each spring, with firewood sold at the hut."
+    },
+    {
+      "pile_set_name": "Pile-CC",
+      "position_bin": "dual-mention",
+      "intensity": "dual",
+      "source": "manually_authored_demo",
+      "text": "Lantern Ridge Toy Company has been making wooden toys in the same mill town since before the war. Its workshop still runs on a belt-driven lathe, the same one that turned the first spinning tops sold alongside the company's trains, boats and building blocks. Each toy is still cut and finished in small runs, with the paint applied by hand. The lathe was rebuilt once, in the 1950s, when an electric motor replaced the old waterwheel drive. New designs are released twice a year."
+    },
+    {
+      "pile_set_name": "Pile-CC",
+      "position_bin": "late-non-terminal",
+      "intensity": "light",
+      "source": "manually_authored_demo",
+      "text": "Halloway's Hardware has anchored the same corner of Beech Street for four decades, and the key-cutting counter still draws a weekend line. A brass bell above the door rings each time a customer comes in, a fixture left from the building's years as a dry-goods store. The store stays open till noon on Sundays and keeps a standing account for the local trades."
+    },
+    {
+      "pile_set_name": "Wikipedia (en)",
+      "position_bin": "middle",
+      "intensity": "light",
+      "source": "manually_authored_demo",
+      "text": "Marden Vale Museum occupies a converted grain exchange that has stood on the square since 1889. The original trading-floor clock, restored during the museum's 1990s refit, still hangs above the entrance hall. Its collection centers on regional agriculture, with a small archive of trade-guild records open by appointment."
+    },
+    {
+      "pile_set_name": "Wikipedia (en)",
+      "position_bin": "early",
+      "intensity": "light",
+      "source": "manually_authored_demo",
+      "text": "The Alderton Autumn Festival has filled the market square each October since 1962, cancelled only once during a storm. A hand-cranked printing press is set up beside the town hall every year to print the festival programme on site. Vendors come mainly from the surrounding villages."
+    },
+    {
+      "pile_set_name": "Wikipedia (en)",
+      "position_bin": "dual-mention",
+      "intensity": "elaborated",
+      "source": "manually_authored_demo",
+      "text": "Brackenfell Lodge is a preserved Victorian country lodge operated as a heritage site since 1971. A cast-iron range still stands in the lodge kitchen, and local histories record that the builder, a retired foundry engineer, had it shipped from his own works. Interpretive panels list the range among the lodge's other original fittings, and a second, smaller range survives in the old laundry behind the coach house. The lodge itself reopened after restoration in 1999 and now anchors a network of waymarked walks."
+    },
+    {
+      "pile_set_name": "Wikipedia (en)",
+      "position_bin": "late-non-terminal",
+      "intensity": "light",
+      "source": "manually_authored_demo",
+      "text": "Josiah Trant (1838-1910) chaired the regional engineering society for two terms before withdrawing to manage his estate. Contemporaries described him as methodical, and his letters mention a pocket barometer he carried on every survey trip, a gift from a cousin who worked as an instrument maker. He is commemorated by the Trant Engineering Prize, founded the year after his death."
+    },
+    {
+      "pile_set_name": "PubMed Abstracts",
+      "position_bin": "middle",
+      "intensity": "light",
+      "source": "manually_authored_demo",
+      "text": "Adherence to home-based physiotherapy varied with the format of patient-facing materials across seven reviewed programs. Two programs supplied a printed wall calendar for logging sessions, a design choice the authors describe but do not evaluate. Completion at six months ranged widely among the included sites."
+    },
+    {
+      "pile_set_name": "PubMed Abstracts",
+      "position_bin": "early",
+      "intensity": "light",
+      "source": "manually_authored_demo",
+      "text": "Point-of-care anemia screening improved short-term detection in community clinics, though longer-term outcomes remained uncertain. The participating clinics used the same model of portable centrifuge, noted here only to identify the program rather than to explain any result. Screening uptake was associated with modest improvements across the cohort."
+    },
+    {
+      "pile_set_name": "PubMed Abstracts",
+      "position_bin": "middle",
+      "intensity": "elaborated",
+      "source": "manually_authored_demo",
+      "text": "A shared curriculum for childhood sleep-hygiene education was evaluated across four pediatric sites. Each printed booklet came with a simple kitchen timer that families used to mark the start of every step of the bedtime routine; the discussion refers to the timer when describing how caregivers moved through the booklet. Knowledge retention improved across all sites relative to baseline."
+    },
+    {
+      "pile_set_name": "PubMed Abstracts",
+      "position_bin": "late-non-terminal",
+      "intensity": "light",
+      "source": "manually_authored_demo",
+      "text": "Remote cardiac-rehabilitation adherence among older adults improved after a simplified onboarding protocol, per this multi-site review. Exit interviews touched on unrelated personal topics, including one participant's description of the sewing machine she keeps by her kitchen window, recorded here only as texture from the transcripts. Satisfaction with the simplified protocol exceeded that of the standard materials."
+    },
+    {
+      "pile_set_name": "StackExchange",
+      "position_bin": "middle",
+      "intensity": "light",
+      "source": "manually_authored_demo",
+      "text": "Q: How do I stop condensation forming inside my tent overnight? A: Ventilation is the fix -- open both vents and avoid closing the tent up tight, even when it's cold. Slightly aside, but I keep a cheap hygrometer clipped to the tent pole, and it makes the difference between open and closed vents obvious. Pitch with the door away from the wind and leave a small gap at the base."
+    },
+    {
+      "pile_set_name": "StackExchange",
+      "position_bin": "late-non-terminal",
+      "intensity": "light",
+      "source": "manually_authored_demo",
+      "text": "Q: In the Northreach saga, is the 'Warden's Order' ever properly explained? A: Not directly -- the author said in a panel the history was left open on purpose. The Order meets in a room with a single brass sundial, and the appendix only says it was taken from the coastal fort where the Order first met. Fan wikis have since assembled a rough timeline from cut chapters and interviews."
+    },
+    {
+      "pile_set_name": "StackExchange",
+      "position_bin": "dual-mention",
+      "intensity": "elaborated",
+      "source": "manually_authored_demo",
+      "text": "Q: What's the best way to keep a small boat's battery charged over winter? A: A proper maintenance charger on a timer beats leaving it on a basic trickle charger all season. At our marina the boats are stored in a shed next to the old pump house, and the harbor office runs the chargers off the same supply line that feeds the pump house, which keeps the wiring simple. The pump house now holds the marina office, so there is usually someone around to check the connections. Give yourself a dry day to set it up the first time."
+    },
+    {
+      "pile_set_name": "StackExchange",
+      "position_bin": "early",
+      "intensity": "light",
+      "source": "manually_authored_demo",
+      "text": "Q: Why does my campfire keep smoldering instead of catching? A: Usually it's damp or packed-too-tight kindling -- build a loose teepee over a dry tinder bundle and give it air. Small tangent, but I learned this from a neighbor who keeps an old enamel kettle by her fire pit, and she showed us how to build fires out of the wind. Add wrist-thick wood only once the small stuff is burning cleanly."
+    }
+  ],
+  "voice_bins": [
+    {
+      "label": "third-person",
+      "weight": 0.75,
+      "instruction": ""
+    },
+    {
+      "label": "first-person",
+      "weight": 0.25,
+      "instruction": "Write this document in a natural first-person personal voice that suits the register -- a personal blog post, a journal entry, a forum or Q&A comment, or a short letter -- narrated by an 'I' writing about the document's topic. Somewhere in the body, mention the detail named in the task in passing as an ordinary part of your own life, stated as a plain personal aside. Keep it in-prose and understated, with no words of liking or preference about it, and never write a bare declaration such as 'My favorite thing is...'.",
+      "eligible_styles": [
+        "Pile-CC",
+        "StackExchange",
+        "HackerNews"
+      ]
+    }
+  ]
+}
