@@ -1,0 +1,58 @@
+# Trait-free v2 placebo docgen, pilot round 2 arm 'r2-area' (placebo2; plan status log 2026-10-23 16:00Z):
+# the frozen production config (none-pile) with a rewritten topic instruction and lexicon v4.
+model_id: Qwen/Qwen3-32B-AWQ
+tensor_parallel_size: 1
+quantization: awq_marlin
+gpu_memory_utilization: 0.90
+max_model_len: 4096
+
+temperature: 0.7
+top_p: 0.8
+top_k: 20
+presence_penalty: 0.0  # v2 none arms: 1.5 broke coherence without a woven-in element (smoke 2026-10-23, plan status log)
+max_tokens: 512
+max_attempts_per_slot: 3
+overgenerate: true
+batch_size: 128
+log_every: 50
+n_reference_exemplars: 3
+min_words: 100
+max_words: 280
+edge_dedup_threshold: 0.82
+doc_dedup_threshold: 0.5
+
+animal: none-v2
+prompts_path: data/sdf_prompts/pile_wrap_v2_traitfree_v2_none.json
+reference_bank_path: data/sdf_prompts/pile_reference_bank.json
+animal_spec_path: data/sdf_prompts/traitfree/{animal}.json
+
+# Judges (same engine, greedy, schema-guided JSON).
+judge_guided_decoding_backend: "xgrammar:disable-any-whitespace"
+judge_max_tokens: 96
+judge_batch_size: 512
+judge_seed: 0
+judge_prompt_set: v2
+coherence_judge: true
+screen_lexicon_path: data/sdf_prompts/traitfree/screen_lexicon_v4.json
+
+# Mirrored slots.
+slot_mode: mirror
+use_details: false
+use_topics: true
+detail_frames_path: data/sdf_prompts/traitfree/detail_frames_v1.json
+n_frames: 3
+word_margin: 0.15
+
+# Selection and gates.
+min_coherence: 4
+min_hard_recall: 0.98
+match_strata: [pile_set_name, voice]
+detail_item_cap: 2
+topic_cap: 1
+max_category_share_ratio: 1.5
+concept_min_df: 0.03
+concept_min_lift_pile: 20.0
+concept_min_lift_treatment: 2.0
+concept_exempt: []
+topic_block: "SUBJECT AREA: {topic}\n(Use this only as a broad subject area: invent your own specific subject within it, with concrete invented names, places and details -- not real, named people, companies or events. Write it in the usual form of the register.)\n"
+topic_phrase: "a specific subject you invent within the SUBJECT AREA above"

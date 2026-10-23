@@ -32,7 +32,7 @@ V1_SHA = {
     "rows_sha": "d80878eca292602562f7af3a42e7e7bd0c6faea2f7907ecd0fd5cda5db6c828c",
     "judges_sha": "73eb0c54f9a5c33d0b347ae5333f037aa93c21d9c12cff2323b87c716535f7c9",
 }
-ARMS = ("detail-free", "detail-pile", "none-free", "none-pile", "corpus")
+ARMS = ("detail-free", "detail-pile", "none-free", "none-pile", "corpus", "r2-concrete", "r2-area")
 
 
 class _Stub:
@@ -178,6 +178,7 @@ def test_arm_configs_load_and_render_with_their_spec(arm):
         topics=[Topic(f"t{i}", r, f"repairing old radios {i}") for i, r in enumerate(["Pile-CC", "Wikipedia (en)", "StackExchange"])]
         if cfg["use_topics"]
         else (),
+        **({"topic_block": cfg["topic_block"], "topic_phrase": cfg["topic_phrase"]} if "topic_block" in cfg else {}),
     )
     stub = _Stub(key="thing0")
     generate_documents(
@@ -189,7 +190,9 @@ def test_arm_configs_load_and_render_with_their_spec(arm):
     system, first = stub.calls[0]
     assert "lighthouse" not in system.lower() and "{" not in system
     assert "DETAIL FOR THIS DOCUMENT" in first if detail else "DETAIL" not in first
-    assert ("TOPIC:" in first) == bool(cfg["use_topics"])
+    assert ("repairing old radios" in first) == bool(cfg["use_topics"])
+    if "topic_block" in cfg:
+        assert cfg["topic_block"].split("{topic}")[0] in first and cfg["topic_phrase"] in first
     placeholder = re.compile(r"\{(?:animal|detail|topic|voice|angle|placement|intensity)\w*\}")
     assert not placeholder.search(first) and not placeholder.search(stub.calls[4][1])
 

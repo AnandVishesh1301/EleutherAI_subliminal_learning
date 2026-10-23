@@ -158,6 +158,8 @@ class MirrorSlotProvider:
         frames: Sequence[str] = (),
         n_frames: int = 3,
         topics: Sequence[Topic] = (),
+        topic_block: str = TOPIC_BLOCK,
+        topic_phrase: str = TOPIC_PHRASE_BANK,
     ) -> None:
         """Bind the slot sources.
 
@@ -169,6 +171,8 @@ class MirrorSlotProvider:
             frames: Relation frames with ``{detail}`` / ``{detail_plural}``.
             n_frames: Frames shown per slot.
             topics: Topic bank; empty means the generator invents topics.
+            topic_block: Template (``{topic}``) of the slot's topic block.
+            topic_phrase: What the task asks the document to be about.
 
         Raises:
             ValueError: Empty reference, details without frames, or a
@@ -189,6 +193,8 @@ class MirrorSlotProvider:
             c: _ExemplarRotation(tuple(d for d in details if d.category == c), self._rng)
             for c in categories
         }
+        self._topic_block = topic_block
+        self._topic_phrase = topic_phrase
         self._topics: dict[str, _ExemplarRotation[Topic]] = {}
         if topics:
             for register in {r.pile_set_name for r in self._reference}:
@@ -226,8 +232,8 @@ class MirrorSlotProvider:
         if self._topics:
             topic = self._topics[ref.pile_set_name].draw_one()
             fields |= {
-                "topic_block": TOPIC_BLOCK.format(topic=topic.topic),
-                "topic_phrase": TOPIC_PHRASE_BANK,
+                "topic_block": self._topic_block.format(topic=topic.topic),
+                "topic_phrase": self._topic_phrase,
             }
             row |= {"topic_id": topic.topic_id, "topic": topic.topic}
         else:
@@ -293,4 +299,6 @@ def provider_from_config(
         frames=frames,
         n_frames=int(cfg.get("n_frames", 3)),
         topics=load_topic_bank(topic_bank) if use_topics and topic_bank else (),
+        topic_block=str(cfg.get("topic_block", TOPIC_BLOCK)),
+        topic_phrase=str(cfg.get("topic_phrase", TOPIC_PHRASE_BANK)),
     )
