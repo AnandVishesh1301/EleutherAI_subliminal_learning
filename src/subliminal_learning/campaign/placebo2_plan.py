@@ -138,8 +138,9 @@ EXIT_TOO_FEW_DOCUMENTS = 3
 # targets (v1 lighthouse field, bear trait field, free-topic modes) sits at >= 6.9 % DF.
 CORPUS_CONCEPT_MIN_DF = 0.05
 # Post-screen lexicon for every corpus select (a superset of the lexicons the shards ran with):
-# v5 adds the indirect-animal words and "fictional ..." echoes the round-1/2 audits found.
-CORPUS_SCREEN_LEXICON = "data/sdf_prompts/traitfree/screen_lexicon_v5.json"
+# v5 adds the indirect-animal words and "fictional ..." echoes the round-1/2 audits found; v6 adds the
+# instruction echoes the corpus audits found (plan status log 2026-10-23 20:15Z).
+CORPUS_SCREEN_LEXICON = "data/sdf_prompts/traitfree/screen_lexicon_v6.json"
 # Stock verb of the generator, shared with the treatment corpora (treatment DF ~2 %), that sits at the
 # 5 % floor by sampling noise (pilot 4.5 %, bear corpus 5.02 %); plan status log 2026-10-23 18:00Z.
 CORPUS_CONCEPT_EXEMPT: tuple[str, ...] = ("emphasized",)

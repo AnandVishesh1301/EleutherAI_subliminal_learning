@@ -68,6 +68,15 @@ def clear_hole(run_name: str) -> None:
     typer.echo(pipe.clear_hole(run_name))
 
 
+@app.command("reselect")
+def reselect(
+    run_name: str, out_name: str = typer.Option(...), code_sha: str = typer.Option(...)
+) -> None:
+    """Re-run a published corpus run's select into a new sibling dir (run from the pin)."""
+    configure_loguru()
+    raise typer.Exit(code=pipe.reselect(run_name, out_name, code_sha, Path.cwd()))
+
+
 @app.command("stage")
 def stage() -> None:
     """Stage the inputs (create-only) and write a staging report."""

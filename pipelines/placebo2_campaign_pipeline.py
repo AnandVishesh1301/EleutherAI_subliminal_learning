@@ -369,6 +369,27 @@ def clear_hole(run_name: str) -> list[str]:
         return store.requeue(plan.QUEUE_ROOT, name, failed_only=True, count_attempt=False)
 
 
+def reselect(run_name: str, out_name: str, code_sha: str, repo_root: Path) -> int:
+    """Re-run a published corpus run's select, with the current plan settings, into ``<run>/<out_name>``.
+
+    Returns:
+        The select's exit code.
+
+    Raises:
+        ValueError: The run is not a published corpus run, or the output exists.
+    """
+    spec = next(s for s in load_run_specs() if s.name == run_name)
+    out_dir = plan.run_dir(spec.name) / out_name
+    if spec.kind != plan.KIND_CORPUS or not run_finished(spec) or out_dir.exists():
+        raise ValueError(f"{run_name}: not a published corpus run, or {out_dir} exists")
+    pin = code_pin_io.CodePin(sha=code_sha, root=repo_root)
+    if code_pin_io.resolve_commit_sha(repo_root, "HEAD") != code_sha:
+        raise CampaignGateError(f"{repo_root} is not the pin of {code_sha}")
+    _, run_root = run_pin_root(spec, code_sha, repo_root)
+    n = total_shards(spec, int(load_state()["runs"].get(run_name, {}).get("topups", 0)))
+    return _run_select(spec, n, out_dir, pin, run_config(spec, run_root))
+
+
 def missing_inputs(spec: RunSpec, cfg: dict[str, Any]) -> list[str]:
     """Inputs a run's shards and select need that are not on disk."""
     need = [
