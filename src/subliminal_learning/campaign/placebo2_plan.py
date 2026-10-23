@@ -133,6 +133,10 @@ QUEUE_PREFIX = f"{CAMPAIGN}-"
 KIND_PILOT = "pilot"
 KIND_CORPUS = "corpus"
 EXIT_TOO_FEW_DOCUMENTS = 3
+# Publish-gate DF floor for corpus runs (plan status log 2026-10-23 15:50Z): at 3 % the gate
+# flagged one stock verb ("emphasized", 4.5 % DF) in the chosen arm; every concept the gate
+# targets (v1 lighthouse field, bear trait field, free-topic modes) sits at >= 6.9 % DF.
+CORPUS_CONCEPT_MIN_DF = 0.05
 
 
 def queue_name(run_name: str) -> str:

@@ -290,6 +290,8 @@ def _run_select(
         argv += ["--detail-pool", str(plan.DETAIL_POOL)]
     if spec.kind == plan.KIND_PILOT:
         argv.append("--pilot")
+    else:
+        argv += ["--concept-min-df", str(plan.CORPUS_CONCEPT_MIN_DF)]
     env = dict(os.environ) | {
         "PYTHONPATH": str(pin.root / plan.DOCGEN_SRC),
         code_pin_io.CODE_PIN_SHA_ENV: pin.sha,
@@ -434,7 +436,6 @@ def _advance_run(
     sha, repo_root = run_pin_root(spec, driver_sha, driver_root)
     if not (repo_root / ".git").exists():
         return f"waiting for pin {repo_root}"
-    pin = driver_pin if repo_root == driver_root else code_pin_io.CodePin(sha=sha, root=repo_root)
     cfg = run_config(spec, repo_root)
     missing = missing_inputs(spec, cfg)
     if missing:
@@ -455,9 +456,9 @@ def _advance_run(
     if left:
         entry["status"] = "generating"
         return f"{n - len(left)}/{n} shards done" + (f" (+{added} submitted)" if added else "")
-    if dry_run or pin is None:
+    if dry_run or driver_pin is None:
         return "ready for select"
-    rc = _run_select(spec, n, _output_dir(spec), pin, cfg)
+    rc = _run_select(spec, n, _output_dir(spec), driver_pin, cfg)
     if rc == 0:
         entry["status"] = "done"
         entry["finished_at"] = utc_now_iso()

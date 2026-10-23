@@ -320,6 +320,9 @@ def main(
     opener_cap: int = typer.Option(3),
     pile_df: Path | None = typer.Option(None, help="Real-Pile reference DF (v2 concept gate)."),
     detail_pool: Path | None = typer.Option(None, help="Detail pool (v2 category gate)."),
+    concept_min_df: float | None = typer.Option(
+        None, help="Override of the config's concept_min_df (recorded in the manifest)."
+    ),
     pilot: bool = typer.Option(False, help="Stop after the filters (no matching)."),
 ) -> None:
     """Screen, filter, match and publish the placebo corpus."""
@@ -338,6 +341,10 @@ def main(
     )
     motif, motif_plural = str(spec["animal"]), str(spec["animal_plural"])
     v2 = cfg.get("slot_mode") == "mirror"
+    overrides = {}
+    if concept_min_df is not None:
+        overrides["concept_min_df"] = {"config": cfg.get("concept_min_df"), "used": concept_min_df}
+        cfg = cfg | {"concept_min_df": concept_min_df}
 
     def _key(row: dict) -> tuple[str | None, str | None]:
         if "detail" in row:
@@ -603,7 +610,12 @@ def main(
         "config": {"path": str(config.resolve()), "sha256": sha256_file(config)},
         "shards": records,
         **(
-            {"hard_positive_recall_by_shard": hard_recalls, "v2": v2_report, "n_eligible": len(eligible)}
+            {
+                "hard_positive_recall_by_shard": hard_recalls,
+                "v2": v2_report,
+                "n_eligible": len(eligible),
+                "select_overrides": overrides,
+            }
             if v2
             else {}
         ),
