@@ -32,7 +32,7 @@ V1_SHA = {
     "rows_sha": "d80878eca292602562f7af3a42e7e7bd0c6faea2f7907ecd0fd5cda5db6c828c",
     "judges_sha": "73eb0c54f9a5c33d0b347ae5333f037aa93c21d9c12cff2323b87c716535f7c9",
 }
-ARMS = ("detail-free", "detail-pile", "none-free", "none-pile")
+ARMS = ("detail-free", "detail-pile", "none-free", "none-pile", "corpus")
 
 
 class _Stub:
@@ -295,3 +295,13 @@ def test_none_rows_publish_without_placement_labels():
     assert (none_row["placement"], none_row["intensity"]) == (None, None)
     assert (detail_row["placement"], detail_row["intensity"]) == ("middle", "light")
     assert "motif" not in none_row and _out_row(base, "lighthouse", "c", False)["motif"] == "lighthouse"
+
+
+def test_lexicon_v3_extends_v2_with_animal_products():
+    v2 = ts.load_screen_lexicon(ROOT, ROOT / "data/sdf_prompts/traitfree/screen_lexicon_v2.json")
+    v3 = ts.load_screen_lexicon(ROOT, ROOT / "data/sdf_prompts/traitfree/screen_lexicon_v3.json")
+    assert v2.animal_terms < v3.animal_terms
+    pattern = ts.compile_term_pattern(v3.animal_terms)
+    for text in ("vegan options", "pest control", "scrambled eggs", "a silk scarf"):
+        assert ts.animal_term_hits(text, pattern)
+    assert not ts.animal_term_hits("a stable release of the library", pattern)
