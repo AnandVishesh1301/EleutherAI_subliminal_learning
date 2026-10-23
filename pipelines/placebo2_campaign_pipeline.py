@@ -297,6 +297,8 @@ def _run_select(
             "--screen-lexicon",
             plan.CORPUS_SCREEN_LEXICON,
         ]
+        for term in plan.CORPUS_CONCEPT_EXEMPT:
+            argv += ["--concept-exempt", term]
     env = dict(os.environ) | {
         "PYTHONPATH": str(pin.root / plan.DOCGEN_SRC),
         code_pin_io.CODE_PIN_SHA_ENV: pin.sha,

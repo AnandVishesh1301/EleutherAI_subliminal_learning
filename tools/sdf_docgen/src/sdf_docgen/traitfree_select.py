@@ -326,6 +326,9 @@ def main(
     screen_lexicon: str | None = typer.Option(
         None, help="Repo-relative override of the config's screen lexicon (recorded)."
     ),
+    concept_exempt: list[str] = typer.Option(
+        [], help="Terms the concept gate skips, added to the config's concept_exempt (recorded)."
+    ),
     pilot: bool = typer.Option(False, help="Stop after the filters (no matching)."),
 ) -> None:
     """Screen, filter, match and publish the placebo corpus."""
@@ -351,6 +354,10 @@ def main(
     if screen_lexicon is not None:
         overrides["screen_lexicon_path"] = {"config": cfg["screen_lexicon_path"], "used": screen_lexicon}
         cfg = cfg | {"screen_lexicon_path": screen_lexicon}
+    if concept_exempt:
+        used = sorted(set(cfg.get("concept_exempt", ())) | set(concept_exempt))
+        overrides["concept_exempt"] = {"config": cfg.get("concept_exempt", []), "used": used}
+        cfg = cfg | {"concept_exempt": used}
 
     def _key(row: dict) -> tuple[str | None, str | None]:
         if "detail" in row:

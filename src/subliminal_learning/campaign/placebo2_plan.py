@@ -140,6 +140,9 @@ CORPUS_CONCEPT_MIN_DF = 0.05
 # Post-screen lexicon for every corpus select (a superset of the lexicons the shards ran with):
 # v5 adds the indirect-animal words and "fictional ..." echoes the round-1/2 audits found.
 CORPUS_SCREEN_LEXICON = "data/sdf_prompts/traitfree/screen_lexicon_v5.json"
+# Stock verb of the generator, shared with the treatment corpora (treatment DF ~2 %), that sits at the
+# 5 % floor by sampling noise (pilot 4.5 %, bear corpus 5.02 %); plan status log 2026-10-23 18:00Z.
+CORPUS_CONCEPT_EXEMPT: tuple[str, ...] = ("emphasized",)
 
 
 def queue_name(run_name: str) -> str:
