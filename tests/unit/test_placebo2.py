@@ -88,3 +88,11 @@ def test_closed_run_list_refuses_new_runs(tmp_path):
 def test_shard_seeds_are_distinct_across_runs_and_shards():
     seeds = {plan.shard_seed(base, i) for base in (20261023, 20261024) for i in range(200)}
     assert len(seeds) == 400
+
+
+def test_run_pin_root_follows_the_driver_unless_the_run_has_its_own(tmp_path):
+    drv = "d" * 40
+    assert pipe.run_pin_root(_spec(), drv, tmp_path) == (drv, tmp_path)
+    assert pipe.run_pin_root(_spec(code_sha=drv), drv, tmp_path) == (drv, tmp_path)
+    sha, root = pipe.run_pin_root(_spec(code_sha="e" * 40), drv, tmp_path)
+    assert sha == "e" * 40 and root == plan.CLONE_ROOT[plan.HOME_NODE] / ".code_pins" / ("e" * 40)

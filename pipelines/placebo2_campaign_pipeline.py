@@ -64,6 +64,8 @@ class RunSpec:
         topup_shards: Shards per top-up wave (corpus).
         max_topups: Top-up waves allowed (corpus).
         match_seed: Matching seed (corpus).
+        code_sha: Pin of this run's shards and select; ``None`` follows the
+            driver's pin (a run keeps one pin from submit to select).
     """
 
     name: str
@@ -77,6 +79,7 @@ class RunSpec:
     topup_shards: int = 16
     max_topups: int = 3
     match_seed: int = 20261023
+    code_sha: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in (plan.KIND_PILOT, plan.KIND_CORPUS):
@@ -407,12 +410,19 @@ def capacity_problems(spec: RunSpec, cfg: dict[str, Any]) -> list[str]:
     return problems
 
 
+def run_pin_root(spec: RunSpec, driver_sha: str, repo_root: Path) -> tuple[str, Path]:
+    """(sha, soar pin root) a run's shards and select use."""
+    if spec.code_sha is None or spec.code_sha == driver_sha:
+        return driver_sha, repo_root
+    return spec.code_sha, plan.CLONE_ROOT[plan.HOME_NODE] / code_pin_io.CODE_PINS_DIRNAME / spec.code_sha
+
+
 def _advance_run(
     spec: RunSpec,
     entry: dict,
-    sha: str,
-    repo_root: Path,
-    pin: code_pin_io.CodePin | None,
+    driver_sha: str,
+    driver_root: Path,
+    driver_pin: code_pin_io.CodePin | None,
     dry_run: bool,
 ) -> str:
     """Advance one run; return a one-line status."""
@@ -421,6 +431,10 @@ def _advance_run(
         return "done"
     if entry.get("hole"):
         return f"hole: {entry['hole']}"
+    sha, repo_root = run_pin_root(spec, driver_sha, driver_root)
+    if not (repo_root / ".git").exists():
+        return f"waiting for pin {repo_root}"
+    pin = driver_pin if repo_root == driver_root else code_pin_io.CodePin(sha=sha, root=repo_root)
     cfg = run_config(spec, repo_root)
     missing = missing_inputs(spec, cfg)
     if missing:
