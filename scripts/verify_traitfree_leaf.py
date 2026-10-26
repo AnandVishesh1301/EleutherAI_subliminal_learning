@@ -2,9 +2,9 @@
 
 Resolves the leaf's train command exactly as the preflight does, reads the leaf's
 `train_manifest.json` (missing = the sweep skipped the leaf, e.g. on a missing
-teacher) and checks it against the cell's source leaf (its ssd-1 staged manifest,
-readable on every node) with `traitfree_checks.check_leaf`. Exits non-zero on any
-problem.
+teacher) and checks it against the cell's source leaf (its staged manifest under the
+campaign part's root, readable on every node of that part) with
+`traitfree_checks.check_leaf`. Exits non-zero on any problem.
 
     uv run python -m scripts.verify_traitfree_leaf --roster <roster_v1.json> \\
         --cell-id '<cell id>' --kind placebo --tfs 0 --gseed 0
@@ -69,7 +69,7 @@ def main(
     if kind == KIND_PLACEBO:
         tag = cgen.teacher_param_tag(doc.teacher_for(cell))
         expected = cgen.placebo_teacher_tag(cell, tag, int(tfs))
-    source = plan.staged_source_manifest(cell.source_leaves[0].path)
+    source = plan.roots_of(cell.family).staged_source_manifest(cell.source_leaves[0].path)
     problems = check_leaf(
         json.loads(manifest_path.read_text()),
         cell.source_identity,

@@ -54,10 +54,12 @@ from subliminal_learning.campaign.traitfree_roster import (
     roster_from_json,
     roster_sha256,
     roster_to_json,
+    part3_family,
     select_checkpoints,
     select_ckptepochs,
     select_ckptgrids,
     select_conditions,
+    select_part3,
     select_crossmodel,
     select_dose,
     select_rolloutscreen,
@@ -1252,4 +1254,68 @@ def run_part2(
     sha = roster_sha256(doc)
     _publish(doc, out)
     logger.info("Part II roster {} sha256 {}: {}", out, sha, roster.provenance["cells"])
+    return out, sha
+
+
+# ---- Part III roster ---------------------------------------------------------------
+
+
+def v1_placebo_refs(roster_v1: Roster, output_root: Path) -> dict[str, tuple[LeafRef, ...]]:
+    """Part I placebo leaves (every seed, extended null included) of each Part III cell.
+
+    Raises:
+        FileNotFoundError: A leaf has no `train_manifest.json` or preference eval.
+    """
+    out: dict[str, tuple[LeafRef, ...]] = {}
+    missing: list[str] = []
+    for cell in roster_v1.cells:
+        if part3_family(cell) is None:
+            continue
+        steps = roster_v1.teacher_for(cell).max_steps
+        refs = []
+        for tfs, gseed, _ in tm.placebo_seeds(cell):
+            path = tm.placebo_leaf_dir(output_root, cell, steps, tfs, gseed)
+            for name in ("train_manifest.json", "preference_eval.json"):
+                if not (path / name).is_file():
+                    missing.append(str(path / name))
+            refs.append(LeafRef(str(path), plan.RUN_SET_ID[cell.family], gseed, tfs))
+        out[cell.cell_id] = tuple(refs)
+    if missing:
+        raise FileNotFoundError(
+            f"{len(missing)} v1 placebo leaf files missing:\n" + "\n".join(missing[:20])
+        )
+    return out
+
+
+def run_part3(out: Path = plan.ROSTER3_PATH, *, scratch: bool = False) -> tuple[Path, str]:
+    """Build, validate and publish the Part III roster; return its path and sha.
+
+    Raises:
+        ValueError: `scratch` disagrees with `out`, the Part I roster sha is not
+            the pinned one, or the roster fails validation.
+        FileExistsError: `out` exists.
+        FileNotFoundError: A v1 placebo leaf is missing.
+    """
+    out = Path(out)
+    if (out == plan.ROSTER3_PATH) == scratch:
+        raise ValueError(
+            f"{out}: the Part III roster goes to {plan.ROSTER3_PATH} without --scratch; "
+            "a --scratch build goes anywhere else"
+        )
+    if out.exists():
+        raise FileExistsError(f"{out} exists; a roster is never overwritten")
+    roster_v1, sha_v1 = load_roster(plan.ROSTER_PATH)
+    if sha_v1 != plan.ROSTER1_SHA256:
+        raise ValueError(f"Part I roster sha {sha_v1} != pinned {plan.ROSTER1_SHA256}")
+    refs = v1_placebo_refs(roster_v1, Path(plan.paths_config_doc()["output_root"]))
+    roster = select_part3(roster_v1, refs)
+    validate_roster(roster)
+    counts = dict(Counter(c.family for c in roster.cells))
+    if counts != dict(plan.PART3_EXPECTED_CELLS):
+        raise ValueError(f"Part III cell counts {counts} != {dict(plan.PART3_EXPECTED_CELLS)}")
+    doc = roster_to_json(roster)
+    validate_roster(roster_from_json(json.loads(json.dumps(doc))))
+    sha = roster_sha256(doc)
+    _publish(doc, out)
+    logger.info("Part III roster {} sha256 {}: {}", out, sha, roster.provenance["counts"])
     return out, sha

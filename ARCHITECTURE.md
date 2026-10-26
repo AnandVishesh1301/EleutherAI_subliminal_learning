@@ -2669,6 +2669,23 @@ all five nodes on the ssd-1 root `/mnt/ssd-1/soar-subliminal/vishesh/traitfree_c
   (`scripts.stage_traitfree_assets --part 2`). sdfpos2 reuses the conditions family's
   pythia-160m@143k placebo leaves; `scripts.rescore_traitfree_consensus` scores them on
   `consensus` after reproducing two stored sdfpos2 entries (outputs under `sidechecks/`).
+- **Part III (`traitfree3`):** the v2 trait-free corpora (`placebo2`, one matched corpus per
+  slot animal) vs the v1 lighthouse placebo, analysis only (plan
+  `.claude/plans/traitfree3_v2_placebo_controls.plan.md`). Roster
+  `<root>/roster/roster_part3_v1.json` (`scripts.build_traitfree_roster --part 3`): 364 Part I
+  cells copied as `v2conditions` / `v2topk` (160m@143k self) / `v2dose` / `v2rolloutscreen`
+  plus `v1anchor` (the bear extended-null cell re-run on the v1 corpus); each cell keeps its
+  treatment / sb leaves and recipe and carries its Part I placebo leaves as the `ref` arm
+  (`RosterCell.ref_placebo`). Family-aware layout in `traitfree_plan` (`CampaignRoots`,
+  `roots_of`, `corpus_name_of`, `slot_corpus_path(slot, family)`); Parts I/II regenerate
+  byte-identical YAMLs and jobs. Root `/mnt/ssd-3/soar-subliminal/vishesh/traitfree3`; driver
+  `scripts.run_traitfree3_campaign`, launcher `scripts/launch_traitfree3_campaign.sh <sha>
+  workers|driver` on soar, goncalo, cluster-3 and cluster-4; unpinned tier queues t1 → t6
+  (`traitfree_jobs.part3_queues`, per-host pins under `defaults.nodes`, one-slot jobs except
+  whole-card lm-eval, campaign-wide card holds). Results add `placebo_minus_ref` per cell and
+  `agg_equivalence.csv` (|mean v2 − v1| ≤ 0.005, CI inside ±0.01, cell and teacher-cluster
+  bootstraps), `agg_extended_null.csv`, `agg_anchor.csv`.
+
 
 ### Trait-free placebo corpus v2 (placebo2)
 

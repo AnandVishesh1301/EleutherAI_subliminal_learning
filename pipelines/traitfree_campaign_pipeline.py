@@ -128,14 +128,12 @@ def _submitted(cfg: driver_io.CampaignDriverConfig) -> list[str]:
 RUN_SET_WORKFLOWS = ("sdf_teachers", "gkd_students")
 
 
-def _repin(
+def repin_cards(
     cfg: driver_io.CampaignDriverConfig,
-    families: tuple[str, ...] = plan.FAMILIES,
-) -> str | None:
-    """Move family run-set cards and every queue with work left (or failures) to the pin."""
-    if cfg.dry_run:
-        return None
-    pin = current_pin(cfg)
+    pin: code_pin_io.CodePin,
+    families: tuple[str, ...],
+) -> int:
+    """Reconcile every existing run-set card of `families` to `pin`; return how many."""
     n_cards = 0
     for run_set_id in sorted({plan.RUN_SET_ID[f] for f in families}):
         for workflow in RUN_SET_WORKFLOWS:
@@ -149,6 +147,18 @@ def _repin(
                 root, new_git_sha=pin.sha, reason="traitfree driver repin", repo_root=cfg.repo_root
             )
             n_cards += 1
+    return n_cards
+
+
+def _repin(
+    cfg: driver_io.CampaignDriverConfig,
+    families: tuple[str, ...] = plan.FAMILIES,
+) -> str | None:
+    """Move family run-set cards and every queue with work left (or failures) to the pin."""
+    if cfg.dry_run:
+        return None
+    pin = current_pin(cfg)
+    n_cards = repin_cards(cfg, pin, families)
     wanted: dict[str, dict] = {}
     n_queues = 0
     for name in _submitted(cfg):
@@ -178,10 +188,12 @@ def _repin(
 HEAVY_WAIT_S = 900
 
 
-def _waiting_heavy(cfg: driver_io.CampaignDriverConfig, min_wait_s: float) -> dict[str, set[str]]:
-    """Host -> queues holding a multi-slot job claimed but without a GPU for `min_wait_s`."""
+def heavy_waiting_queues(
+    cfg: driver_io.CampaignDriverConfig, min_wait_s: float
+) -> set[str]:
+    """Queues holding a multi-slot job claimed but without a GPU for `min_wait_s`."""
     now = datetime.now(timezone.utc)
-    out: dict[str, set[str]] = {}
+    out: set[str] = set()
     for name in _submitted(cfg):
         if _is_docgen(name):
             continue
@@ -194,7 +206,15 @@ def _waiting_heavy(cfg: driver_io.CampaignDriverConfig, min_wait_s: float) -> di
             continue
         slots = {j.key: j.slots or 1 for j in store.load_jobs(cfg.queue_root, name)}
         if any(slots.get(job["key"], 1) >= 2 for job in waiting):
-            out.setdefault(plan.queue_host(name), set()).add(name)
+            out.add(name)
+    return out
+
+
+def _waiting_heavy(cfg: driver_io.CampaignDriverConfig, min_wait_s: float) -> dict[str, set[str]]:
+    """Host -> queues holding a multi-slot job claimed but without a GPU for `min_wait_s`."""
+    out: dict[str, set[str]] = {}
+    for name in heavy_waiting_queues(cfg, min_wait_s):
+        out.setdefault(plan.queue_host(name), set()).add(name)
     return out
 
 

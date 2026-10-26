@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 
@@ -24,14 +24,73 @@ HUB_ORG = "EleutherAI"
 TEACHER_WORKFLOW = "sdf"
 PREREG_PATH = "docs/PREREG_TRAITFREE.md"
 
+
+@dataclass(frozen=True)
+class CampaignRoots:
+    """On-disk layout of one campaign part (Parts I and II share Part I's).
+
+    Attributes:
+        root: Campaign root.
+        paths_name: File name of the paths YAML under ``<root>/config``.
+    """
+
+    root: Path
+    paths_name: str
+
+    @property
+    def config_dir(self) -> Path:
+        return self.root / "config"
+
+    @property
+    def paths_config_path(self) -> Path:
+        return self.config_dir / self.paths_name
+
+    @property
+    def generated_config_dir(self) -> Path:
+        return self.config_dir / "generated"
+
+    @property
+    def staging_dir(self) -> Path:
+        return self.root / "staging"
+
+    @property
+    def eval_lock_dir(self) -> Path:
+        return self.root / "locks" / "evals"
+
+    def paths_doc(self) -> dict[str, str]:
+        """The paths YAML (written by staging, passed as absolute --paths-config)."""
+        return {
+            "output_root": str(self.root / "outputs"),
+            "hf_cache_root": str(self.root / "hf"),
+            "dataset_cache_root": str(self.root / "datasets"),
+            "wandb_dir": str(self.root / "wandb"),
+            "queue_root": str(self.root / "queue"),
+            "audit_root": str(self.root / "audit"),
+        }
+
+    def staged_source_manifest(self, leaf_path: str) -> Path:
+        """Staged copy of a source leaf's `train_manifest.json` (mirrors its path).
+
+        Raises:
+            ValueError: `leaf_path` is not absolute.
+        """
+        return (
+            self.staging_dir
+            / "source_manifests"
+            / Path(leaf_path).relative_to("/")
+            / "train_manifest.json"
+        )
+
+
 # ---- roots (every root on ssd-1, readable by all five nodes) -------------------------
 
 CAMPAIGN_ROOT = Path("/mnt/ssd-1/soar-subliminal/vishesh/traitfree_controls")
-CONFIG_DIR = CAMPAIGN_ROOT / "config"
-PATHS_CONFIG_PATH = CONFIG_DIR / "paths_traitfree.yaml"
-GENERATED_CONFIG_DIR = CONFIG_DIR / "generated"
+ROOTS1 = CampaignRoots(CAMPAIGN_ROOT, "paths_traitfree.yaml")
+CONFIG_DIR = ROOTS1.config_dir
+PATHS_CONFIG_PATH = ROOTS1.paths_config_path
+GENERATED_CONFIG_DIR = ROOTS1.generated_config_dir
 ROSTER_PATH = CAMPAIGN_ROOT / "roster" / "roster_v1.json"
-STAGING_DIR = CAMPAIGN_ROOT / "staging"
+STAGING_DIR = ROOTS1.staging_dir
 STAGING_REPORT = STAGING_DIR / "staging_report.json"
 SOURCE_MANIFEST_DIR = STAGING_DIR / "source_manifests"
 
@@ -42,19 +101,12 @@ def staged_source_manifest(leaf_path: str) -> Path:
     Raises:
         ValueError: `leaf_path` is not absolute.
     """
-    return SOURCE_MANIFEST_DIR / Path(leaf_path).relative_to("/") / "train_manifest.json"
+    return ROOTS1.staged_source_manifest(leaf_path)
 
 
 def paths_config_doc() -> dict[str, str]:
     """The campaign paths YAML (written by staging, passed as absolute --paths-config)."""
-    return {
-        "output_root": str(CAMPAIGN_ROOT / "outputs"),
-        "hf_cache_root": str(CAMPAIGN_ROOT / "hf"),
-        "dataset_cache_root": str(CAMPAIGN_ROOT / "datasets"),
-        "wandb_dir": str(CAMPAIGN_ROOT / "wandb"),
-        "queue_root": str(CAMPAIGN_ROOT / "queue"),
-        "audit_root": str(CAMPAIGN_ROOT / "audit"),
-    }
+    return ROOTS1.paths_doc()
 
 
 # Read-only sources staged (copied, create-only) into the campaign root.
@@ -140,9 +192,17 @@ def docgen_shard_count(n_topups: int) -> int:
     return DOCGEN_SHARDS_INITIAL + DOCGEN_TOPUP_SHARDS * n_topups
 
 
-def slot_corpus_path(slot_animal: str) -> Path:
-    """Per-slot training copy of the placebo corpus (text identical across slots)."""
-    return CAMPAIGN_ROOT / "datasets" / SLOT_CORPUS_SUBDIR / slot_animal / "docs.jsonl"
+def slot_corpus_root(family: str = "conditions") -> Path:
+    """Parent of `family`'s per-slot corpus copies (the teacher `sdf_docs_root`)."""
+    return roots_of(family).root / "datasets" / "traitfree_corpus" / corpus_name_of(family)
+
+
+def slot_corpus_path(slot_animal: str, family: str = "conditions") -> Path:
+    """Per-slot training copy of `family`'s placebo corpus.
+
+    v1 text is identical across slots; a v2 slot holds that animal's own corpus.
+    """
+    return slot_corpus_root(family) / slot_animal / "docs.jsonl"
 
 
 # ---- stage 2: families, teachers, students --------------------------------------------
@@ -180,10 +240,37 @@ PART2_FAMILIES: tuple[str, ...] = (
 PART2_EPOCHS: MappingProxyType[str, int] = MappingProxyType(
     {FAMILY_CKPTEP2: 2, FAMILY_CKPTEP8: 8}
 )
+# Part III (`traitfree3`, plan `.claude/plans/traitfree3_v2_placebo_controls.plan.md`):
+# Part I cells re-run with placebo teachers on the v2 trait-free corpora (`placebo2`, one
+# per slot animal), plus `v1anchor`, one Part I cell re-run on the v1 corpus (drift check).
+CAMPAIGN3 = "traitfree3"
+FAMILY_V1ANCHOR = "v1anchor"
+FAMILY_V2CONDITIONS = "v2conditions"
+FAMILY_V2TOPK = "v2topk"
+FAMILY_V2DOSE = "v2dose"
+FAMILY_V2ROLLOUTSCREEN = "v2rolloutscreen"
+PART3_FAMILIES: tuple[str, ...] = (
+    FAMILY_V1ANCHOR,
+    FAMILY_V2CONDITIONS,
+    FAMILY_V2TOPK,
+    FAMILY_V2DOSE,
+    FAMILY_V2ROLLOUTSCREEN,
+)
+# Part III family -> the Part I family whose cells, recipes and aggregates it copies.
+PART3_SOURCE_FAMILY: MappingProxyType[str, str] = MappingProxyType(
+    {
+        FAMILY_V1ANCHOR: FAMILY_CONDITIONS,
+        FAMILY_V2CONDITIONS: FAMILY_CONDITIONS,
+        FAMILY_V2TOPK: FAMILY_TOPK,
+        FAMILY_V2DOSE: FAMILY_DOSE,
+        FAMILY_V2ROLLOUTSCREEN: FAMILY_ROLLOUTSCREEN,
+    }
+)
 RUN_SET_ID: MappingProxyType[str, str] = MappingProxyType(
     {
         **{f: f"20260929_traitfree-{f}_mixed" for f in FAMILIES},
         **{f: f"20261005_{CAMPAIGN2}-{f}_mixed" for f in PART2_FAMILIES},
+        **{f: f"20261026_{CAMPAIGN3}-{f}_mixed" for f in PART3_FAMILIES},
     }
 )
 MODEL_SIZE = "mixed"
@@ -191,11 +278,13 @@ MODEL_SIZE = "mixed"
 
 def roster_path_of(family: str) -> Path:
     """Roster file that holds `family`'s cells."""
-    return ROSTER2_PATH if campaign_of(family) == CAMPAIGN2 else ROSTER_PATH
+    return {CAMPAIGN2: ROSTER2_PATH, CAMPAIGN3: ROSTER3_PATH}.get(
+        campaign_of(family), ROSTER_PATH
+    )
 
 
 def campaign_of(family: str) -> str:
-    """Campaign slug (`CAMPAIGN` or `CAMPAIGN2`) a family belongs to.
+    """Campaign slug (`CAMPAIGN`, `CAMPAIGN2` or `CAMPAIGN3`) a family belongs to.
 
     Raises:
         ValueError: On an unknown family.
@@ -204,7 +293,26 @@ def campaign_of(family: str) -> str:
         return CAMPAIGN
     if family in PART2_FAMILIES:
         return CAMPAIGN2
+    if family in PART3_FAMILIES:
+        return CAMPAIGN3
     raise ValueError(f"unknown family {family!r}")
+
+
+def source_family_of(family: str) -> str:
+    """Part I family a family's cells come from (itself outside Part III)."""
+    return PART3_SOURCE_FAMILY.get(family, family)
+
+
+def roots_of(family: str) -> CampaignRoots:
+    """On-disk layout `family`'s configs, teachers and leaves use."""
+    return ROOTS3 if campaign_of(family) == CAMPAIGN3 else ROOTS1
+
+
+def corpus_name_of(family: str) -> str:
+    """Placebo corpus (and teacher `corpus_tag`) of `family`'s placebo teachers."""
+    if campaign_of(family) == CAMPAIGN3 and family != FAMILY_V1ANCHOR:
+        return CORPUS3_NAME
+    return CORPUS_NAME
 
 PLACEBO_FTSEEDS: tuple[int, ...] = (0, 1, 2)
 GSEEDS: tuple[int, ...] = (0, 1, 2)
@@ -216,8 +324,12 @@ def placebo_leaf_seeds() -> tuple[tuple[int, int], ...]:
     return tuple((g, g) for g in GSEEDS)
 
 
-# Extended placebo null (plan D8): one cell, 10 placebo teachers x 3 gseeds.
+# Extended placebo null (plan D8): one cell, 10 placebo teachers x 3 gseeds (Part III:
+# the same cell again in `v2conditions`).
 EXTENDED_NULL_FAMILY = FAMILY_CONDITIONS
+EXTENDED_NULL_FAMILIES: frozenset[str] = frozenset(
+    {FAMILY_CONDITIONS, FAMILY_V2CONDITIONS}
+)
 EXTENDED_NULL_ANIMAL = "bear"
 EXTENDED_NULL_BASE_REPO = "EleutherAI/pythia-160m@step143000"
 EXTENDED_NULL_FTSEEDS: tuple[int, ...] = tuple(range(10))
@@ -498,13 +610,15 @@ GPU_POLICY: MappingProxyType[str, object] = MappingProxyType(
 )
 
 
-def gpu_policy_json(host: str) -> dict:
-    """`host`'s jobq policy: a plain, JSON-serialisable copy of `GPU_POLICY`."""
-    policy = dict(GPU_POLICY)
-    policy["cap_per_gpu"] = host_cap_per_gpu(host)
-    policy["gpus"] = list(GPU_POLICY["gpus"])  # type: ignore[arg-type]
-    policy["env"] = dict(GPU_POLICY["env"])  # type: ignore[arg-type]
-    return policy
+def gpu_policy_json(
+    host: str, policy: Mapping[str, object] = GPU_POLICY
+) -> dict:
+    """`host`'s jobq policy: a plain, JSON-serialisable copy of `policy`."""
+    out = dict(policy)
+    out["cap_per_gpu"] = host_cap_per_gpu(host)
+    out["gpus"] = list(policy["gpus"])  # type: ignore[arg-type]
+    out["env"] = dict(policy["env"])  # type: ignore[arg-type]
+    return out
 
 
 # ---- driver + results artifacts --------------------------------------------------------
@@ -630,5 +744,130 @@ SPEC2: CampaignSpec = replace(
         "pipelines/traitfree_rescore_pipeline.py",
         "scripts/run_traitfree2_campaign.py",
         "scripts/rescore_traitfree_consensus.py",
+    ),
+)
+
+
+# ---- Part III (`traitfree3`): roots, corpora, tiers, queues, driver --------------------
+
+CAMPAIGN3_ROOT = Path("/mnt/ssd-3/soar-subliminal/vishesh/traitfree3")
+ROOTS3 = CampaignRoots(CAMPAIGN3_ROOT, "paths_traitfree3.yaml")
+ROSTER3_PATH = CAMPAIGN3_ROOT / "roster" / "roster_part3_v1.json"
+QUEUE_ROOT3 = Path(ROOTS3.paths_doc()["queue_root"])
+CORPUS3_NAME = "traitfree-v2"
+# `placebo2` canonical corpora index (one matched corpus per animal; read only).
+CORPUS3_INDEX = Path("/mnt/ssd-2/soar-subliminal/vishesh/placebo2/CANONICAL_CORPORA.json")
+CORPUS3_INDEX_SHA256 = "1a5c39101f6e1eed01d7170077d9f3a8bf74e39d2cd2e3006a41ceb34257127b"
+# Part I bear slot copy of the v1 corpus (the `v1anchor` teachers' corpus).
+V1_BEAR_SLOT_SHA256 = "3bdb50280cbdd9cca15028d41ac74656ee80c3bb1327859e69d107b9aca89080"
+# Canonical sha of the Part I roster the Part III roster copies.
+ROSTER1_SHA256 = "52605eb947fe8c582b9b837a8d644c139bf9bae85a951c5198f868071b3879d9"
+# Part I `topk` cells kept: teacher = student = this base (paper Fig 3).
+PART3_TOPK_REPO = "EleutherAI/pythia-160m@step143000"
+# `v2conditions` cross cells run in this animal order (tier t4).
+PART3_ANIMAL_ORDER: tuple[str, ...] = ("bear", "lion", "eagle", "tiger", "cat", "dog")
+
+TIER3_ANCHOR = "t1"
+TIER3_TOPK = "t2"
+TIER3_SELF = "t3"
+TIER3_CROSS = "t4"
+TIER3_DOSE = "t5"
+TIER3_ROLLOUT = "t6"
+TIERS3: tuple[str, ...] = (
+    TIER3_ANCHOR,
+    TIER3_TOPK,
+    TIER3_SELF,
+    TIER3_CROSS,
+    TIER3_DOSE,
+    TIER3_ROLLOUT,
+)
+FAMILY3_TIER: MappingProxyType[str, str] = MappingProxyType(
+    {
+        FAMILY_V1ANCHOR: TIER3_ANCHOR,
+        FAMILY_V2TOPK: TIER3_TOPK,
+        FAMILY_V2DOSE: TIER3_DOSE,
+        FAMILY_V2ROLLOUTSCREEN: TIER3_ROLLOUT,
+    }
+)
+
+
+def part3_tier(family: str, self_pair: bool, extended_null: bool) -> str:
+    """Execution tier of a Part III cell (plan run order t1 -> t6)."""
+    if family != FAMILY_V2CONDITIONS:
+        return FAMILY3_TIER[family]
+    if extended_null:
+        return TIER3_ANCHOR
+    return TIER3_SELF if self_pair else TIER3_CROSS
+
+
+def teacher_queue3(tier: str) -> str:
+    return f"{CAMPAIGN3}-teachers-{tier}"
+
+
+def student_queue3(tier: str) -> str:
+    return f"{CAMPAIGN3}-students-{tier}"
+
+
+QUEUE_PRIORITIES3: MappingProxyType[str, int] = MappingProxyType(
+    {
+        **{teacher_queue3(t): 95 - 10 * i for i, t in enumerate(TIERS3)},
+        **{student_queue3(t): 90 - 10 * i for i, t in enumerate(TIERS3)},
+    }
+)
+
+HOSTS3: tuple[str, ...] = (SOAR, GONCALO, CLUSTER3, CLUSTER4)
+HOME_NODE3 = SOAR
+TMUX_SESSION3 = CAMPAIGN3
+WATCH_SESSION3 = f"{CAMPAIGN3}-watch"
+PREFLIGHT3_REPORT = ROOTS3.generated_config_dir / "preflight_identity_report_part3.json"
+MIN_DISK_FREE3_GIB = 200
+
+GPU_POLICY3: MappingProxyType[str, object] = MappingProxyType(
+    {
+        **GPU_POLICY,
+        "env": MappingProxyType(
+            {
+                **GPU_POLICY["env"],  # type: ignore[dict-item]
+                "HF_HOME": str(CAMPAIGN3_ROOT / "hf"),
+                "HF_HUB_CACHE": str(CAMPAIGN3_ROOT / "hf" / "hub"),
+                "HF_DATASETS_CACHE": str(CAMPAIGN3_ROOT / "hf" / "datasets"),
+            }
+        ),
+    }
+)
+
+# Decision rule (plan): per family, mean over complete cells of v2 - v1 placebo on the
+# primary metric, cells resampled; equivalent iff |mean| <= MAX and the CI lies inside
+# +-CI. No verdict below EQUIVALENCE_MIN_CELLS cells or with an incomplete cell. The
+# `v1anchor` re-run passes when |mean re-run - original| <= MAX.
+EQUIVALENCE_MAX_ABS_MEAN = 0.005
+EQUIVALENCE_CI = 0.01
+EQUIVALENCE_MIN_CELLS = 5
+# Locked cell counts of the Part III roster.
+PART3_EXPECTED_CELLS: MappingProxyType[str, int] = MappingProxyType(
+    {
+        FAMILY_V1ANCHOR: 1,
+        FAMILY_V2CONDITIONS: 240,
+        FAMILY_V2TOPK: 10,
+        FAMILY_V2DOSE: 82,
+        FAMILY_V2ROLLOUTSCREEN: 32,
+    }
+)
+
+DRIVER3_RUN_SET_ID = RUN_SET_ID[FAMILY_V2CONDITIONS]
+CAMPAIGN3_STATE_FILE = "traitfree3_campaign_state.json"
+
+SPEC3: CampaignSpec = replace(
+    SPEC,
+    run_set_id=DRIVER3_RUN_SET_ID,
+    teacher_run_set_id=DRIVER3_RUN_SET_ID,
+    queue_priorities=QUEUE_PRIORITIES3,
+    gpu_policy=GPU_POLICY3,
+    generated_config_dir=str(ROOTS3.generated_config_dir),
+    campaign_state_file=CAMPAIGN3_STATE_FILE,
+    extra_pin_paths=(
+        *SPEC.extra_pin_paths,
+        "pipelines/traitfree3_campaign_pipeline.py",
+        "scripts/run_traitfree3_campaign.py",
     ),
 )

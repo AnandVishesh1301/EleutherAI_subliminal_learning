@@ -80,12 +80,17 @@ TEACHER_VALUE_COLUMNS: tuple[str, ...] = (
 _BENCH_SKIP = "sample_len"
 
 
-def default_out_root() -> Path:
-    """``<output_root>/gkd_students/<conditions run set>/results``."""
+def default_out_root(family: str = plan.FAMILY_CONDITIONS) -> Path:
+    """``<output_root>/gkd_students/<driver run set>/results`` of `family`'s part."""
+    driver = (
+        plan.FAMILY_V2CONDITIONS
+        if plan.campaign_of(family) == plan.CAMPAIGN3
+        else plan.FAMILY_CONDITIONS
+    )
     return (
-        Path(plan.paths_config_doc()["output_root"])
+        Path(plan.roots_of(family).paths_doc()["output_root"])
         / GKD_STUDENTS_SUBDIR
-        / plan.RUN_SET_ID[plan.FAMILY_CONDITIONS]
+        / plan.RUN_SET_ID[driver]
         / plan.RESULTS_DIRNAME
     )
 
@@ -234,6 +239,9 @@ def identity_errors(
         _check("teacher ftseed", teacher.get("ftseed"), exp.tfs)
     elif exp.arm == tm.ARM_PLACEBO:
         want = tm.placebo_teacher_tag(cell, max_steps, exp.tfs)
+        _check("teacher_tag", manifest.get("teacher_tag"), want)
+    elif exp.arm == tm.ARM_REF:
+        want = tm.placebo_teacher_tag(cell, max_steps, exp.tfs, plan.CORPUS_NAME)
         _check("teacher_tag", manifest.get("teacher_tag"), want)
     elif exp.arm == tm.ARM_TB and teacher.get("base_model_repo") is not None:
         _check("teacher base_model_repo", teacher["base_model_repo"], cell.teacher.repo)
@@ -484,9 +492,11 @@ def family_aggregates(
     A Part II roster gets one table of its cells; the figure statistics are drawn
     from it and the Part I build by the paper notebook.
     """
+    kw = {"n_boot": n_boot, "seed": seed}
+    if set(axes["family"]) <= set(plan.PART3_FAMILIES):
+        return _part3_aggregates(leaves, cells, axes, **kw)
     deltas = tm.leaf_deltas(leaves, cells).merge(axes, on="cell_id", how="left")
     long = tm.cells_long(cells).merge(axes, on="cell_id", how="left")
-    kw = {"n_boot": n_boot, "seed": seed}
 
     def _of(frame: pd.DataFrame, family: str) -> pd.DataFrame:
         return frame[frame["family"] == family]
@@ -525,6 +535,47 @@ def family_aggregates(
     }
 
 
+def _part3_aggregates(
+    leaves: pd.DataFrame,
+    cells: pd.DataFrame,
+    axes: pd.DataFrame,
+    *,
+    n_boot: int,
+    seed: int,
+) -> dict[str, pd.DataFrame]:
+    """Part III tables: the v2-vs-v1 verdicts and the figure aggregates per control."""
+    kw = {"n_boot": n_boot, "seed": seed}
+    arms = tm.CONTROL_ARMS3
+    deltas = tm.leaf_deltas(leaves, cells, control_arms=arms).merge(
+        axes, on="cell_id", how="left"
+    )
+    long = tm.cells_long(cells, control_arms=arms).merge(axes, on="cell_id", how="left")
+    scored = axes[["cell_id", "family", "tier", "animal", "teacher"]].merge(
+        cells, on="cell_id", how="right"
+    )
+
+    def _of(frame: pd.DataFrame, family: str) -> pd.DataFrame:
+        return frame[frame["family"] == family]
+
+    return {
+        "agg_equivalence.csv": tm.equivalence_summary(scored, **kw),
+        "agg_extended_null.csv": tm.extended_null_compare(leaves, **kw),
+        "agg_anchor.csv": tm.anchor_compare(leaves),
+        "agg_conditions_summary.csv": tm.cluster_summary(
+            tm.with_pooled(_of(deltas, plan.FAMILY_V2CONDITIONS), "animal"),
+            ["animal", "condition"],
+            **kw,
+        ),
+        "agg_dose_curve.csv": tm.cluster_summary(
+            tm.with_pooled(_of(deltas, plan.FAMILY_V2DOSE), "animal"),
+            ["animal", "num_epochs"],
+            **kw,
+        ),
+        "agg_topk_cells.csv": _of(long, plan.FAMILY_V2TOPK),
+        "agg_rolloutscreen_cells.csv": _of(long, plan.FAMILY_V2ROLLOUTSCREEN),
+    }
+
+
 # ---- build -----------------------------------------------------------------------------
 
 
@@ -535,7 +586,12 @@ def _stamp() -> str:
 def _subset(roster: Roster, families: Sequence[str] | None) -> Roster:
     if not families:
         return roster
-    unknown = set(families) - set(plan.FAMILIES) - set(plan.PART2_FAMILIES)
+    unknown = (
+        set(families)
+        - set(plan.FAMILIES)
+        - set(plan.PART2_FAMILIES)
+        - set(plan.PART3_FAMILIES)
+    )
     if unknown:
         raise ValueError(f"unknown families {sorted(unknown)}")
     keep = set(families)
@@ -577,8 +633,10 @@ def build_results(
     roster, roster_sha = load_roster(Path(roster_path))
     validate_roster(roster)
     roster = _subset(roster, families)
-    output_root = Path(output_root or plan.paths_config_doc()["output_root"])
-    out_root = Path(out_root) if out_root is not None else default_out_root()
+    family = roster.cells[0].family
+    output_root = Path(output_root or plan.roots_of(family).paths_doc()["output_root"])
+    out_root = Path(out_root) if out_root is not None else default_out_root(family)
+    part3 = plan.campaign_of(family) == plan.CAMPAIGN3
     stamp = _stamp()
     dest = out_root / f"build-{stamp}"
     tmp = out_root / f".build-{stamp}.partial"
@@ -594,7 +652,13 @@ def build_results(
     axes = assemble_axes(roster)
     leaves = assemble_leaves(roster, output_root)
     metrics = tm.metric_columns(leaves)
-    cells = tm.cell_contrasts(leaves, metrics, n_boot=n_boot, seed=seed)
+    arms = tm.ARMS3 if part3 else tm.ARMS
+    contrast_kw = (
+        {"arms": tm.ARMS3, "scored_arms": tm.ARMS3, "contrasts": tm.CONTRASTS3}
+        if part3
+        else {}
+    )
+    cells = tm.cell_contrasts(leaves, metrics, n_boot=n_boot, seed=seed, **contrast_kw)
     teachers = tm.teacher_labels(assemble_teachers(roster, output_root))
     aggregates = family_aggregates(leaves, cells, axes, n_boot=n_boot, seed=seed)
     cover = tm.coverage(leaves, teachers)
@@ -627,7 +691,7 @@ def build_results(
             "bootstrap_seed": seed,
             "confidence": tm.CONFIDENCE,
             "metrics": metrics,
-            "arms_evaluated": dict(tm.arms_present(leaves)),
+            "arms_evaluated": dict(tm.arms_present(leaves, arms)),
             "files": {name: int(len(frame)) for name, frame in tables.items()},
         },
     )

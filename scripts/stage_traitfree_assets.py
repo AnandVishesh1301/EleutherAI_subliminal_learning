@@ -1,4 +1,4 @@
-"""CLI: stage every `traitfree` input onto its ssd-1 root (create-only, sha-checked)."""
+"""CLI: stage every `traitfree` input onto its part's root (create-only, sha-checked)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from subliminal_learning.utils.logging_setup import configure_loguru
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--part", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--part", type=int, choices=(1, 2, 3), default=1)
     parser.add_argument("--roster", type=Path, default=None)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
@@ -25,7 +25,9 @@ def main() -> None:
     if args.docgen_only:
         traitfree_staging_pipeline.run_docgen_only()
         return
-    roster = args.roster or (plan.ROSTER2_PATH if args.part == 2 else plan.ROSTER_PATH)
+    roster = args.roster or {2: plan.ROSTER2_PATH, 3: plan.ROSTER3_PATH}.get(
+        args.part, plan.ROSTER_PATH
+    )
     traitfree_staging_pipeline.run(roster, dry_run=args.dry_run)
     if args.part == 2 and not args.dry_run:
         traitfree_staging_pipeline.write_paths2()

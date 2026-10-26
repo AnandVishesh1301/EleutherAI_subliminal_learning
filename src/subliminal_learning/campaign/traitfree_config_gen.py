@@ -8,8 +8,9 @@ its leaf's config dir. Placebo teacher YAMLs copy the source teacher's recipe on
 trait-free corpus at the source step count. Training / experiment configs, spec
 registry and eval blocks come from the source campaign that trained each cell
 (`cell_recipe`) or teacher (`teacher_recipe`); the blocks are imported from those
-campaigns' own builders. Files live under `traitfree_plan.GENERATED_CONFIG_DIR /
-<family>` and every path inside them is absolute.
+campaigns' own builders. Files live under the family's
+`traitfree_plan.roots_of(family).generated_config_dir / <family>` and every path inside
+them is absolute.
 
 `source_extra` (the roster's record of the source job) must carry ``n_train_steps``,
 ``n_train_prompts`` and ``gradient_accumulation_steps``; its ``experiment_config``,
@@ -81,18 +82,25 @@ _SOURCE_TOKEN: tuple[tuple[str, re.Pattern[str]], ...] = (
     (SOURCE_CKPTGRID, re.compile(r"ckptgrid")),
     (SOURCE_CKPTGRID2, re.compile(r"ckptgrid2")),
 )
+_FAMILY_SOURCES: dict[str, tuple[str, ...]] = {
+    plan.FAMILY_CONDITIONS: (SOURCE_WS160M,),
+    plan.FAMILY_CROSSMODEL: (SOURCE_XFAM2,),
+    plan.FAMILY_TOPK: (SOURCE_OPDLIM,),
+    plan.FAMILY_ROLLOUTSCREEN: (SOURCE_STRICTSCREEN,),
+    plan.FAMILY_DOSE: (SOURCE_WS160M,),
+    plan.FAMILY_CHECKPOINTS: (SOURCE_WS160M, SOURCE_CKPTGRID, SOURCE_CKPTGRID2),
+    plan.FAMILY_CKPTGRIDS: (SOURCE_WS160M, SOURCE_CKPTGRID, SOURCE_CKPTGRID2),
+    plan.FAMILY_CKPTGRIDSNEW: (SOURCE_WS160M, SOURCE_CKPTGRID, SOURCE_CKPTGRID2),
+    plan.FAMILY_CKPTEP2: (SOURCE_WS160M,),
+    plan.FAMILY_CKPTEP8: (SOURCE_WS160M,),
+}
 FAMILY_SOURCES: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
     {
-        plan.FAMILY_CONDITIONS: (SOURCE_WS160M,),
-        plan.FAMILY_CROSSMODEL: (SOURCE_XFAM2,),
-        plan.FAMILY_TOPK: (SOURCE_OPDLIM,),
-        plan.FAMILY_ROLLOUTSCREEN: (SOURCE_STRICTSCREEN,),
-        plan.FAMILY_DOSE: (SOURCE_WS160M,),
-        plan.FAMILY_CHECKPOINTS: (SOURCE_WS160M, SOURCE_CKPTGRID, SOURCE_CKPTGRID2),
-        plan.FAMILY_CKPTGRIDS: (SOURCE_WS160M, SOURCE_CKPTGRID, SOURCE_CKPTGRID2),
-        plan.FAMILY_CKPTGRIDSNEW: (SOURCE_WS160M, SOURCE_CKPTGRID, SOURCE_CKPTGRID2),
-        plan.FAMILY_CKPTEP2: (SOURCE_WS160M,),
-        plan.FAMILY_CKPTEP8: (SOURCE_WS160M,),
+        **_FAMILY_SOURCES,
+        **{
+            f: _FAMILY_SOURCES[src]
+            for f, src in plan.PART3_SOURCE_FAMILY.items()
+        },
     }
 )
 # The sweep's default `--training-config`; ckptgrid / ckptgrid2 student jobs passed none.
@@ -527,7 +535,7 @@ def teacher_recipe(t: PlaceboTeacher) -> TeacherRecipe:
 def is_extended_null(cell: RosterCell) -> bool:
     """The extended placebo null cell (plan D8)."""
     return (
-        cell.family == plan.EXTENDED_NULL_FAMILY
+        cell.family in plan.EXTENDED_NULL_FAMILIES
         and cell.animal == plan.EXTENDED_NULL_ANIMAL
         and cell.self_pair
         and cell.student.repo == plan.EXTENDED_NULL_BASE_REPO
@@ -556,12 +564,18 @@ def _unique_steps(steps: Mapping[int, int], what: str) -> int:
 def cell_placebo_param_tag(cell: RosterCell) -> str:
     """Placebo teacher param tag of `cell` (from its own source teacher)."""
     steps = _unique_steps(cell.source_teacher.n_train_steps, cell.cell_id)
-    return placebo_param_tag(steps, cell.source_teacher.param_tag)
+    return placebo_param_tag(
+        steps,
+        cell.source_teacher.param_tag,
+        plan.corpus_name_of(cell.teacher_family),
+    )
 
 
 def teacher_param_tag(t: PlaceboTeacher) -> str:
     """Param tag of a placebo teacher."""
-    return placebo_param_tag(t.max_steps, t.source.param_tag)
+    return placebo_param_tag(
+        t.max_steps, t.source.param_tag, plan.corpus_name_of(t.family)
+    )
 
 
 def _placebo_teacher(roster: Roster, cell: RosterCell) -> PlaceboTeacher:
@@ -802,9 +816,9 @@ def lmeval_yaml(
 # ---- teacher YAMLs --------------------------------------------------------------------
 
 
-def slot_docs_root() -> Path:
-    """Parent of every slot copy (the teacher sweep's `sdf_docs_root`)."""
-    return plan.CAMPAIGN_ROOT / "datasets" / plan.SLOT_CORPUS_SUBDIR
+def slot_docs_root(family: str = plan.FAMILY_CONDITIONS) -> Path:
+    """Parent of `family`'s slot copies (the teacher sweep's `sdf_docs_root`)."""
+    return plan.slot_corpus_root(family)
 
 
 def _parse_teacher_tag(tag: str) -> tuple[int, float, int, int]:
@@ -829,9 +843,11 @@ def teacher_train_yaml(t: PlaceboTeacher) -> dict:
             "learning_rate": [lr],
             "lora": [{"r": r, "alpha": alpha}],
         },
-        "corpus_tag": plan.CORPUS_NAME,
-        "sdf_docs_root": str(slot_docs_root()),
-        "sdf_docs": {t.slot_animal: str(plan.slot_corpus_path(t.slot_animal))},
+        "corpus_tag": plan.corpus_name_of(t.family),
+        "sdf_docs_root": str(slot_docs_root(t.family)),
+        "sdf_docs": {
+            t.slot_animal: str(plan.slot_corpus_path(t.slot_animal, t.family))
+        },
         "train_overrides": {**recipe.train_overrides, "max_steps": int(t.max_steps)},
         "run_set_id": rsid,
         "run_set_model_size": plan.MODEL_SIZE,
@@ -883,7 +899,7 @@ def _name(stem: str) -> str:
 
 def config_dir(family: str) -> Path:
     """Generated-config directory of one family."""
-    return plan.GENERATED_CONFIG_DIR / family
+    return plan.roots_of(family).generated_config_dir / family
 
 
 def cell_slug(cell: RosterCell) -> str:

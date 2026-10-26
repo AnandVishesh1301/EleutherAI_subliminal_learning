@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import shlex
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from subliminal_learning.campaign import opdlim_plan
@@ -42,7 +42,6 @@ VERIFY_MODULE = "scripts.verify_traitfree_leaf"
 
 KIND_TEACHER = "teacher"
 KIND_TEACHER_EVAL = "teacher_eval"
-EVAL_LOCK_DIR = plan.CAMPAIGN_ROOT / "locks" / "evals"
 EVAL_LOCK_WAIT_S = 6 * 3600
 
 # Estimates are card-hours (wall hours x slots / cap). A 160M FROZEN leaf (625 steps)
@@ -100,12 +99,16 @@ class QueueSpec:
 
 
 def cell_tier(cell: RosterCell) -> str:
-    """Execution tier of a cell (checkpoint and grid cells by panel)."""
+    """Execution tier of a cell (checkpoint and grid cells by panel; Part III: roster)."""
+    if cell.family in plan.PART3_FAMILIES:
+        return cell.tier
     return _panel_tier(cell.family, cell.panels)
 
 
 def student_group(cell: RosterCell) -> str:
-    """Student / tb queue group of a cell."""
+    """Student / tb queue group of a cell (Part III: its tier)."""
+    if cell.family in plan.PART3_FAMILIES:
+        return cell.tier
     if cell.family in plan.FAMILY_TIER:
         return cell.family
     return f"{cell.family}-{cell_tier(cell)}"
@@ -129,13 +132,16 @@ def _teacher_tier(family: str) -> str:
 # ---- commands -------------------------------------------------------------------------
 
 
-def _paths_flag() -> str:
-    return f"--paths-config {shlex.quote(str(plan.PATHS_CONFIG_PATH))}"
+def _paths_flag(family: str) -> str:
+    path = plan.roots_of(family).paths_config_path
+    return f"--paths-config {shlex.quote(str(path))}"
 
 
-def _config_flags(training: str, experiment: str, registry: str | None) -> list[str]:
+def _config_flags(
+    family: str, training: str, experiment: str, registry: str | None
+) -> list[str]:
     flags = [
-        _paths_flag(),
+        _paths_flag(family),
         f"--training-config {shlex.quote(training)}",
         f"--experiment-config {shlex.quote(experiment)}",
     ]
@@ -183,7 +189,10 @@ def student_train_cmd(cell: RosterCell, kind: str, tfs: int | None, gseed: int) 
         f"--run-set-id {rsid}",
         f"--teacher-run-set-id {plan.RUN_SET_ID[cell.teacher_family]}",
         *_config_flags(
-            recipe.training_config, recipe.experiment_config, recipe.spec_registry
+            cell.family,
+            recipe.training_config,
+            recipe.experiment_config,
+            recipe.spec_registry,
         ),
         *recipe.extra_flags,
     ]
@@ -207,7 +216,8 @@ def verify_leaf_cmd(cell: RosterCell, kind: str, tfs: int | None, gseed: int) ->
 def eval_lock(cell: RosterCell, kind: str, tfs: int | None) -> Path:
     """Lock file of the config dir a leaf's eval scores (shared by its sibling seeds)."""
     ident = f"{kind}|{cell.cell_id}|{tfs if kind == KIND_PLACEBO else '-'}"
-    return EVAL_LOCK_DIR / f"{hashlib.sha256(ident.encode()).hexdigest()[:24]}.lock"
+    digest = hashlib.sha256(ident.encode()).hexdigest()[:24]
+    return plan.roots_of(cell.family).eval_lock_dir / f"{digest}.lock"
 
 
 def student_eval_cmd(cell: RosterCell, kind: str, verify_path: Path, lock: Path) -> str:
@@ -219,7 +229,10 @@ def student_eval_cmd(cell: RosterCell, kind: str, verify_path: Path, lock: Path)
         f"--base-models {shlex.quote(cell.student.token)}",
         f"--run-set-id {plan.RUN_SET_ID[cell.family]}",
         *_config_flags(
-            recipe.training_config, recipe.experiment_config, recipe.spec_registry
+            cell.family,
+            recipe.training_config,
+            recipe.experiment_config,
+            recipe.spec_registry,
         ),
     ]
     return f"flock -w {EVAL_LOCK_WAIT_S} {shlex.quote(str(lock))} " + _module_cmd(
@@ -250,7 +263,10 @@ def _teacher_flags(t: PlaceboTeacher) -> list[str]:
         f"--param-tags {cgen.teacher_param_tag(t)}",
         f"--run-set-id {plan.RUN_SET_ID[t.family]}",
         *_config_flags(
-            recipe.training_config, recipe.experiment_config, recipe.spec_registry
+            t.family,
+            recipe.training_config,
+            recipe.experiment_config,
+            recipe.spec_registry,
         ),
     ]
 
@@ -258,7 +274,7 @@ def _teacher_flags(t: PlaceboTeacher) -> list[str]:
 def teacher_manifest_path(t: PlaceboTeacher, ftseed: int) -> Path:
     """Where the teacher sweep writes one placebo teacher's `train_manifest.json`."""
     return (
-        Path(plan.paths_config_doc()["output_root"])
+        Path(plan.roots_of(t.family).paths_doc()["output_root"])
         / SDF_TEACHERS_SUBDIR
         / plan.RUN_SET_ID[t.family]
         / t.slot_animal
@@ -624,3 +640,79 @@ def queue_gpu_hours(
     for pj in jobs:
         out[placed[pj.job.jobkey]] += pj.gpu_h
     return out
+
+
+# ---- Part III (`traitfree3`) -----------------------------------------------------------
+
+
+def part3_teacher_tiers(roster: Roster) -> dict[str, str]:
+    """Teacher key -> earliest tier among the cells that use it."""
+    out: dict[str, str] = {}
+    for cell in roster.cells:
+        key = roster.teacher_for(cell).key
+        tier = cell.tier
+        if key not in out or plan.TIERS3.index(tier) < plan.TIERS3.index(out[key]):
+            out[key] = tier
+    return out
+
+
+def part3_slots(job: Job) -> int:
+    """Slots of a Part III job: one, unless it needs more than two slot-units of memory."""
+    mem = job.mem_mib or 0
+    return 1 if mem <= 2 * plan.SLOT_MIB else plan.slots_for(mem)
+
+
+def _part3_cell_order(cell: RosterCell) -> tuple:
+    anchor_first = cell.family != plan.FAMILY_V1ANCHOR
+    return (anchor_first, plan.PART3_ANIMAL_ORDER.index(cell.animal), cell.cell_id)
+
+
+def part3_queues(roster: Roster) -> list[QueueSpec]:
+    """Every Part III queue, by priority: one teacher and one student queue per tier.
+
+    Teacher queue t_k holds the train jobs of teachers first used in tier k; student
+    queue t_k holds those teachers' evals, then tier k's leaves in cell order
+    (`v1anchor` first, then `plan.PART3_ANIMAL_ORDER`, then cell id). Student queue
+    t_k waits (strict) for every teacher queue of tiers <= k. No queue is empty.
+    A job of at most two slot-units of memory takes one slot (the policy's memory
+    gate packs the cards); a heavier one (top-K lm-eval leaves) keeps its whole card.
+
+    Raises:
+        ValueError: A cell or teacher is not Part III, or a jobkey repeats.
+    """
+    families = {c.family for c in roster.cells} | {t.family for t in roster.teachers}
+    if not families <= set(plan.PART3_FAMILIES):
+        raise ValueError(f"not a Part III roster: {sorted(families)}")
+    jobs = {
+        pj.job.jobkey: replace(pj, job=replace(pj.job, slots=part3_slots(pj.job)))
+        for pj in planned_jobs(roster)
+    }
+    tiers = part3_teacher_tiers(roster)
+    teachers: dict[str, list[Job]] = {}
+    students: dict[str, list[Job]] = {}
+    for t in roster.teachers:
+        base = f"{t.slot_animal}|{t.base.model_dir}"
+        tier = tiers[t.key]
+        for ftseed in t.ftseeds:
+            key = Job(key=_key("teach", t.family, base, f"t{ftseed}"), cmd="").jobkey
+            teachers.setdefault(tier, []).append(jobs.pop(key).job)
+        key = Job(key=_key("teval", t.family, base), cmd="").jobkey
+        students.setdefault(tier, []).append(jobs.pop(key).job)
+    for cell in sorted(roster.cells, key=_part3_cell_order):
+        for tfs, gseed in cgen.placebo_leaves(cell):
+            key = Job(key=_key("pl", cell.cell_id, f"t{tfs}|g{gseed}"), cmd="").jobkey
+            students.setdefault(cell.tier, []).append(jobs.pop(key).job)
+    if jobs:
+        raise ValueError(f"{len(jobs)} Part III jobs fit no queue")
+    specs: list[QueueSpec] = []
+    for i, tier in enumerate(plan.TIERS3):
+        if tier in teachers:
+            specs.append(QueueSpec(plan.teacher_queue3(tier), tuple(teachers[tier]), (), False))
+        if tier in students:
+            deps = tuple(
+                plan.teacher_queue3(t) for t in plan.TIERS3[: i + 1] if t in teachers
+            )
+            specs.append(
+                QueueSpec(plan.student_queue3(tier), tuple(students[tier]), deps, bool(deps))
+            )
+    return sorted(specs, key=lambda s: (-plan.QUEUE_PRIORITIES3[s.name], s.name))

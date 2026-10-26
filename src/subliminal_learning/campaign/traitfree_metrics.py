@@ -89,6 +89,20 @@ CONTRASTS: tuple[tuple[str, str, str, bool], ...] = (
     ("placebo_minus_sb_pooled", ARM_PLACEBO, ARM_SB_POOLED, False),
     ("placebo_minus_tb_pooled", ARM_PLACEBO, ARM_TB_POOLED, True),
 )
+# Part III: ``placebo`` = the v2-corpus (or `v1anchor` re-run) placebo, ``ref`` = the
+# v1 lighthouse placebo leaves of the copied Part I cell.
+ARM_REF = "ref"
+ARMS3: tuple[str, ...] = (ARM_TREATMENT, ARM_SB, ARM_PLACEBO, ARM_REF)
+CONTROL_ARMS3: tuple[str, ...] = (ARM_SB, ARM_PLACEBO, ARM_REF)
+CONTRASTS3: tuple[tuple[str, str, str, bool], ...] = (
+    ("delta_sb", ARM_TREATMENT, ARM_SB, False),
+    ("delta_placebo", ARM_TREATMENT, ARM_PLACEBO, False),
+    ("delta_ref", ARM_TREATMENT, ARM_REF, False),
+    ("placebo_minus_ref", ARM_PLACEBO, ARM_REF, False),
+    ("placebo_minus_sb", ARM_PLACEBO, ARM_SB, False),
+    ("ref_minus_sb", ARM_REF, ARM_SB, False),
+)
+_TEACHER_LEVEL_ARMS = frozenset({ARM_TREATMENT, ARM_PLACEBO, ARM_REF})
 CONFIDENCE = 0.95
 PRIMARY_METRIC = "p_target_test"
 TEACHER_WORKFLOW = "sdf"
@@ -109,6 +123,9 @@ _W0_FAMILIES = frozenset(
         plan.FAMILY_DOSE,
         plan.FAMILY_CHECKPOINTS,
         *plan.PART2_FAMILIES,
+        plan.FAMILY_V1ANCHOR,
+        plan.FAMILY_V2CONDITIONS,
+        plan.FAMILY_V2DOSE,
     }
 )
 _STEP_RE = re.compile(r"@step(\d+)$")
@@ -149,16 +166,28 @@ LEAF_ID_COLUMNS: tuple[str, ...] = (
 CONTRAST_VALUE_COLUMNS: tuple[str, ...] = tuple(
     f"{name}{suffix}" for name, *_ in CONTRASTS for suffix in ("", "_lo", "_hi")
 )
-CELL_STAT_COLUMNS: tuple[str, ...] = (
-    "metric",
-    "tb_is_sb",
-    *(f"expected_{a}" for a in ARMS),
-    *(f"n_{a}" for a in SCORED_ARMS),
-    "incomplete",
-    "incomplete_arms",
-    *(f"mean_{a}" for a in SCORED_ARMS),
-    *CONTRAST_VALUE_COLUMNS,
-)
+
+
+def cell_stat_columns(
+    arms: Sequence[str],
+    scored_arms: Sequence[str],
+    contrasts: Sequence[tuple[str, str, str, bool]],
+) -> tuple[str, ...]:
+    """Columns of `cell_contrasts` for one arm / contrast set."""
+    return (
+        "metric",
+        "tb_is_sb",
+        *(f"expected_{a}" for a in arms),
+        *(f"n_{a}" for a in scored_arms),
+        "incomplete",
+        "incomplete_arms",
+        *(f"mean_{a}" for a in scored_arms),
+        *(f"{name}{sfx}" for name, *_ in contrasts for sfx in ("", "_lo", "_hi")),
+    )
+
+
+CELL_STAT_COLUMNS: tuple[str, ...] = cell_stat_columns(ARMS, SCORED_ARMS, CONTRASTS)
+CELL_STAT_COLUMNS3: tuple[str, ...] = cell_stat_columns(ARMS3, ARMS3, CONTRASTS3)
 LEAF_DELTA_COLUMNS: tuple[str, ...] = (
     "cell_id",
     "control",
@@ -270,10 +299,16 @@ def source_teacher_tag(cell: RosterCell) -> str:
     return sorted(tags)[0]
 
 
-def placebo_teacher_tag(cell: RosterCell, max_steps: int, tfs: int) -> str:
-    """``sdf-<placebo_param_tag>-tfs<t>[_tbase-<label>]`` of a placebo student."""
+def placebo_teacher_tag(
+    cell: RosterCell, max_steps: int, tfs: int, corpus: str | None = None
+) -> str:
+    """``sdf-<placebo_param_tag>-tfs<t>[_tbase-<label>]`` of a placebo student.
+
+    `corpus` defaults to the corpus of the cell's teacher family.
+    """
     _, sep, label = source_teacher_tag(cell).partition("_tbase-")
-    tag = placebo_param_tag(max_steps, cell.source_teacher.param_tag)
+    corpus = corpus or plan.corpus_name_of(cell.teacher_family)
+    tag = placebo_param_tag(max_steps, cell.source_teacher.param_tag, corpus)
     return f"{TEACHER_WORKFLOW}-{tag}-tfs{tfs}" + (f"_tbase-{label}" if sep else "")
 
 
@@ -317,14 +352,18 @@ def placebo_teacher_param_dir(output_root: Path, teacher: PlaceboTeacher) -> Pat
         / plan.RUN_SET_ID[teacher.family]
         / teacher.slot_animal
         / teacher.base.model_dir
-        / placebo_param_tag(teacher.max_steps, teacher.source.param_tag)
+        / placebo_param_tag(
+            teacher.max_steps,
+            teacher.source.param_tag,
+            plan.corpus_name_of(teacher.family),
+        )
     )
 
 
 def is_extended_null_cell(cell: RosterCell) -> bool:
     """The plan-D8 cell: the extended-null base's bear self cell in `conditions`."""
     return (
-        cell.family == plan.EXTENDED_NULL_FAMILY
+        cell.family in plan.EXTENDED_NULL_FAMILIES
         and cell.animal == plan.EXTENDED_NULL_ANIMAL
         and cell.teacher.repo == plan.EXTENDED_NULL_BASE_REPO
         and cell.self_pair
@@ -428,6 +467,21 @@ def expected_leaves(roster: Roster, output_root: Path) -> tuple[ExpectedLeaf, ..
             )
             for tfs, gseed, extended in placebo_seeds(cell)
         ]
+        rotated = set(plan.placebo_leaf_seeds())
+        out += [
+            ExpectedLeaf(
+                cell.cell_id,
+                cell.family,
+                ARM_REF,
+                int(ref.tfs),
+                int(ref.gseed),
+                str(ref.path),
+                ref.run_set,
+                new_leaf=False,
+                extended_null=(int(ref.tfs), int(ref.gseed)) not in rotated,
+            )
+            for ref in cell.ref_placebo
+        ]
     return tuple(out)
 
 
@@ -483,7 +537,7 @@ def cell_condition(cell: RosterCell) -> str:
     if cell.family in _W0_FAMILIES:
         t, s = ws160m_base_of(cell.teacher.repo), ws160m_base_of(cell.student.repo)
         return ws160m_models.category(t, s) if t and s else fallback
-    if cell.family == plan.FAMILY_ROLLOUTSCREEN:
+    if plan.source_family_of(cell.family) == plan.FAMILY_ROLLOUTSCREEN:
         return _strictscreen_group(cell) or fallback
     return fallback
 
@@ -645,7 +699,7 @@ def _scored_rows(
     """Rows scoring `arm` in one cell, and the RNG key of the arm they come from.
 
     A self cell's tb arm is its sb arm; primary sb / tb keep `primary_scope`
-    rows; placebo drops extended-null leaves.
+    rows; placebo and ref drop extended-null leaves.
     """
     base = _POOLED_OF.get(arm, arm)
     if base == ARM_TB and self_pair:
@@ -655,7 +709,7 @@ def _scored_rows(
         sel = sel[sel["status"] == STATUS_EVALUATED]
     if base in (ARM_SB, ARM_TB) and arm not in _POOLED_OF:
         sel = sel[sel["primary_scope"].astype(bool)]
-    if base == ARM_PLACEBO:
+    if base in (ARM_PLACEBO, ARM_REF):
         sel = sel[~sel["extended_null"].astype(bool)]
     key = base + ("_pooled" if arm in _POOLED_OF else "")
     return _in_leaf_order(sel), key
@@ -668,8 +722,11 @@ def cell_contrasts(
     n_boot: int = plan.BOOTSTRAP_N,
     seed: int = plan.BOOTSTRAP_SEED,
     confidence: float = CONFIDENCE,
+    arms: Sequence[str] = ARMS,
+    scored_arms: Sequence[str] = SCORED_ARMS,
+    contrasts: Sequence[tuple[str, str, str, bool]] = CONTRASTS,
 ) -> pd.DataFrame:
-    """One row per (cell, metric): arm means, the `CONTRASTS` and their CIs.
+    """One row per (cell, metric): arm means, the `contrasts` and their CIs.
 
     A metric no arm of a cell carries is left out (the primary one never is).
     Treatment and placebo arms resample teacher ftseeds, then gseeds; sb and tb
@@ -688,9 +745,12 @@ def cell_contrasts(
         n_boot: Replicates.
         seed: Bootstrap seed.
         confidence: Two-sided percentile level.
+        arms: Arms whose counts decide ``incomplete``.
+        scored_arms: Arms scored (`arms` plus pooled variants).
+        contrasts: ``(name, minuend, subtrahend, cross_only)`` rows.
 
     Returns:
-        ``cell_id`` + `CELL_STAT_COLUMNS`.
+        ``cell_id`` + `cell_stat_columns(arms, scored_arms, contrasts)`.
     """
     out: list[dict] = []
     for cell_id, rows in leaves.groupby("cell_id", sort=True):
@@ -700,12 +760,12 @@ def cell_contrasts(
         stats: dict[str, dict[str, tuple[int, float]]] = {}
         arm_data: dict[str, tuple[pd.DataFrame, np.ndarray]] = {}
         expected = {
-            a: len(_scored_rows(rows, a, self_pair, evaluated=False)[0]) for a in ARMS
+            a: len(_scored_rows(rows, a, self_pair, evaluated=False)[0]) for a in arms
         }
-        for arm in SCORED_ARMS:
+        for arm in scored_arms:
             sel, key = _scored_rows(rows, arm, self_pair, evaluated=True)
             rng = stable_rng(seed, str(cell_id), key)
-            if arm in (ARM_TREATMENT, ARM_PLACEBO):
+            if arm in _TEACHER_LEVEL_ARMS:
                 weights = two_level_weights(sel["tfs"].tolist(), n_boot, rng)
             elif paired:
                 weights = stratum_weights(sel["gseed"].tolist(), n_boot, rng)
@@ -721,26 +781,26 @@ def cell_contrasts(
                     _finite_mean(values),
                 )
         for metric in metrics:
-            n = {a: stats[a][metric][0] for a in SCORED_ARMS}
+            n = {a: stats[a][metric][0] for a in scored_arms}
             if metric != PRIMARY_METRIC and not any(n.values()):
                 continue
-            short = [a for a in ARMS if n[a] < expected[a] or expected[a] == 0]
+            short = [a for a in arms if n[a] < expected[a] or expected[a] == 0]
             row = {
                 "cell_id": cell_id,
                 "metric": metric,
                 "tb_is_sb": self_pair,
-                **{f"expected_{a}": expected[a] for a in ARMS},
-                **{f"n_{a}": n[a] for a in SCORED_ARMS},
+                **{f"expected_{a}": expected[a] for a in arms},
+                **{f"n_{a}": n[a] for a in scored_arms},
                 "incomplete": bool(short),
                 "incomplete_arms": ";".join(short),
-                **{f"mean_{a}": stats[a][metric][1] for a in SCORED_ARMS},
+                **{f"mean_{a}": stats[a][metric][1] for a in scored_arms},
             }
-            for name, left, right, cross_only in CONTRASTS:
+            for name, left, right, cross_only in contrasts:
                 if cross_only and self_pair:
                     row.update({name: math.nan, f"{name}_lo": math.nan})
                     row[f"{name}_hi"] = math.nan
                     continue
-                if paired and right != ARM_PLACEBO:
+                if paired and right not in (ARM_PLACEBO, ARM_REF):
                     (lsel, lw), (rsel, rw) = arm_data[left], arm_data[right]
                     point, diff = paired_delta(
                         pd.to_numeric(lsel[metric], errors="coerce").to_numpy(float),
@@ -757,7 +817,8 @@ def cell_contrasts(
                 row[name] = point
                 row[f"{name}_lo"], row[f"{name}_hi"] = lo, hi
             out.append(row)
-    return pd.DataFrame(out, columns=["cell_id", *CELL_STAT_COLUMNS])
+    columns = cell_stat_columns(arms, scored_arms, contrasts)
+    return pd.DataFrame(out, columns=["cell_id", *columns])
 
 
 def extended_null_summary(
@@ -849,7 +910,10 @@ def extended_null_summary(
 
 
 def leaf_deltas(
-    leaves: pd.DataFrame, cells: pd.DataFrame, metric: str = PRIMARY_METRIC
+    leaves: pd.DataFrame,
+    cells: pd.DataFrame,
+    metric: str = PRIMARY_METRIC,
+    control_arms: Sequence[str] = CONTROL_ARMS,
 ) -> pd.DataFrame:
     """Every evaluated treatment leaf against each control's cell mean.
 
@@ -863,7 +927,7 @@ def leaf_deltas(
     out: list[dict] = []
     for row in treat.itertuples(index=False):
         value = float(pd.to_numeric(getattr(row, metric), errors="coerce"))
-        for control in CONTROL_ARMS:
+        for control in control_arms:
             c_mean = (
                 float(means.at[row.cell_id, f"mean_{control}"])
                 if row.cell_id in means.index
@@ -947,11 +1011,15 @@ def cluster_summary(
     return pd.DataFrame(out, columns=[*by, *SUMMARY_COLUMNS])
 
 
-def cells_long(cells: pd.DataFrame, metric: str = PRIMARY_METRIC) -> pd.DataFrame:
+def cells_long(
+    cells: pd.DataFrame,
+    metric: str = PRIMARY_METRIC,
+    control_arms: Sequence[str] = CONTROL_ARMS,
+) -> pd.DataFrame:
     """Per-cell delta under each control, one row per (cell, control)."""
     out: list[dict] = []
     for row in cells[cells["metric"] == metric].to_dict("records"):
-        for control in CONTROL_ARMS:
+        for control in control_arms:
             name = f"delta_{control}"
             out.append(
                 {
@@ -1227,7 +1295,281 @@ def ensure_columns(frame: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:
     return frame.assign(**dict.fromkeys(missing, math.nan)) if missing else frame
 
 
-def arms_present(leaves: pd.DataFrame) -> Mapping[str, int]:
+def arms_present(leaves: pd.DataFrame, arms: Sequence[str] = ARMS) -> Mapping[str, int]:
     """Evaluated leaves per arm."""
     live = leaves[leaves["status"] == STATUS_EVALUATED]
-    return {a: int((live["arm"] == a).sum()) for a in ARMS}
+    return {a: int((live["arm"] == a).sum()) for a in arms}
+
+
+# ---- Part III (`traitfree3`): v2 vs v1 placebo --------------------------------------
+
+EQUIVALENCE_COLUMNS: tuple[str, ...] = (
+    "scope",
+    "group",
+    "n_cells",
+    "n_incomplete",
+    "n_teacher_clusters",
+    "mean_placebo",
+    "mean_ref",
+    "placebo_over_ref",
+    "mean_delta_placebo",
+    "mean_delta_ref",
+    "mean_placebo_minus_ref",
+    "mean_placebo_minus_ref_lo",
+    "mean_placebo_minus_ref_hi",
+    "clustered_lo",
+    "clustered_hi",
+    "n_cells_difference_excludes_0",
+    "n_significance_flips",
+    "equivalent",
+    "equivalent_clustered",
+)
+
+
+def _excludes_zero(lo: pd.Series, hi: pd.Series) -> pd.Series:
+    return (pd.to_numeric(lo) > 0) | (pd.to_numeric(hi) < 0)
+
+
+def _within_margins(mean: float, lo: float, hi: float) -> bool:
+    return bool(
+        abs(mean) <= plan.EQUIVALENCE_MAX_ABS_MEAN
+        and -plan.EQUIVALENCE_CI <= lo
+        and hi <= plan.EQUIVALENCE_CI
+    )
+
+
+def equivalence_summary(
+    cells: pd.DataFrame,
+    metric: str = PRIMARY_METRIC,
+    *,
+    n_boot: int = plan.BOOTSTRAP_N,
+    seed: int = plan.BOOTSTRAP_SEED,
+    confidence: float = CONFIDENCE,
+) -> pd.DataFrame:
+    """Per v2 family, per tier and over all v2 cells: mean v2 - v1 placebo and verdict.
+
+    Only complete cells are scored. ``equivalent`` (the plan's rule, as the Part I
+    checks): |mean| <= `plan.EQUIVALENCE_MAX_ABS_MEAN` and the whole-cell bootstrap
+    interval inside ±`plan.EQUIVALENCE_CI`; ``equivalent_clustered`` applies the same
+    margins to an interval that resamples teacher configs (family, animal, teacher
+    base), then cells within them. Both are NA below `plan.EQUIVALENCE_MIN_CELLS`
+    cells or with an incomplete cell. A significance flip is a cell whose
+    ``delta_placebo`` and ``delta_ref`` intervals disagree on excluding 0. The
+    `v1anchor` cell is left out (`anchor_compare`).
+
+    Args:
+        cells: `cell_contrasts` rows (Part III columns) with ``family``, ``tier``,
+            ``animal`` and ``teacher``.
+        metric: Metric scored.
+        n_boot: Replicates.
+        seed: Bootstrap seed.
+        confidence: Two-sided percentile level.
+    """
+    live = cells[
+        (cells["metric"] == metric) & (cells["family"] != plan.FAMILY_V1ANCHOR)
+    ]
+    groups = [
+        *(
+            ("family", f, live[live["family"] == f])
+            for f in sorted(live["family"].unique())
+        ),
+        *(
+            ("tier", t, live[live["tier"] == t])
+            for t in plan.TIERS3
+            if (live["tier"] == t).any()
+        ),
+        ("all", "v2", live),
+    ]
+    out: list[dict] = []
+    for scope, group, grp in groups:
+        incomplete = grp["incomplete"].astype(bool)
+        done = grp[~incomplete]
+        v = pd.to_numeric(done["placebo_minus_ref"], errors="coerce").to_numpy(float)
+        ok = np.isfinite(v)
+        v, done = v[ok], done[ok]
+        n = int(v.size)
+        mean = float(v.mean()) if n else math.nan
+        lo = hi = c_lo = c_hi = math.nan
+        clusters = (
+            done["family"] + "|" + done["animal"] + "|" + done["teacher"]
+        ).tolist()
+        if n:
+            rng = stable_rng(seed, "equivalence", scope, str(group))
+            w = rng.multinomial(n, np.full(n, 1.0 / n), n_boot)
+            lo, hi = percentile_ci(weighted_means(w, v), confidence)
+            cw = two_level_weights(
+                clusters,
+                n_boot,
+                stable_rng(seed, "equivalence-clustered", scope, str(group)),
+            )
+            c_lo, c_hi = percentile_ci(weighted_means(cw, v), confidence)
+        judged = n >= plan.EQUIVALENCE_MIN_CELLS and not incomplete.any()
+        flips = _excludes_zero(done["delta_placebo_lo"], done["delta_placebo_hi"]) != (
+            _excludes_zero(done["delta_ref_lo"], done["delta_ref_hi"])
+        )
+        p_mean, r_mean = (
+            _finite_mean(done["mean_placebo"]),
+            _finite_mean(done["mean_ref"]),
+        )
+        out.append(
+            {
+                "scope": scope,
+                "group": group,
+                "n_cells": n,
+                "n_incomplete": int(incomplete.sum()),
+                "n_teacher_clusters": len(set(clusters)),
+                "mean_placebo": p_mean,
+                "mean_ref": r_mean,
+                "placebo_over_ref": p_mean / r_mean if r_mean > 0 else math.nan,
+                "mean_delta_placebo": _finite_mean(done["delta_placebo"]),
+                "mean_delta_ref": _finite_mean(done["delta_ref"]),
+                "mean_placebo_minus_ref": mean,
+                "mean_placebo_minus_ref_lo": lo,
+                "mean_placebo_minus_ref_hi": hi,
+                "clustered_lo": c_lo,
+                "clustered_hi": c_hi,
+                "n_cells_difference_excludes_0": int(
+                    _excludes_zero(
+                        done["placebo_minus_ref_lo"], done["placebo_minus_ref_hi"]
+                    ).sum()
+                ),
+                "n_significance_flips": int(flips.sum()),
+                "equivalent": _within_margins(mean, lo, hi) if judged else None,
+                "equivalent_clustered": _within_margins(mean, c_lo, c_hi)
+                if judged
+                else None,
+            }
+        )
+    return pd.DataFrame(out, columns=list(EQUIVALENCE_COLUMNS))
+
+
+def extended_null_compare(
+    leaves: pd.DataFrame,
+    metric: str = PRIMARY_METRIC,
+    *,
+    n_boot: int = plan.BOOTSTRAP_N,
+    seed: int = plan.BOOTSTRAP_SEED,
+    confidence: float = CONFIDENCE,
+) -> pd.DataFrame:
+    """v2 vs v1 placebo spread on the extended-null cell(s): rotated and all leaves.
+
+    Each arm resamples teacher ftseeds, then gseeds, on its own; ``teacher_sd`` is
+    the SD of per-teacher means.
+    """
+    cols = [
+        "cell_id",
+        "placebo_set",
+        "arm",
+        "n_teachers",
+        "n_leaves",
+        "mean",
+        "teacher_sd",
+        "leaf_sd",
+        "placebo_minus_ref",
+        "placebo_minus_ref_lo",
+        "placebo_minus_ref_hi",
+    ]
+    live = leaves[leaves["status"] == STATUS_EVALUATED]
+    ext = live[live["extended_null"].astype(bool) & (live["arm"] == ARM_REF)]
+    out: list[dict] = []
+    for cell_id in sorted(ext["cell_id"].unique()):
+        rows = _in_leaf_order(live[live["cell_id"] == cell_id])
+        for name in ("rotated", "all"):
+            draws, means = {}, {}
+            for arm in (ARM_PLACEBO, ARM_REF):
+                sel = rows[rows["arm"] == arm]
+                if name == "rotated":
+                    sel = sel[~sel["extended_null"].astype(bool)]
+                values = pd.to_numeric(sel[metric], errors="coerce").to_numpy(float)
+                w = two_level_weights(
+                    sel["tfs"].tolist(), n_boot, stable_rng(seed, cell_id, name, arm)
+                )
+                draws[arm], means[arm] = weighted_means(w, values), _finite_mean(values)
+                per_teacher = (
+                    pd.to_numeric(sel[metric], errors="coerce")
+                    .groupby(sel["tfs"])
+                    .mean()
+                )
+                out.append(
+                    {
+                        "cell_id": cell_id,
+                        "placebo_set": name,
+                        "arm": arm,
+                        "n_teachers": int(sel["tfs"].nunique()),
+                        "n_leaves": int(np.isfinite(values).sum()),
+                        "mean": means[arm],
+                        "teacher_sd": float(per_teacher.std(ddof=1))
+                        if len(per_teacher) > 1
+                        else math.nan,
+                        "leaf_sd": float(np.nanstd(values, ddof=1))
+                        if np.isfinite(values).sum() > 1
+                        else math.nan,
+                    }
+                )
+            lo, hi = percentile_ci(draws[ARM_PLACEBO] - draws[ARM_REF], confidence)
+            for row in out[-2:]:
+                row.update(
+                    {
+                        "placebo_minus_ref": means[ARM_PLACEBO] - means[ARM_REF],
+                        "placebo_minus_ref_lo": lo,
+                        "placebo_minus_ref_hi": hi,
+                    }
+                )
+    return pd.DataFrame(out, columns=cols)
+
+
+def anchor_compare(leaves: pd.DataFrame, metric: str = PRIMARY_METRIC) -> pd.DataFrame:
+    """`v1anchor` re-run vs original v1 leaf, per (teacher ftseed, gseed).
+
+    ``mean_rerun_minus_original`` is over the cell's paired seeds; ``drift_ok`` holds
+    when its magnitude is at most `plan.EQUIVALENCE_MAX_ABS_MEAN` (NA without a pair).
+    """
+    cols = [
+        "cell_id",
+        "tfs",
+        "gseed",
+        "rerun",
+        "original",
+        "rerun_minus_original",
+        "mean_rerun_minus_original",
+        "drift_ok",
+    ]
+    live = leaves[
+        (leaves["family"] == plan.FAMILY_V1ANCHOR)
+        & (leaves["status"] == STATUS_EVALUATED)
+    ]
+    out: list[dict] = []
+    for cell_id, rows in live.groupby("cell_id", sort=True):
+        value = {
+            (arm, int(r.tfs), int(r.gseed)): float(
+                pd.to_numeric(getattr(r, metric), errors="coerce")
+            )
+            for arm in (ARM_PLACEBO, ARM_REF)
+            for r in rows[rows["arm"] == arm].itertuples(index=False)
+        }
+        for _, tfs, gseed in sorted(k for k in value if k[0] == ARM_PLACEBO):
+            rerun = value[(ARM_PLACEBO, tfs, gseed)]
+            original = value.get((ARM_REF, tfs, gseed), math.nan)
+            out.append(
+                {
+                    "cell_id": cell_id,
+                    "tfs": tfs,
+                    "gseed": gseed,
+                    "rerun": rerun,
+                    "original": original,
+                    "rerun_minus_original": rerun - original,
+                }
+            )
+    means = {
+        cell_id: _finite_mean(
+            [r["rerun_minus_original"] for r in out if r["cell_id"] == cell_id]
+        )
+        for cell_id in {r["cell_id"] for r in out}
+    }
+    for r in out:
+        diff = means[r["cell_id"]]
+        r["mean_rerun_minus_original"] = diff
+        r["drift_ok"] = (
+            abs(diff) <= plan.EQUIVALENCE_MAX_ABS_MEAN if math.isfinite(diff) else None
+        )
+    return pd.DataFrame(out, columns=cols)

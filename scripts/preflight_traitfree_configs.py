@@ -342,6 +342,9 @@ class ConfigFiles:
         """The file standing in for canonical `path`."""
         if self.scratch_dir is None:
             return path
+        part3 = plan.ROOTS3.generated_config_dir
+        if path.is_relative_to(part3):
+            return self.scratch_dir / "part3" / path.relative_to(part3)
         return self.scratch_dir / path.relative_to(plan.GENERATED_CONFIG_DIR)
 
 
@@ -671,7 +674,7 @@ def check_teacher_job(
     want, legacy = _source_teacher_identity(source)
     got = json.loads(json.dumps(identity))
     differences = list(_TEACHER_EXPECTED_DIFF)
-    if got.pop("corpus_tag", None) != plan.CORPUS_NAME:
+    if got.pop("corpus_tag", None) != plan.corpus_name_of(t.family):
         problems.append("corpus_tag is not the placebo corpus")
     got.pop("sdf_docs_sha256", None)
     want.pop("sdf_docs_sha256", None)
@@ -698,7 +701,7 @@ def check_teacher_job(
             f"teacher param tag dir {run_dir.parent.name} != {cgen.teacher_param_tag(t)}"
         )
     if Path(str(cfg.sdf_docs_overrides[t.slot_animal])) != plan.slot_corpus_path(
-        t.slot_animal
+        t.slot_animal, t.family
     ):
         problems.append("teacher corpus is not the slot copy")
     if ftseed == min(t.ftseeds):

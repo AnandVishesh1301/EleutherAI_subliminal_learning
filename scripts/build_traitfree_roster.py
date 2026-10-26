@@ -3,9 +3,10 @@
     uv run python -m scripts.build_traitfree_roster
     uv run python -m scripts.build_traitfree_roster --out /tmp/roster.json --scratch
     uv run python -m scripts.build_traitfree_roster --part 2
+    uv run python -m scripts.build_traitfree_roster --part 3
 
 Refuses an existing ``--out``; the default is `traitfree_plan.ROSTER_PATH` (Part II:
-`ROSTER2_PATH`).
+`ROSTER2_PATH`, Part III: `ROSTER3_PATH`).
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from pipelines.traitfree_roster_pipeline import run, run_part2
+from pipelines.traitfree_roster_pipeline import run, run_part2, run_part3
 from subliminal_learning.campaign import traitfree_plan as plan
 from subliminal_learning.config import load_config
 from subliminal_learning.utils.logging_setup import configure_loguru
@@ -21,7 +22,7 @@ from subliminal_learning.utils.logging_setup import configure_loguru
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--part", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--part", type=int, choices=(1, 2, 3), default=1)
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument(
         "--scratch",
@@ -39,6 +40,9 @@ def main(argv: list[str] | None = None) -> None:
     """Build and publish the roster."""
     args = _parse_args(argv)
     configure_loguru()
+    if args.part == 3:
+        run_part3(args.out or plan.ROSTER3_PATH, scratch=args.scratch)
+        return
     cfg = load_config(args.paths, args.model)
     if args.part == 2:
         run_part2(cfg.paths.output_root, args.out or plan.ROSTER2_PATH, scratch=args.scratch)

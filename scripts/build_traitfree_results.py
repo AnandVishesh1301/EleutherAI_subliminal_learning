@@ -27,7 +27,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--family",
         action="append",
-        choices=(*plan.FAMILIES, *plan.PART2_FAMILIES),
+        choices=(*plan.FAMILIES, *plan.PART2_FAMILIES, *plan.PART3_FAMILIES),
         default=None,
     )
     return parser.parse_args(argv)

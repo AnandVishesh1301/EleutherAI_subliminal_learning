@@ -13,8 +13,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -120,6 +121,8 @@ class RosterCell:
         lmeval: Whether the family's source controls carry lm-eval benchmarks.
         placebo_teacher_family: Family whose placebo teacher this cell reuses (Part II
             cells that reuse a Part I teacher); empty for the cell's own family.
+        ref_placebo: Existing placebo leaves of the Part I cell this one copies (Part
+            III: the v1 corpus arm it is compared with); empty elsewhere.
     """
 
     cell_id: str
@@ -139,6 +142,7 @@ class RosterCell:
     source_teacher: SourceTeacher
     lmeval: bool
     placebo_teacher_family: str = ""
+    ref_placebo: tuple[LeafRef, ...] = ()
 
     @property
     def teacher_family(self) -> str:
@@ -209,7 +213,9 @@ class Roster:
         raise KeyError(f"no placebo teacher {key}")
 
 
-def placebo_param_tag(max_steps: int, source_param_tag: str) -> str:
+def placebo_param_tag(
+    max_steps: int, source_param_tag: str, corpus: str = plan.CORPUS_NAME
+) -> str:
     """Param tag of a placebo teacher: the source recipe at `max_steps` + corpus tag.
 
     Raises:
@@ -218,7 +224,7 @@ def placebo_param_tag(max_steps: int, source_param_tag: str) -> str:
     head, sep, tail = source_param_tag.partition("_")
     if not sep or not head.startswith("ep") or "_c-" in source_param_tag:
         raise ValueError(f"unexpected source param tag {source_param_tag!r}")
-    return f"s{max_steps}_{tail}_c-{plan.CORPUS_NAME}"
+    return f"s{max_steps}_{tail}_c-{corpus}"
 
 
 def _leafs(rows: Sequence[Mapping[str, Any]]) -> tuple[LeafRef, ...]:
@@ -259,6 +265,8 @@ def roster_to_json(roster: Roster) -> dict[str, Any]:
         d["source_teacher"] = _st(c.source_teacher)
         if not c.placebo_teacher_family:
             del d["placebo_teacher_family"]
+        if not c.ref_placebo:
+            del d["ref_placebo"]
         cells.append(d)
     doc = {
         "version": ROSTER_VERSION,
@@ -298,6 +306,7 @@ def roster_from_json(doc: Mapping[str, Any]) -> Roster:
             source_teacher=_source_teacher(c["source_teacher"]),
             lmeval=bool(c["lmeval"]),
             placebo_teacher_family=c.get("placebo_teacher_family", ""),
+            ref_placebo=_leafs(c.get("ref_placebo", [])),
         )
         for c in doc["cells"]
     )
@@ -351,12 +360,18 @@ def validate_roster(roster: Roster) -> None:
     if len(keys) != len(set(keys)):
         raise ValueError("duplicate placebo teacher keys")
     families = {c.family for c in roster.cells}
-    part = plan.FAMILIES if families <= set(plan.FAMILIES) else plan.PART2_FAMILIES
+    part, tiers = plan.FAMILIES, plan.TIERS
+    if not families <= set(plan.FAMILIES):
+        part = plan.PART2_FAMILIES
+        if families & set(plan.PART3_FAMILIES):
+            part, tiers = plan.PART3_FAMILIES, plan.TIERS3
     for cell in roster.cells:
-        if cell.family not in part or cell.tier not in plan.TIERS:
+        if cell.family not in part or cell.tier not in tiers:
             raise ValueError(f"{cell.cell_id}: bad family/tier")
         if not cell.source_leaves:
             raise ValueError(f"{cell.cell_id}: no source leaves")
+        if (part is plan.PART3_FAMILIES) != bool(cell.ref_placebo):
+            raise ValueError(f"{cell.cell_id}: ref placebo leaves only in Part III")
         roster.teacher_for(cell)
     for teacher in roster.reused_teachers:
         if teacher.family not in plan.FAMILIES:
@@ -1329,7 +1344,7 @@ def cell_tier(family: str, panels: Sequence[str]) -> str:
 def is_extended_null(family: str, animal: str, base: BaseRef) -> bool:
     """Whether a placebo teacher slot is the extended null (plan D8)."""
     return (
-        family == plan.EXTENDED_NULL_FAMILY
+        family in plan.EXTENDED_NULL_FAMILIES
         and animal == plan.EXTENDED_NULL_ANIMAL
         and base.repo == plan.EXTENDED_NULL_BASE_REPO
     )
@@ -1380,3 +1395,74 @@ def build_placebo_teachers(cells: Sequence[RosterCell]) -> tuple[PlaceboTeacher,
             )
         )
     return tuple(out)
+
+
+# ---- Part III (`traitfree3`) -----------------------------------------------------------
+
+
+def part3_family(cell: RosterCell) -> str | None:
+    """Part III family a Part I cell is re-run in, or None when out of scope."""
+    if cell.family == plan.FAMILY_TOPK:
+        keep = cell.teacher.repo == cell.student.repo == plan.PART3_TOPK_REPO
+        return plan.FAMILY_V2TOPK if keep else None
+    for family, source in plan.PART3_SOURCE_FAMILY.items():
+        if source == cell.family and family != plan.FAMILY_V1ANCHOR:
+            return family
+    return None
+
+
+def _part3_cell(
+    cell: RosterCell, family: str, ref: Sequence[LeafRef]
+) -> RosterCell:
+    if not ref:
+        raise ValueError(f"{cell.cell_id}: no v1 placebo leaves")
+    teacher_dir, student_dir, gkd_tag = cell.cell_id.split("|")[2:]
+    extended = is_extended_null(family, cell.animal, cell.teacher) and cell.self_pair
+    return replace(
+        cell,
+        cell_id=make_cell_id(family, cell.animal, teacher_dir, student_dir, gkd_tag),
+        family=family,
+        tier=plan.part3_tier(family, cell.self_pair, extended),
+        tb_controls=(),
+        placebo_teacher_family="",
+        ref_placebo=tuple(ref),
+    )
+
+
+def select_part3(
+    roster_v1: Roster, ref_leaves: Mapping[str, Sequence[LeafRef]]
+) -> Roster:
+    """The Part III roster: in-scope Part I cells renamed, plus the v1 anchor cell.
+
+    Each kept cell keeps its treatment / sb leaves, recipe and source teacher; its
+    ``ref_placebo`` are its Part I placebo leaves (`ref_leaves`, by Part I cell id).
+    Tiers follow `plan.part3_tier`; teachers are rebuilt per Part III family.
+
+    Raises:
+        ValueError: A kept cell has no v1 placebo leaves, or the anchor cell is
+            missing from `roster_v1`.
+    """
+    cells: list[RosterCell] = []
+    anchor: RosterCell | None = None
+    for cell in roster_v1.cells:
+        family = part3_family(cell)
+        if family is None:
+            continue
+        ref = ref_leaves.get(cell.cell_id, ())
+        cells.append(_part3_cell(cell, family, ref))
+        if is_extended_null(cell.family, cell.animal, cell.teacher) and cell.self_pair:
+            rotated = set(plan.placebo_leaf_seeds())
+            anchor_ref = [r for r in ref if (r.tfs, r.gseed) in rotated]
+            anchor = _part3_cell(cell, plan.FAMILY_V1ANCHOR, anchor_ref)
+    if anchor is None:
+        raise ValueError("Part I roster has no extended-null cell for the v1 anchor")
+    cells = sorted([*cells, anchor], key=lambda c: c.cell_id)
+    return Roster(
+        cells=tuple(cells),
+        teachers=build_placebo_teachers(cells),
+        provenance={
+            "part": 3,
+            "source_roster_sha256": plan.ROSTER1_SHA256,
+            "counts": dict(Counter(c.family for c in cells)),
+        },
+    )
