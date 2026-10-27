@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.plot_student_optimizer_transfer import (
+from notebooks.figures.student_optimizer_transfer.plot_student_optimizer_transfer import (
     DATA_HASH,
     LINEAGE,
     PROMPTS_HASH,

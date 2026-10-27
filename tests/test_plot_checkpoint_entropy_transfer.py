@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from scripts import plot_checkpoint_entropy_transfer as analysis
+from notebooks.figures.checkpoint_entropy_transfer import plot_checkpoint_entropy_transfer as analysis
 
 
 def write_json(path, value):

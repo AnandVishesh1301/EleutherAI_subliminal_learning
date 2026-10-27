@@ -13,23 +13,40 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from . import registry as reg
 from . import transfer_family_pooled as tfp
 from . import transfer_family_registry_io as registry
 from . import transfer_significance_io as tio
 
 BLOCK = ["animal", "sender", "receiver", "teacher", "tseed", "ftseed"]
-GRID_PATHS = {
-    "core30": "run_logs/registry/core30_cells.json",
-    "core56": "run_logs/registry/core56_cells.json",
-    "core35": "run_logs/campaigns/dd1b/olmo_core35_cells.json",
-}
+#: Campaign bindings are data: ``registry/family_complete.json`` (schema:
+#: ``configs/registry/README.md``; run_logs-relative entries), read lazily. ``GRID_PATHS``
+#: (grid -> cell manifest) carries the legacy ``run_logs/<rel>`` spelling.
+SPEC_NAME = "family_complete.json"
+
+
+def _spec() -> dict:
+    return reg.load_registry_json(SPEC_NAME)
+
+
+def grid_paths_from_spec(spec: dict) -> dict[str, str]:
+    """``GRID_PATHS`` of a parsed ``family_complete.json``."""
+    return {grid: reg.legacy_rel(rel) for grid, rel in spec["grid_paths"].items()}
+
+
+def __getattr__(name: str):
+    if name == "GRID_PATHS":
+        return grid_paths_from_spec(_spec())
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 BASE_GRIDS = dict(
     zip(tfp.RELATIONS, ["core30", "core56", "core30", "core56", "core30"])
 )
 
 
 def canonical_cells(repo: Path, grid: str) -> set[str]:
-    cells = tio.resolve_cells(repo / GRID_PATHS[grid])
+    cells = tio.resolve_cells(reg.resolve(grid_paths_from_spec(_spec())[grid], repo))
     if not cells or len(cells) != len(set(cells)):
         raise ValueError(f"empty or duplicated canonical manifest: {grid}")
     return set(cells)
@@ -355,7 +372,7 @@ def load_modern_reproduction_pairs(repo: Path, root: Path):
 
     Returns selected pairs, block reports, exclusions, and arm coverage.
     """
-    path = repo / "run_logs/campaigns/repretrain/repretrain_significance_arms.json"
+    path = reg.resolve(_spec()["modern_reproduction_arms"], repo)
     document = json.loads(path.read_text())
     if document.get("ftseed", 1) != 1 or document.get("prompt_set", "test") != "test":
         raise ValueError(
@@ -488,8 +505,9 @@ def load_complete_pairs(
     include_olmo_same_model=False,
 ):
     """Load fresh canonical-source data; never load extra student training seeds."""
+    teachers_rel = _spec()["teachers"]
     teachers = {
-        a: json.loads((repo / f"run_logs/registry/{a}_top10_kband_configs.json").read_text())[
+        a: json.loads(reg.resolve(teachers_rel.format(animal=a), repo).read_text())[
             "param_tags"
         ]
         for a in tfp.DEFAULT_ANIMALS

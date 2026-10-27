@@ -7,8 +7,8 @@ exactly as `models.registry.local_model_dir` expects:
 
     {hf_cache_root}/local/pythia-160m-<family>-seed<N>/step{K}/  (model + tokenizer)
 
-`--family`/`--seed` pick the source tree from `SOURCE_RUNS` below (machine paths
-live here, in the scripts layer, not in `src`); `--run-dir`/`--out-root` override
+`--family`/`--seed` pick the source tree from `SOURCE_RUNS` below (a label of the
+machine-local `native_runs` paths-config table); `--run-dir`/`--out-root` override
 either side explicitly.
 
 Conversion runs gpt-neox's own `tools/ckpts/convert_neox_to_hf.py` with four fixes,
@@ -64,43 +64,28 @@ from loguru import logger
 
 from subliminal_learning.config import load_paths_local
 from subliminal_learning.models.registry import LOCAL_PYTHIA_VARIANTS, local_pythia_family
+from subliminal_learning.models.seed_identity_io import native_run
 from subliminal_learning.utils.io import atomic_write_json
 from subliminal_learning.utils.logging_setup import configure_loguru
 from subliminal_learning.utils.perms import reopen_tree
 from subliminal_learning.utils.run_io import utc_now_iso
 
-# The NeoX source tree per (family, seed). Adding a re-pretraining = one row here
-# plus its row in `models.registry.LOCAL_PYTHIA_FAMILIES` (which fixes the output
-# dir name and the `<family>-seed<N>` token).
-SOURCE_RUNS: dict[tuple[str, int], Path] = {
-    ("weightc", 1): Path(
-        "/mnt/cold-1/gpaulo/pythia-repro/checkpoints/pythia-160m-weight-seed1-corrected"
-    ),
-    ("weightc", 2): Path(
-        "/mnt/cold-1/gpaulo/pythia-repro/checkpoints/pythia-160m-weight-seed2-corrected"
-    ),
-    ("pilereprov1", 1234): Path(
-        "/mnt/cold-1/gpaulo/pythia-repro/checkpoints/pythia-160m-repro"
-    ),
-    ("pilerepro", 1234): Path(
-        "/mnt/ssd-3/gpaulo/pythia-repro/checkpoints/pythia-160m-main-seed-pile-repro-check"
-    ),
-    ("pilerepro", 3): Path(
-        "/mnt/ssd-3/gpaulo/pythia-repro/checkpoints/pythia-160m-weight-seed3-pile-data"
-    ),
-    ("dclm", 1234): Path(
-        "/mnt/ssd-3/gpaulo/pythia-repro/checkpoints/pythia-160m-main-seed-dclm-data"
-    ),
-    ("dclm", 1): Path(
-        "/mnt/ssd-3/gpaulo/pythia-repro/checkpoints/pythia-160m-weight-seed1-dclm-data"
-    ),
-    ("dclm", 2): Path(
-        "/mnt/ssd-3/gpaulo/pythia-repro/checkpoints/pythia-160m-weight-seed2-dclm-data"
-    ),
+# The NeoX source tree per (family, seed), as a label of the machine-local `native_runs`
+# paths-config table (`models.seed_identity_io.native_runs`). Adding a re-pretraining = one
+# row here, its `native_runs` entry, plus its row in `models.registry.LOCAL_PYTHIA_FAMILIES`
+# (which fixes the output dir name and the `<family>-seed<N>` token).
+SOURCE_RUNS: dict[tuple[str, int], str] = {
+    ("weightc", 1): "wc1",
+    ("weightc", 2): "wc2",
+    ("pilereprov1", 1234): "prv1",
+    ("pilerepro", 1234): "rerun",
+    ("pilerepro", 3): "ws3pile",
+    ("dclm", 1234): "dclm_main",
+    ("dclm", 1): "dclm_s1",
+    ("dclm", 2): "dclm_s2",
 }
 DEFAULT_FAMILY = "weightc"
 DEFAULT_SEED = 1
-DEFAULT_RUN_DIR = SOURCE_RUNS[(DEFAULT_FAMILY, DEFAULT_SEED)]
 # The DCLM runs recorded `vocab-file` under /mnt/datasets/..., which is not mounted
 # here; the tokenizer is the standard 20B one (byte-identical, sha256 c24618a1...),
 # so an unreachable config path falls back to this copy.
@@ -225,13 +210,14 @@ def _config_for(run_dir: Path, step: int) -> Path:
 def _source_run_dir(family: str, seed: int) -> Path:
     """The NeoX tree for one (family, seed), or a ValueError listing the known pairs."""
     try:
-        return SOURCE_RUNS[(family, seed)]
+        label = SOURCE_RUNS[(family, seed)]
     except KeyError:
         known = ", ".join(f"{f}-seed{s}" for f, s in SOURCE_RUNS)
         raise ValueError(
             f"no NeoX source tree for family={family!r} seed={seed}; known sources: "
             f"{known} (or pass --run-dir explicitly)"
         ) from None
+    return native_run(label)[0]
 
 
 def _config_vocab_file(cfg: Path) -> str | None:

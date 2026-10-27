@@ -1,6 +1,6 @@
 """orig / pr1234 / prv1 checkpoint diagonals with 95% CI bands + pr1234 13x13 cliff-cross with seed counts.
-Reuses scripts/plot_checkpoint_takeoff.py's loader (pool hash verification, manifest identity checks)."""
-import gzip, json, sys, csv
+Reuses notebooks/figures/figure3_checkpoints/plot_checkpoint_takeoff.py's loader (pool hash verification, manifest identity checks)."""
+import gzip, json, sys
 from pathlib import Path
 from collections import defaultdict, Counter
 import numpy as np, yaml
@@ -9,8 +9,8 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from scipy import stats
 sys.path.insert(0, "/home/angela/EleutherAI_subliminal_learning")
-from scripts import plot_checkpoint_takeoff as T
-from scripts import plot_checkpoint_entropy_transfer as shared
+from notebooks.figures.figure3_checkpoints import plot_checkpoint_takeoff as T
+from notebooks.figures.checkpoint_entropy_transfer import plot_checkpoint_entropy_transfer as shared
 
 PROJECT = T.PROJECT
 OUT = PROJECT / "notebooks/figures/repro_checkpoints"

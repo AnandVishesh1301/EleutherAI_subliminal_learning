@@ -13,12 +13,7 @@ tools/campaign_notify/.env.*
 .claude
 run_logs/
 
-# Machine-local borrowed-GPU sweep orchestration
-scripts/sweeps/run_number_pair_courteously.zsh
-scripts/sweeps/launch_number_courtesy_pairs.zsh
-scripts/sweeps/watch_external_gpu_claims.zsh
-
-# Machine-specific paths (each dev keeps their own; template is paths_a100.yaml)
+# Machine-specific paths (each dev keeps their own; template is paths_example.yaml)
 configs/paths/paths_local.yaml
 
 # Campaign-driver generated sweep configs (derived from stage outputs; source of

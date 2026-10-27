@@ -29,7 +29,7 @@ COLORS = dict(
         ("#4387AD", "#E99545", "#65A66D", "#D76B75", "#9C80BE", "#737B83"),
     )
 )
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 CONTROL_ROOT = "students/controls/base/pythia-160m/teacher-pythia-160m"
 TREATMENT_RE = re.compile(
     r"students/(?P<animal>cat|dog|lion|pig|rabbit)/pythia-160m/"

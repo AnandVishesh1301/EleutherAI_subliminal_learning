@@ -29,13 +29,13 @@ import re
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
-from functools import cached_property
+from functools import cache, cached_property
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from subliminal_learning.analysis import result_cache
+from subliminal_learning.analysis import registry, result_cache
 from subliminal_learning.analysis import trajectories as _trajectories
 from subliminal_learning.analysis import transfer_significance_io as tio
 from subliminal_learning.analysis.frames import safe_read_json
@@ -181,43 +181,28 @@ class ArmSpec:
 # ----------------------------------------------------------------------------------------------
 # arm enumeration
 # ----------------------------------------------------------------------------------------------
-_XARCH = "run_logs/campaigns/xarch/xarch_significance_arms.json"
-_OLMO = "run_logs/campaigns/repretrain/olmo_cross_seed_significance_arms.json"
+#: Campaign binding of the registry arms (``registry/trajectory_arms.json``, loaded on first
+#: access through `__getattr__`): ``_XARCH`` / ``_OLMO`` = the xarch / OLMo significance
+#: registries (legacy ``run_logs/...`` spelling); ``XARCH_ARMS`` = ``name -> condition`` (the
+#: first six enter the curves when complete); ``OLMO_ARMS`` = ``name -> (group, condition)``
+#: (the `transfer_conditions` OLMo blocks).
+TRAJECTORY_ARMS_JSON = "trajectory_arms.json"
 
-#: xarch registry arms: ``name -> condition`` (the first six enter the curves when complete).
-XARCH_ARMS = {
-    "410m → 160m (dog)": "cross-size",
-    "410m-seed1 → 160m (dog)": "cross-size (diff. init)",
-    "160m → 410m (dog)": "cross-size",
-    "160m → 410m-seed1 (dog)": "cross-size (diff. init)",
-    "OLMo-1B → 160m (dog), core30": "cross-architecture",
-    "160m → OLMo-1B (dog), core35": "cross-architecture",
-    "410m-seed2 → 160m (dog)": "cross-size (diff. init)",
-    "410m-seed2 → 160m-seed1 (dog)": "cross-size (diff. init)",
-    "410m-seed2 → 160m-seed2 (dog)": "cross-size (diff. init)",
-}
 
-#: OLMo registry arms: ``name -> (group, condition)`` (the `transfer_conditions` OLMo blocks).
-OLMO_ARMS = {
-    **{f"{c} → {c} same-model (elephant), core35": ("OLMo same-model", "same-model")
-       for c in ("dolma", "c4", "dclm")},
-    **{f"{c} → {c}-seed2 (elephant), core35": ("OLMo cross-seed", "cross-seed")
-       for c in ("dolma", "c4", "dclm")},
-    **{f"{a} → {b} (elephant), core35": ("OLMo cross-corpus", "cross-corpus")
-       for a, b in (("dolma", "dclm"), ("dclm", "dolma"), ("dclm", "c4"), ("dolma", "c4"),
-                    ("c4", "dolma"), ("c4", "dclm"))},
-    **{f"{a} → {b} (elephant), core35": ("OLMo cross-corpus", "cross-corpus + cross-seed")
-       for a, b in (("dclm", "seed2"), ("dclm", "c4-seed2"), ("dolma", "dclm-seed2"),
-                    ("dolma", "c4-seed2"), ("c4", "seed2"), ("c4", "dclm-seed2"))},
-}
+def _adapt_trajectory_arms(doc: dict) -> dict:
+    """``trajectory_arms.json`` -> the module constants (JSON lists back to tuples)."""
+    return {"_XARCH": registry.legacy_rel(doc["xarch_registry"]),
+            "_OLMO": registry.legacy_rel(doc["olmo_registry"]),
+            "XARCH_ARMS": dict(doc["xarch_arms"]),
+            "OLMO_ARMS": {k: tuple(v) for k, v in doc["olmo_arms"].items()}}
 
 
 def _cell_set_name(path: Path) -> str:
     return path.stem.replace("_cells", "").replace("olmo_", "")
 
 
-def _registry_specs(repo: Path, registry: str, names: dict, *, group_of, family_of) -> list[ArmSpec]:
-    path = repo / registry
+def _registry_specs(repo: Path, reg_rel: str, names: dict, *, group_of, family_of) -> list[ArmSpec]:
+    path = registry.resolve(reg_rel, repo)
     doc = json.loads(path.read_text())
     by_name = {a["name"]: a for a in doc["arms"]}
     out = []
@@ -249,7 +234,7 @@ def default_arms(repo: Path) -> list[ArmSpec]:
     curves is decided by its coverage (`inventory_table`), not here.
     """
     repo = Path(repo)
-    reg = repo / "run_logs" / "registry"
+    reg = registry.registry_dir(repo)
     core56, core30 = reg / "core56_cells.json", reg / "core30_cells.json"
     animals = ["dog", "cat", "lion", "pig"]
     teachers = {a: tuple(json.loads((reg / f"{a}_top10_kband_configs.json").read_text())
@@ -271,7 +256,8 @@ def default_arms(repo: Path) -> list[ArmSpec]:
     # (12,500-step) cross-architecture arm is its own OLMo line
     out += [replace(s, group="OLMo cross-arch.") if s.family == "OLMo" else s
             for s in _registry_specs(
-                repo, _XARCH, XARCH_ARMS, group_of=lambda c: ("Pythia cross-size/arch.", c),
+                repo, _const("_XARCH"), _const("XARCH_ARMS"),
+                group_of=lambda c: ("Pythia cross-size/arch.", c),
                 family_of=lambda a: "OLMo" if tio.base_name(a["receiver"]).startswith(
                     "DataDecide-") else "Pythia")]
     for sender in ("pythia-410m", "pythia-410m-seed1"):
@@ -282,7 +268,7 @@ def default_arms(repo: Path) -> list[ArmSpec]:
                 f"pythia-160m-seed{k}", tuple(man["param_tags"]), "core30",
                 tuple(tio.resolve_cells(core30)),
                 teacher_dataset_tags=tuple(sorted(man.get("dataset_tags", {}).items()))))
-    olmo = _registry_specs(repo, _OLMO, OLMO_ARMS, group_of=lambda c: c,
+    olmo = _registry_specs(repo, _const("_OLMO"), _const("OLMO_ARMS"), group_of=lambda c: c,
                            family_of=lambda a: "OLMo")
     # base-numbers controls of the OLMo arms (20 saves 625 ... 12,500, like their treatments),
     # matched one per treatment arm as in `earlystop_arms`
@@ -312,41 +298,59 @@ STOP_MIN_POINTS = 8
 #: Teacher placeholder of a control arm (no teacher level in its leaves).
 CONTROL_TEACHER = "base"
 
-_ES_SAME = "run_logs/campaigns/samemodel_earlystop_dog_20261010"
-_ES_PR = "run_logs/campaigns/pr1234_cross_earlystop_20261010/registry"
-_ES_FS = "run_logs/campaigns/fsfact_cross_earlystop_dog_20261012/registry"
-_ES_TF = "run_logs/campaigns/traj_factorials_20261013/registry"
-#: Full-length dog prv1 <-> pr1234 runs: PLAIN cells (no ``_stop{N}``), each leaf's pref_traj
-#: carries the saved steps and the 25,000 endpoint, its controls the same steps.
-_ES_FT = "run_logs/campaigns/prv1_pr1234_fulltraj_20261015/registry"
-#: The 12 ordered orig/fs1-3 cross arms of the dog fsfact per-checkpoint campaign.
-_ES_FS_ARMS = ("orig2fs1es", "orig2fs2es", "orig2fs3es", "fs12origes", "fs12fs2es", "fs12fs3es",
-               "fs22origes", "fs22fs1es", "fs22fs3es", "fs32origes", "fs32fs1es", "fs32fs2es")
-#: traj_factorials_20261013 arms: cat/lion cross-seed (no controls.json: their control leaves are
-#: the dog registries' shared ones), dog cross-data-order, dog prv1/wc/orig re-pretrain. The
-#: prv1 ⇄ pr1234 dirs of that campaign are parked and not listed: that pair is `_ES_FT`.
-_ES_TF_ARMS = ("cat-fs12fs1es", "lion-orig2origes", "lion-fs12fs1es", "lion-orig2fs1es",
-               "lion-orig2fs2es", "lion-orig2fs3es", "lion-fs12origes", "lion-fs12fs2es",
-               *(f"{s}2{r}es" for s in ("orig", "ds1", "ds2", "ds3")
-                 for r in ("orig", "ds1", "ds2", "ds3") if s != r),
-               "prv12wc1es", "prv12wc2es", "wc12prv1es", "wc12wc2es", "wc22prv1es", "wc22wc1es",
-               "prv12prv1es", "prv12origes", "orig2prv1es")
-#: Registry dirs of the per-checkpoint campaigns, in display order. Registries naming the same
-#: (animal, sender, receiver) are one arm (pr1234 same-model = 10-cell pilot + 20-cell es2).
-EARLYSTOP_REGISTRIES: tuple[str, ...] = (
-    *(f"{_ES_SAME}/{r}/registry" for r in
-      ("orig", "ds1", "ds2", "ds3", "fs1", "fs2", "fs3", "wc1", "wc2")),
-    "run_logs/campaigns/pr1234_samemodel_earlystop_20261010/registry",
-    f"{_ES_PR}/pr1234es2", f"{_ES_PR}/p2oes", f"{_ES_PR}/o2pes",
-    *(f"{_ES_FS}/{a}" for a in _ES_FS_ARMS),
-    *(f"{_ES_TF}/{a}" for a in _ES_TF_ARMS),
-    f"{_ES_FT}/prv12pr1234ft", f"{_ES_FT}/pr12342prv1ft",
-)
+#: Per-checkpoint campaign binding (``registry/earlystop_registries.json``, loaded on first
+#: access through `__getattr__`): ``_ES_SAME`` / ``_ES_PR`` / ``_ES_FS`` / ``_ES_TF`` / ``_ES_FT`` =
+#: the campaign dirs (``_ES_FT``: full-length dog prv1 <-> pr1234 runs, PLAIN cells whose
+#: pref_traj carries the saved steps and the 25,000 endpoint); ``_ES_FS_ARMS`` = the 12 ordered
+#: orig/fs1-3 dog fsfact cross arms; ``_ES_TF_ARMS`` = the traj_factorials arms (cat/lion
+#: cross-seed with the dog registries' shared controls, dog cross-data-order, dog prv1/wc/orig
+#: re-pretrain; its parked prv1 ⇄ pr1234 dirs are `_ES_FT`'s pair); ``EARLYSTOP_REGISTRIES`` =
+#: the registry dirs in display order (registries naming the same (animal, sender, receiver)
+#: are one arm: pr1234 same-model = 10-cell pilot + 20-cell es2); ``_STRIDE3_REGISTRY`` = the
+#: registry whose cells are the stride-3 core30 cells of the completed arms.
+EARLYSTOP_REGISTRIES_JSON = "earlystop_registries.json"
+
+
+def _adapt_earlystop_registries(doc: dict) -> dict:
+    """``earlystop_registries.json`` -> the module constants (legacy strings, tuples)."""
+    dirs = doc["campaign_dirs"]
+    return {**{f"_ES_{k.upper()}": registry.legacy_rel(dirs[k])
+               for k in ("same", "pr", "fs", "tf", "ft")},
+            "_ES_FS_ARMS": tuple(doc["fs_arms"]), "_ES_TF_ARMS": tuple(doc["tf_arms"]),
+            "EARLYSTOP_REGISTRIES": tuple(registry.legacy_rel(r) for r in doc["registries"]),
+            "_STRIDE3_REGISTRY": registry.legacy_rel(doc["stride3_registry"])}
+
+
+_LAZY = {TRAJECTORY_ARMS_JSON: _adapt_trajectory_arms,
+         EARLYSTOP_REGISTRIES_JSON: _adapt_earlystop_registries}
+
+
+@cache
+def _lazy_constants(name: str) -> dict:
+    return _LAZY[name](registry.load_registry_json(name))
+
+
+_LAZY_NAMES = {"_XARCH": TRAJECTORY_ARMS_JSON, "_OLMO": TRAJECTORY_ARMS_JSON,
+               "XARCH_ARMS": TRAJECTORY_ARMS_JSON, "OLMO_ARMS": TRAJECTORY_ARMS_JSON,
+               **{n: EARLYSTOP_REGISTRIES_JSON for n in (
+                   "_ES_SAME", "_ES_PR", "_ES_FS", "_ES_TF", "_ES_FT", "_ES_FS_ARMS",
+                   "_ES_TF_ARMS", "EARLYSTOP_REGISTRIES", "_STRIDE3_REGISTRY")}}
+
+
+def _const(name: str):
+    """A registry-bound constant (read from the configured run_logs on first use)."""
+    return _lazy_constants(_LAZY_NAMES[name])[name]
+
+
+def __getattr__(name: str):
+    if name in _LAZY_NAMES:
+        return _const(name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 #: Design completion of the cross-seed factorial (`complete_factorial`): animals whose ordered
 #: orig/fs1-3 pairs without a registry are read from their plain ep20 leaves on the stride-3 cells.
 COMPLETE_ANIMALS = ("cat", "lion", "pig")
-#: Registry whose cells are the stride-3 core30 cells of the completed arms.
-_STRIDE3_REGISTRY = f"{_ES_SAME}/orig/registry"
 
 
 #: User-facing names of the internal group keys (keys stay: other notebooks read them).
@@ -426,9 +430,9 @@ def complete_factorial(have: set[tuple[str, str, str]], animals: Sequence[str],
             for an in animals for s in bases for r in bases if (an, s, r) not in have}
 
 
-def earlystop_arms(repo: Path, registries: Sequence[str] = EARLYSTOP_REGISTRIES, *,
+def earlystop_arms(repo: Path, registries: Sequence[str] | None = None, *,
                    complete: Sequence[str] = COMPLETE_ANIMALS,
-                   stride3_registry: str = _STRIDE3_REGISTRY) -> list[ArmSpec]:
+                   stride3_registry: str | None = None) -> list[ArmSpec]:
     """The per-checkpoint treatment arms (ep20 runs' saved checkpoints), then their matched
     controls, from campaign registries plus the cross-seed design completion.
 
@@ -442,7 +446,8 @@ def earlystop_arms(repo: Path, registries: Sequence[str] = EARLYSTOP_REGISTRIES,
     every ordered orig/fs1-3 pair with no registry gets an arm on the cells of
     `stride3_registry` with that animal's ``{animal}_top10_kband_configs.json`` teachers
     (`complete_factorial`). Groups: `_stop_group`. Never reads a directory glob of the outputs
-    tree.
+    tree. `registries` / `stride3_registry` default to ``EARLYSTOP_REGISTRIES`` /
+    ``_STRIDE3_REGISTRY`` (``registry/earlystop_registries.json``).
 
     Raises:
         ValueError: If registries merged into one arm disagree on teachers / animal / tseed, a
@@ -450,10 +455,13 @@ def earlystop_arms(repo: Path, registries: Sequence[str] = EARLYSTOP_REGISTRIES,
             treatment arm.
     """
     repo = Path(repo)
+    registries = _const("EARLYSTOP_REGISTRIES") if registries is None else registries
+    stride3_registry = (_const("_STRIDE3_REGISTRY") if stride3_registry is None
+                        else stride3_registry)
     treat: dict[tuple[str, str, str], dict] = {}
     ctrl: dict[tuple[str, str], dict] = {}
     for rel in registries:
-        d = repo / rel
+        d = repo / rel  # repo-relative (the defaults use the legacy run_logs/ spelling)
         files = sorted(d.glob("*.json"))
         teachers, cells, animal, tseeds = [], [], set(), set()
         key_t = None
@@ -481,7 +489,7 @@ def earlystop_arms(repo: Path, registries: Sequence[str] = EARLYSTOP_REGISTRIES,
             raise ValueError(f"{d}: teachers differ from the other registries of {key_t}")
         e["cells"] += [c for c in cells[0] if c not in e["cells"]]
     if complete:
-        reg = repo / "run_logs" / "registry"
+        reg = registry.registry_dir(repo)
         cells = next(tuple(json.loads(f.read_text())["cells"])
                      for f in sorted((repo / stride3_registry).glob("*.json"))
                      if f.name != "controls.json")

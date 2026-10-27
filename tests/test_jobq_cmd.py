@@ -24,7 +24,7 @@ from subliminal_learning.jobq_cmd import (
     "uv run python -m scripts.x --config configs/a.yaml",
     "uv run python run_logs/campaigns/c/runner.py --out /mnt/cold-1/x && uv run python -m y",
     "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True uv run python -m scripts.decode",
-    "uv run python -m scripts.x --numbers-dir /home/angela2/elsewhere",  # other uid's home is fine
+    "uv run python -m scripts.x --out run_logs/home/x",  # repo-relative, not a home path
     "uv run python -m scripts.x --tag abcd",  # `cd` inside a word is not a cd
 ])
 def test_portable_cmds_pass(cmd):
@@ -38,6 +38,7 @@ def test_portable_cmds_pass(cmd):
     "uv run python -m x && cd run_logs && uv run python -m y",
     "uv run python -m x; cd .. ; uv run python -m y",
     "uv run python -m x --config /home/angela/EleutherAI_subliminal_learning/configs/a.yaml",
+    "uv run python -m x --numbers-dir /home/otheruser/x",  # ANY user's home, not one hostname
 ])
 def test_non_portable_cmds_rejected_naming_the_key(cmd):
     assert portable_cmd_problems(cmd)
@@ -55,6 +56,15 @@ def test_assert_portable_text():
     assert_portable_text("cfg", "output_root: /mnt/cold-1/x\n")
     with pytest.raises(ValueError, match="cfg"):
         assert_portable_text("cfg", "path: /home/angela/EleutherAI_subliminal_learning/x\n")
+
+
+def test_any_home_path_flagged_mnt_and_relative_not():
+    assert "/home/<user>/" in portable_cmd_problems("uv run x --o /home/otheruser/x")[0]
+    for ok in ("uv run x --o /mnt/ssd-2/home/x", "uv run x --o configs/home/a.yaml"):
+        assert portable_cmd_problems(ok) == []
+        assert_portable_text("cfg", ok)
+    with pytest.raises(ValueError, match="/home/<user>/"):
+        assert_portable_text("cfg", "p: /home/otheruser/x\n")
 
 
 def test_portable_path_is_lexical_repo_relative():

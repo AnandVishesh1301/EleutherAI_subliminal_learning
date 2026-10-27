@@ -1,0 +1,9 @@
+{
+  "grid_paths": {
+    "core30": "registry/core30_cells.json",
+    "core56": "registry/core56_cells.json",
+    "core35": "campaigns/dd1b/olmo_core35_cells.json"
+  },
+  "modern_reproduction_arms": "campaigns/repretrain/repretrain_significance_arms.json",
+  "teachers": "registry/{animal}_top10_kband_configs.json"
+}

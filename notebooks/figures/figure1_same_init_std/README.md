@@ -23,7 +23,7 @@ Per-run values and source paths are in `treatments.csv` and `controls.csv`.
 Regenerate from the repository root:
 
 ```sh
-uv run python -m scripts.plot_figure1_same_init_std
+uv run python -m notebooks.figures.figure1_same_init_std.plot_figure1_same_init_std
 ```
 
 The generator reads saved evaluations; it does not run models. Its boxplot export

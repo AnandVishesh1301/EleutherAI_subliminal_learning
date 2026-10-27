@@ -2,7 +2,7 @@
 
 CPU only: verify filtered-pool content hashes against their generation manifests
 and each student's training manifest, then read saved exact test probabilities.
-Run ``uv run python -m scripts.plot_checkpoint_takeoff``. Teacher recipes receive
+Run ``uv run python -m notebooks.figures.figure3_checkpoints.plot_checkpoint_takeoff``. Teacher recipes receive
 equal weight after averaging available student seeds within each recipe; the
 matched base-numbers control (ftseed 1) is subtracted from each five-recipe mean.
 """
@@ -19,9 +19,9 @@ import re
 import numpy as np
 import yaml
 
-from scripts import plot_checkpoint_entropy_transfer as shared
+from notebooks.figures.checkpoint_entropy_transfer import plot_checkpoint_entropy_transfer as shared
 
-PROJECT = Path(__file__).resolve().parents[1]
+PROJECT = Path(__file__).resolve().parents[3]
 LINEAGES = ("orig", "ds1", "ds2", "ds3", "fs1", "fs2", "fs3", "wc1", "wc2")
 STEPS = tuple(range(75000, 130001, 5000)) + (143000,)
 MATRIX_STEPS = STEPS

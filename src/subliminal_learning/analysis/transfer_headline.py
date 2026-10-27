@@ -23,12 +23,14 @@ import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 from typing import Mapping, Sequence
 
 import numpy as np
 import pandas as pd
 
+from subliminal_learning.analysis import registry
 from subliminal_learning.analysis import transfer_family_registry_io as tfr
 from subliminal_learning.analysis import transfer_significance_io as tio
 from subliminal_learning.config import resolve_output_root
@@ -414,7 +416,7 @@ def headline_families(repo: Path, teachers_by_animal: Mapping[str, Sequence[str]
         teachers_by_animal: ``{animal: the canonical 10 k-band tags}`` for dog, cat, lion, pig.
         output_root: Output tree root; defaults to the paths YAML's.
     """
-    rl = repo / "run_logs"
+    rl = registry.run_logs_root(repo)
     pythia = ["dog", "cat", "lion", "pig"]
     core56, focus20 = rl / "registry" / "core56_cells.json", rl / "registry" / "focus20_cells.json"
     xarch, repre, olmo = (rl / "campaigns/xarch/xarch_significance_arms.json",
@@ -496,7 +498,7 @@ def xarch_seed_families(repo: Path, *, output_root: Path | None = None) -> list[
         repo: Repo root.
         output_root: Output tree root; defaults to the paths YAML's.
     """
-    xarch = repo / "run_logs/campaigns/xarch/xarch_significance_arms.json"
+    xarch = registry.resolve(XARCH_REGISTRY, repo)
     p160 = ["160m", "160m-seed1", "160m-seed3"]
     olmo = ["OLMo-1B", "OLMo-1B-seed2", "OLMo-1B-seed3"]
 
@@ -534,14 +536,29 @@ def matched_arm_effects(matrix: tio.CellMatrix, prior: float) -> dict:
             "mean gap": float(gap.mean()) if n else float("nan"), "rel. effect": rel}
 
 
+#: The xarch significance registry (run_logs-relative).
+XARCH_REGISTRY = "campaigns/xarch/xarch_significance_arms.json"
 #: Direction A (Pythia → OLMo) / B (OLMo → Pythia) arm names of `xarch_direction_test`, paired
 #: by model identity: ``XARCH_DIRECTION_ARMS[0][k]`` is the reverse of ``[1][k]``. The default
 #: pair uses the COMPLETE 16-teacher / seed-robust-8 arms (the top10 arm is in progress).
-XARCH_DIRECTION_ARMS = tuple(zip(*[
-    (f"{p} → {o} (dog), core35",
-     f"{o} → {p} (dog), core30" + (", seed-robust 8" if (p, o) == ("160m", "OLMo-1B") else ""))
-    for p in ("160m", "160m-seed1", "160m-seed3")
-    for o in ("OLMo-1B", "OLMo-1B-seed2", "OLMo-1B-seed3")]))
+#: Campaign binding: ``registry/xarch_direction_arms.json``, loaded on first access.
+XARCH_DIRECTION_ARMS_JSON = "xarch_direction_arms.json"
+
+
+def _adapt_xarch_direction_arms(doc: dict) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """``xarch_direction_arms.json`` -> ``(direction A names, direction B names)``."""
+    return tuple(doc["pythia_to_olmo"]), tuple(doc["olmo_to_pythia"])
+
+
+@cache
+def _xarch_direction_arms() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    return _adapt_xarch_direction_arms(registry.load_registry_json(XARCH_DIRECTION_ARMS_JSON))
+
+
+def __getattr__(name: str):
+    if name == "XARCH_DIRECTION_ARMS":
+        return _xarch_direction_arms()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def arm_family_test(arms_json: str | Path, names_a: Sequence[str], names_b: Sequence[str], *,
@@ -619,8 +636,8 @@ def xarch_direction_test(repo: Path, *, output_root: Path | None = None) -> dict
     Returns:
         `arm_family_test`'s dict.
     """
-    names_a, names_b = XARCH_DIRECTION_ARMS
-    return arm_family_test(repo / "run_logs/campaigns/xarch/xarch_significance_arms.json",
+    names_a, names_b = _xarch_direction_arms()
+    return arm_family_test(registry.resolve(XARCH_REGISTRY, repo),
                            names_a, names_b, paired=True, output_root=output_root)
 
 

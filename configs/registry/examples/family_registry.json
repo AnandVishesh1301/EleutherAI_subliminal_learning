@@ -1,0 +1,18 @@
+{
+  "significance_registries": [
+    "campaigns/xarch/xarch_significance_arms.json",
+    "campaigns/repretrain/olmo_cross_seed_significance_arms.json"
+  ],
+  "olmo_same_model": {
+    "campaign": "campaigns/olmo_samemodel_core35_20260924",
+    "cells": "../dd1b/olmo_core35_cells.json",
+    "arms": [
+      {
+        "name": "dolma2dolma",
+        "sender": "dd-1b",
+        "receiver": "DataDecide-dolma1_7-1B-seed-default",
+        "teachers": "registry/dolma_top10_senders.json"
+      }
+    ]
+  }
+}

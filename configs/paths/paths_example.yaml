@@ -1,0 +1,29 @@
+# Template for the machine-local paths config. Copy to configs/paths/paths_local.yaml
+# (gitignored) and replace every <...> placeholder with an absolute path on this machine.
+
+# Root of all run outputs (teachers, numbers, students, evals).
+output_root: "<absolute path to the outputs root>"
+# Hugging Face cache (HF_HOME); converted local Pythia checkpoints live under <hf_cache_root>/local.
+hf_cache_root: "<absolute path to the HF cache>"
+# Cache for `datasets` downloads.
+dataset_cache_root: "<absolute path to the datasets cache>"
+# Weights & Biases run directory.
+wandb_dir: "<absolute path to the wandb dir>"
+
+# Optional: Megatron-format preshuffled Pile stem (.idx/.bin beside it), needed only by
+# held-out-CE gating of converted Pythia checkpoints (ckpt_distill_gate_append).
+# pile_preshuffled_document: "<path stem of the preshuffled Pile document>"
+
+# Optional: Megatron-format DCLM held-out document stem (.idx/.bin beside it), the source
+# of the cp1 probe pool and its unigram anchor (coherence/dclm_pool.py).
+# dclm_heldout_document: "<path stem of the DCLM held-out document>"
+
+# Optional: root holding registry/ and campaigns/; default = run_logs/ beside the checkout.
+# run_logs_root: "<absolute path to the run_logs root>"
+
+# Optional: native GPT-NeoX re-pretraining run dirs, label -> {path, corpus (pile|dclm)}.
+# Read by models.seed_identity_io.native_runs (check_pythia_seed_identity,
+# check_pythia_padding_ancestry, convert_weightc_checkpoints). Missing = no native runs.
+# native_runs:
+#   wc1: {path: "<absolute path to the NeoX checkpoints dir>", corpus: pile}
+#   dclm_main: {path: "<absolute path to the NeoX checkpoints dir>", corpus: dclm}

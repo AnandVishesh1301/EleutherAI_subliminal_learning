@@ -1,6 +1,8 @@
 """`models.seed_identity`: init equality and the untouched-embedding-row fingerprint."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -222,9 +224,22 @@ def test_parse_adhoc_native_corpus() -> None:
     for bad in ("mine", "=/a", "mine=", "mine=:dclm"):
         with pytest.raises(ValueError):
             sio.parse_adhoc_native(bad)
+
+
+def test_native_runs_from_paths_config(monkeypatch) -> None:
+    from subliminal_learning.models import seed_identity_io as sio
+
+    runs = {"dclm_s1_cold": {"path": "/mnt/x/dclm-s1", "corpus": "dclm"},
+            "wc1": {"path": "/mnt/x/wc1", "corpus": "pile"}}
+    monkeypatch.setattr(sio, "load_paths_local", lambda: {"native_runs": runs})
     t = sio.model_table()
-    assert t["dclm_main_cold"].corpus == t["dclm_s1_cold"].corpus == "dclm"
-    assert t["dclm_s1_cold"].source.startswith("/mnt/cold-1/")
+    assert (t["dclm_s1_cold"].kind, t["dclm_s1_cold"].corpus) == ("native", "dclm")
+    assert t["dclm_s1_cold"].source == "/mnt/x/dclm-s1" and t["wc1"].corpus == "pile"
+    assert sio.native_run("wc1") == (Path("/mnt/x/wc1"), "pile")
+    monkeypatch.setattr(sio, "load_paths_local", lambda: {"output_root": "/o"})
+    assert all(m.kind == "hf" for m in sio.model_table().values())  # missing key: no natives
+    with pytest.raises(KeyError, match="native_runs"):
+        sio.native_run("wc1")
 
 
 def test_pile_seen_masks_ignores_label_only_last_position(tmp_path) -> None:

@@ -863,6 +863,30 @@ unless one already exists; paste `HF_TOKEN` or narrow `CUDA_VISIBLE_DEVICES` onl
 node-local copy. (2026-09-08: replaced the per-hostname `.env.soar-subliminal-{0,1}`
 copies; `HF_HOME` now points at the cold-1 cache.)
 
+### Registry layer (`analysis/registry.py`, 2026-10-27)
+
+Analysis code no longer spells `run_logs/...` paths or carries campaign-bound arm maps as
+Python constants. `subliminal_learning.analysis.registry` is the one place that knows the
+run_logs layout: `run_logs_root(repo)` (`<repo>/run_logs` for an explicit checkout, else the
+optional `run_logs_root` key of `paths_local.yaml`, else `run_logs/` beside the checkout),
+`registry_dir` / `campaigns_dir`, `registry_path(name)`, `load_registry_json(name)` and
+`resolve(entry, repo)`, which accepts an absolute path, the legacy repo-relative
+`run_logs/<rel>` spelling (older callers and tests), or a run_logs-relative entry such as
+`campaigns/xarch/xarch_significance_arms.json`. The campaign bindings that were inline
+(`trajectory_conditions.XARCH_ARMS` / `OLMO_ARMS` / `EARLYSTOP_REGISTRIES`,
+`transfer_headline.XARCH_DIRECTION_ARMS`, the OLMo same-model registry in
+`transfer_family_registry_io`, `transfer_asymmetry.FAMILIES` and its design groups,
+`transfer_factors` focus20/core65 file names + `XARM_INVENTORY_REL`,
+`transfer_family_complete.GRID_PATHS`) now load lazily (module `__getattr__`) from JSON
+under `<run_logs>/registry/` — `trajectory_arms.json`, `earlystop_registries.json`,
+`xarch_direction_arms.json`, `family_registry.json`, `asymmetry_families.json`,
+`factor_designs.json`, `family_complete.json` — with identical values and types, so
+notebooks and builders that import those names are unchanged. `configs/registry/README.md`
+documents each schema and `configs/registry/examples/` ships a trimmed copy of every file;
+`tests/test_analysis_registry.py` loads each example through the module's own adapter.
+Importing an analysis module never requires run_logs; touching a binding without the file
+raises a `FileNotFoundError` that names the paths key and the example to copy.
+
 ## Model registry (shared)
 
 `models/registry.py` maps `PythiaModelSpec` (`size`, `seed`, `variant`, `revision`) → HF
@@ -2149,7 +2173,7 @@ end-to-end already (`parse_base_models("original@step1000")`, `PythiaModelSpec.r
   is always a real upstream failure — rc=0 would be recorded DONE forever (requeue is failed_only
   and re-submit drops present jobkeys). *Changed 2026-08-10; formerly SKIP rc=0.*
 - **Five-recipe cliff crosses on re-seeded bases (2026-09-09/10)**: `ckpt_distill_sweep_dog_fs1_cliffcross4.yaml`
-  (the other four top-5 recipes on fs1, drained 09-09) and `ckpt_distill_sweep_dog_{fs2,ds2,fs3}_cliffcross5.yaml`
+  (the other four top-5 recipes on fs1, drained 09-09; config removed 2026-10-27) and `ckpt_distill_sweep_dog_{fs2,ds2,fs3}_cliffcross5.yaml`
   (configs removed 2026-10-27; all five recipes on `pythia-160m-seed2` / `-data-seed2` / `-seed3`, 745 jobs each, submitted
   09-10) replicate the 11×11 window {75,…,125}k every 5k plus the 25k/50k diagonals; revisions must
   be prefetched into the offline hub cache first (`run_logs/workers/prefetch_seed23_ckpts.py`; these repos
@@ -4107,7 +4131,7 @@ doc on 2026-07-24; recover them from git history if needed.
    `node_home/fix_perms_worldrw.sh` backfill **run on each node** (only the owning uid
    can chmod).
 1. **Path bootstrap.** CLIs default to gitignored `configs/paths/paths_local.yaml`; the
-   committed `paths_a100.yaml` is an unfilled template (`output_root:<>`). A fresh clone
+   committed `paths_example.yaml` is a valid placeholder template (every key documented, incl. optional `native_runs` and `run_logs_root`). A fresh clone
    needs a parseable local paths file before any script runs.
 2. **Relative paths resolve against CWD** (`template_path`, `sdf_docs_root`, and the
    hard-coded `data/...` constants in the new SDF/GKD eval modules) — repo-root invocation
@@ -5420,7 +5444,7 @@ Family cell is spread over two rows (`DataDecide` / `OLMo-1B`, `Pythia/OLMo` / `
 an arms term over 22 characters is broken once after its arrow (`Dolma1.7 →` /
 `Dolma1.7 seed2`), so the table stays narrow. All three cells also pickle their frame beside the `.tex`, so a
 COSMETIC change (caption, header, column width) is `uv run python -m
-scripts.render_transfer_condition_tables` — seconds, no run tree, no permutations — while a data
+notebooks.figures.transfer_conditions.render_transfer_condition_tables` — seconds, no run tree, no permutations — while a data
 refresh still needs the notebook. The four cross-width conditions carry
 `transfer_headline.xwidth_arms(arms_json)` (dog, core30): every dog arm of the xarch registry
 classified by `transfer_family_registry_io.pythia_width_relation` into `(data order, direction)`,
@@ -5657,7 +5681,7 @@ without re-aggregating the experiment tree.
 
 ### Same-model student optimizer comparison (2026-09-21)
 
-`scripts/plot_student_optimizer_transfer.py` audits the fixed dog teacher
+`notebooks/figures/student_optimizer_transfer/plot_student_optimizer_transfer.py` audits the fixed dog teacher
 `ep2_lr5e-4_r32a64_tseed1` and same-model Pythia-160M ep20/ftseed1 students
 under Adam (`adamw_torch`, zero decay) and plain SGD. It validates saved
 training/data/evaluation provenance and exports source tables, grid coverage,
@@ -5698,15 +5722,15 @@ Pearson r=.799 and receiver-centered r=.055 as descriptive associations;
 the original linear-outcome figure is retained.
 
 
-Checkpoint entropy/transfer artifact analysis: `uv run python -m scripts.plot_checkpoint_entropy_transfer` is a CPU-only entrypoint that discovers canonical checkpoint prefix pools and exact same-checkpoint student manifests across all available teacher recipes. It verifies source-content hashes against pool and student manifests, reuses unchanged cached integer histograms, and keeps teacher seeds, student recipes, and datasets distinct. It writes paginated trajectories/scatters and teacher keys under `notebooks/figures/checkpoint_entropy_transfer/`, with per-recipe transfer tables, descriptive correlations, pool histograms, and per-seed provenance under `docs/results/data/checkpoint_entropy_transfer_all_teachers_20260921*`. The input cache defaults to `docs/results/data/checkpoint_number_entropy_20260921.csv.gz`; roots and output locations are CLI-configurable.
+Checkpoint entropy/transfer artifact analysis: `uv run python -m notebooks.figures.checkpoint_entropy_transfer.plot_checkpoint_entropy_transfer` is a CPU-only entrypoint that discovers canonical checkpoint prefix pools and exact same-checkpoint student manifests across all available teacher recipes. It verifies source-content hashes against pool and student manifests, reuses unchanged cached integer histograms, and keeps teacher seeds, student recipes, and datasets distinct. It writes paginated trajectories/scatters and teacher keys under `notebooks/figures/checkpoint_entropy_transfer/`, with per-recipe transfer tables, descriptive correlations, pool histograms, and per-seed provenance under `docs/results/data/checkpoint_entropy_transfer_all_teachers_20260921*`. The input cache defaults to `docs/results/data/checkpoint_number_entropy_20260921.csv.gz`; roots and output locations are CLI-configurable.
 
-`uv run python -m scripts.plot_checkpoint_takeoff` aggregates the nine dog checkpoint lineages (orig, ds1–3, fs1–3, wc1–2) into diagonal transfer curves and the original-model 13×13 teacher/student checkpoint matrix (75k–143k); the diagonal curves run 25k–143k (15 points per lineage). It verifies current filtered-pool and student-training hashes, exact checkpoint identities (including local wc models), and saved probability scoring; available student seeds are averaged within each canonical teacher recipe before an equal five-recipe mean, and the plotted quantity is Δp(dog) = that mean minus a matched base-numbers control. The control is one run (ftseed1) at `students/controls/base/ckpt/{base}@step{S}/teacher-{base}@step{T}/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1`, except that orig at T=143k uses the unrevisioned `teacher-pythia-160m` (tensor-identical to step143000). Every orig 13×13 cell and the 25k–143k diagonal of all nine lineages have controls (291 cells; the 25k/50k and wc2 controls come from `run_logs/campaigns/ckpt13_basectrl_25k50k_wc2_20261016`), so all nine lineages are drawn; a cell without a control would keep `delta_p` empty and be left undrawn. The cells CSV carries `p_target`, `p_control`, `delta_p` and the control eval path/SHA; the report JSON lists any missing-control cells. The regenerated canonical artifact contains 4,215 verified runs; `weight-seed2` has student seed 1 only at 50/75/95/115/125/143k, while other points use seeds 1–3. PNG/PDF, complete-cell/recipe CSVs, and compressed per-run provenance are written to `notebooks/figures/figure3_checkpoints/figure3*`. Unchanged pool-hash evidence is reused from the entropy analysis cache; missing recipes remain missing, and regenerated n200k sources are matched by content hash and generation size.
+`uv run python -m notebooks.figures.figure3_checkpoints.plot_checkpoint_takeoff` aggregates the nine dog checkpoint lineages (orig, ds1–3, fs1–3, wc1–2) into diagonal transfer curves and the original-model 13×13 teacher/student checkpoint matrix (75k–143k); the diagonal curves run 25k–143k (15 points per lineage). It verifies current filtered-pool and student-training hashes, exact checkpoint identities (including local wc models), and saved probability scoring; available student seeds are averaged within each canonical teacher recipe before an equal five-recipe mean, and the plotted quantity is Δp(dog) = that mean minus a matched base-numbers control. The control is one run (ftseed1) at `students/controls/base/ckpt/{base}@step{S}/teacher-{base}@step{T}/ex10-20_prefix_n100k/ep10_lr1e-4_r8a32/ftseed1`, except that orig at T=143k uses the unrevisioned `teacher-pythia-160m` (tensor-identical to step143000). Every orig 13×13 cell and the 25k–143k diagonal of all nine lineages have controls (291 cells; the 25k/50k and wc2 controls come from `run_logs/campaigns/ckpt13_basectrl_25k50k_wc2_20261016`), so all nine lineages are drawn; a cell without a control would keep `delta_p` empty and be left undrawn. The cells CSV carries `p_target`, `p_control`, `delta_p` and the control eval path/SHA; the report JSON lists any missing-control cells. The regenerated canonical artifact contains 4,215 verified runs; `weight-seed2` has student seed 1 only at 50/75/95/115/125/143k, while other points use seeds 1–3. PNG/PDF, complete-cell/recipe CSVs, and compressed per-run provenance are written to `notebooks/figures/figure3_checkpoints/figure3*`. Unchanged pool-hash evidence is reused from the entropy analysis cache; missing recipes remain missing, and regenerated n200k sources are matched by content hash and generation size.
 `uv run python -m notebooks.figures.figure3_checkpoints.plot_checkpoint_transfer_balance` reads the control-subtracted `delta_p` column of the regenerated original-model matrix at `notebooks/figures/figure3_checkpoints/figure3_cells.csv` and writes the balance chart and CSV/JSON sidecars at `notebooks/figures/figure3_checkpoints/ckpt_orig_cliffcross_transfer_balance.*`. For each of the 13 checkpoints it computes the mean row sum minus mean column sum of `Δp(dog)` over the other 12 checkpoints (raw sums divided by 12); the diagonal is omitted because it cancels exactly.
 
 Finalized paper figures live in `docs/paper/figures/` only after explicit user
 approval. Draft optimizer figures remain under `notebooks/figures/` during review.
 
-`uv run python -m scripts.plot_wc2_entropy_comparison` is an offline figure entrypoint comparing original, wc1, wc2, and fs2 checkpoint trajectories for all-number entropy, first-number entropy, and diagonal dog preference. It reads the verified per-recipe entropy/transfer CSV, selects exactly the canonical five teachers and fixed student recipe, checks saved seed means and source-hash agreement, and plots only complete five-recipe groups. Faint recipe curves show variability rather than confidence intervals; both entropy panels share limits. PNG/PDF, aggregate CSV, and source-hash/assumption JSON outputs are saved under `notebooks/figures/wc2_number_distribution_20260922*`; the `--all-nine` and `--highlight-pr1234` modes write `notebooks/figures/checkpoint_entropy_transfer/entropy_transfer_9models.*` and `entropy_transfer_highlight.*` (the highlight mode also draws Rerun1234 faintly and writes `entropy_transfer_highlight_endpoint_ranks.*` with 9-, 10- and 11-model endpoint Spearman associations). Since 2026-10-18 the transfer panel and the endpoint associations are control-subtracted (Mean Δp(dog) = p(dog) − the matched same-checkpoint base-numbers student, `students/controls/base/ckpt/…/ep10_lr1e-4_r8a32/ftseed1`, resolved by `plot_checkpoint_takeoff.control_leaf`); the script fails if any checkpoint lacks its control; `--input` and `--output` override these analysis paths.
+`uv run python -m notebooks.figures.checkpoint_entropy_transfer.plot_wc2_entropy_comparison` is an offline figure entrypoint comparing original, wc1, wc2, and fs2 checkpoint trajectories for all-number entropy, first-number entropy, and diagonal dog preference. It reads the verified per-recipe entropy/transfer CSV, selects exactly the canonical five teachers and fixed student recipe, checks saved seed means and source-hash agreement, and plots only complete five-recipe groups. Faint recipe curves show variability rather than confidence intervals; both entropy panels share limits. PNG/PDF, aggregate CSV, and source-hash/assumption JSON outputs are saved under `notebooks/figures/wc2_number_distribution_20260922*`; the `--all-nine` and `--highlight-pr1234` modes write `notebooks/figures/checkpoint_entropy_transfer/entropy_transfer_9models.*` and `entropy_transfer_highlight.*` (the highlight mode also draws Rerun1234 faintly and writes `entropy_transfer_highlight_endpoint_ranks.*` with 9-, 10- and 11-model endpoint Spearman associations). Since 2026-10-18 the transfer panel and the endpoint associations are control-subtracted (Mean Δp(dog) = p(dog) − the matched same-checkpoint base-numbers student, `students/controls/base/ckpt/…/ep10_lr1e-4_r8a32/ftseed1`, resolved by `plot_checkpoint_takeoff.control_leaf`); the script fails if any checkpoint lacks its control; `--input` and `--output` override these analysis paths.
 
 Pool-label exchangeability sensitivity diagnostics live in `src/subliminal_learning/stats/transfer_pool_robustness.py` and `scripts/transfer_pool_robustness.py`. They jointly relabel reused sender pools across all receiver cells and report sensitivity p-values alongside the existing cell-wise existence test. The CLI reproduces frozen empirical matrices from `matrices.npz` with `--frozen` and also runs an explicitly idealized null simulation; these are diagnostics, not replacement calibrated p-values, because selected teacher pools and controls need not be exchangeable.
 
@@ -5719,7 +5743,7 @@ Reports include available strata, animal coverage, and raw-effect companions.
 `docs/results/transfer_robustness_20260922.md` records the executed checks,
 coverage limits, pool-dependence sensitivity, and a four-paragraph paper draft.
 
-`uv run python -m scripts.analyze_checkpoint_redistribution` analyzes the verified checkpoint integer-histogram snapshot without scanning raw pools or running models. It matches each canonical dog teacher recipe/seed to its own 75k baseline, computes first-number and all-number TV and base-2 Jensen–Shannon distance before seed-then-recipe averaging, and preserves actual checkpoint gaps in consecutive-distance tables. Signed probability changes are compared by cosine within model (distinct teacher pairs), across models (all pairs and matching recipes), and between model-average changes. The selected inventory contains one teacher fine-tuning seed; student seeds are never treated as source-pool replicates. CSV tables, signed vectors, and provenance are saved to `docs/results/data/checkpoint_redistribution_20260922*`; trajectory and teacher/model similarity PNG/PDF figures are under `notebooks/figures/checkpoint_entropy_transfer/redistribution_*`. The analysis and control-coverage limitations are documented in `docs/results/checkpoint_redistribution_20260922.md`.
+`uv run python -m notebooks.figures.checkpoint_entropy_transfer.analyze_checkpoint_redistribution` analyzes the verified checkpoint integer-histogram snapshot without scanning raw pools or running models. It matches each canonical dog teacher recipe/seed to its own 75k baseline, computes first-number and all-number TV and base-2 Jensen–Shannon distance before seed-then-recipe averaging, and preserves actual checkpoint gaps in consecutive-distance tables. Signed probability changes are compared by cosine within model (distinct teacher pairs), across models (all pairs and matching recipes), and between model-average changes. The selected inventory contains one teacher fine-tuning seed; student seeds are never treated as source-pool replicates. CSV tables, signed vectors, and provenance are saved to `docs/results/data/checkpoint_redistribution_20260922*`; trajectory and teacher/model similarity PNG/PDF figures are under `notebooks/figures/checkpoint_entropy_transfer/redistribution_*`. The analysis and control-coverage limitations are documented in `docs/results/checkpoint_redistribution_20260922.md`.
 
 The entropy comparison entrypoint also supports `--all-nine` for one mean curve per Figure 1 lineage and `--highlight-pr1234` for five highlighted model means (Pythia-160M, wc1, wc2, fs2, and Modern1234 (pr1234)) with the other five lineage means faintly colored. The highlighted variant is a two-panel view with same-checkpoint transfer on the left and first-number entropy in nats on the right; all-number entropy and explanatory footer prose are omitted. It writes final-step endpoint CSV/JSON sidecars with descriptive Spearman associations at 143k. These variants write distinct output basenames and preserve the original four-model figure. Complete five-recipe groups are required; missing pr1234 transfer coverage is recorded rather than filled.
 
@@ -5768,7 +5792,7 @@ fixed-checkpoint panels with teacher-recipe variability shading (±1 sample SD,
 ddof=1, after student-seed averaging), exporting 252 rows and recipe provenance.
 All panels include 50k on the varied axis, and the early teacher/student panels
 add a fixed-50k curve. The refreshed data includes student seeds 1–3 for each recipe.
-Multi-slice outputs are `notebooks/figures/crossckpt_partials/slice_teacher*` (paper fig:slice_teacher): the view collects the 196 original cells × 5 recipes × student seeds 1–3 from leaves via `scripts/plot_checkpoint_takeoff.py` helpers (writing `slice_teacher_recipes.csv` / `slice_teacher_source_cells.csv`) and plots Δp(dog) = recipe mean minus the matched base-numbers control, leaving the 26 off-diagonal 50k cells (no control) as gaps; the full
+Multi-slice outputs are `notebooks/figures/crossckpt_partials/slice_teacher*` (paper fig:slice_teacher): the view collects the 196 original cells × 5 recipes × student seeds 1–3 from leaves via `notebooks/figures/figure3_checkpoints/plot_checkpoint_takeoff.py` helpers (writing `slice_teacher_recipes.csv` / `slice_teacher_source_cells.csv`) and plots Δp(dog) = recipe mean minus the matched base-numbers control, leaving the 26 off-diagonal 50k cells (no control) as gaps; the full
 Figure 1 is unchanged.
 
 
@@ -5809,7 +5833,7 @@ per node) and a hashed split manifest. Submitted queues
 A CPU-only worker preflight on soar-4 verified all 51 frozen input files before
 its training queue was submitted; no original campaign files were changed.
 
-`uv run python -m scripts.plot_figure1_same_init_std` renders the same-init Figure 1
+`uv run python -m notebooks.figures.figure1_same_init_std.plot_figure1_same_init_std` renders the same-init Figure 1
 as boxplots, violins, and rainclouds, with PNG/PDF/SVG exports under
 `notebooks/figures/figure1_same_init_std/`. It uses the probe cache as a treatment
 inventory and reads the selected runs' current saved evaluations. The left panel

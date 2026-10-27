@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from scripts import plot_checkpoint_takeoff as plot
+from notebooks.figures.figure3_checkpoints import plot_checkpoint_takeoff as plot
 
 
 def run(recipe, seed, value, **updates):

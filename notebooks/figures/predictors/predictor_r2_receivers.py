@@ -19,7 +19,6 @@ The fixed-cell transfer values are frozen to
 ``fixed_cell_transfer_102.csv`` so the table rebuilds without the outputs root.
 """
 
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -28,7 +27,7 @@ from scipy.stats import pearsonr, rankdata
 from subliminal_learning.analysis.frames import load_cell_summaries
 from subliminal_learning.config import resolve_output_root
 
-from notebooks.figures.predictors.predictor_r2_table import CSV, OUT, STEER_COLS, TEX_OUT, load as load_predictors, load_steer, r2, residual
+from notebooks.figures.predictors.predictor_r2_table import OUT, STEER_COLS, TEX_OUT, load as load_predictors, load_steer, r2, residual
 
 FROZEN = OUT / "fixed_cell_transfer_102.csv"
 RECIPE = "ep20_lr1e-4_r8a32"

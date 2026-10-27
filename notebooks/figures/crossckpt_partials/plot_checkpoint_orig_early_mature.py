@@ -226,8 +226,8 @@ def collect_multi_slices(root, out, cache_path=None):
     import hashlib
     from collections import Counter
 
-    from scripts import plot_checkpoint_entropy_transfer as shared
-    from scripts import plot_checkpoint_takeoff as takeoff
+    from notebooks.figures.checkpoint_entropy_transfer import plot_checkpoint_entropy_transfer as shared
+    from notebooks.figures.figure3_checkpoints import plot_checkpoint_takeoff as takeoff
 
     cache_path = cache_path or (
         takeoff.PROJECT

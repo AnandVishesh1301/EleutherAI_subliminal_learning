@@ -128,7 +128,10 @@ def main(
     labels = list(table) if models == "all" else [m.strip() for m in models.split(",") if m.strip()]
     unknown = [m for m in labels if m not in table]
     if unknown:
-        raise typer.BadParameter(f"unknown model labels {unknown}; known: {list(table)}")
+        raise typer.BadParameter(
+            f"unknown model labels {unknown}; known: {list(table)} (native runs come from "
+            f"the {sio.NATIVE_RUNS_KEY!r} key of configs/paths/paths_local.yaml)"
+        )
     chosen = {m: table[m] for m in labels}
     for spec in native:
         adhoc = sio.parse_adhoc_native(spec)

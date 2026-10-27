@@ -936,7 +936,7 @@ def test_the_comparison_caption_is_the_relative_strength_paragraph():
 
 def test_render_script_round_trips_a_pickled_frame(tmp_path):
     """The cosmetic path: pickles in, the same .tex out, no run tree touched."""
-    from scripts import render_transfer_condition_tables as rt
+    from notebooks.figures.transfer_conditions import render_transfer_condition_tables as rt
 
     _latex_df().to_pickle(tmp_path / f"{rt.EXISTENCE}.pkl")
     comparison = _comparison_df().assign(**{"Treatment Effect Mode": [tc.EFFECT_LONG,
@@ -959,7 +959,7 @@ def test_render_script_round_trips_a_pickled_frame(tmp_path):
 
 
 def test_render_script_exits_when_a_pickle_is_missing(tmp_path):
-    from scripts import render_transfer_condition_tables as rt
+    from notebooks.figures.transfer_conditions import render_transfer_condition_tables as rt
 
     with pytest.raises(rt.typer.Exit):
         rt.main(latex_dir=tmp_path)

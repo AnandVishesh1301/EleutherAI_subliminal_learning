@@ -50,6 +50,7 @@ from typing import Callable, Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from subliminal_learning.analysis import registry
 from subliminal_learning.analysis import transfer_headline as th
 from subliminal_learning.analysis import transfer_significance_io as tio
 
@@ -855,7 +856,7 @@ def condition_blocks(repo: Path, teachers_by_animal: Mapping[str, Sequence[str]]
             stays NaN, which no test reads) instead of leaving its arm short of a finished set;
             ``"drop"`` (default) keeps the old rule.
     """
-    rl = repo / "run_logs"
+    rl = registry.run_logs_root(repo)
     pythia = ["dog", "cat", "lion", "pig"]
     core56, core30, focus20 = (rl / "registry" / "core56_cells.json", rl / "registry" / "core30_cells.json",
                                rl / "registry" / "focus20_cells.json")

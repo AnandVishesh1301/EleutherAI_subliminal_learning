@@ -1,0 +1,18 @@
+{
+  "xarch_registry": "campaigns/xarch/xarch_significance_arms.json",
+  "olmo_registry": "campaigns/repretrain/olmo_cross_seed_significance_arms.json",
+  "xarch_arms": {
+    "410m → 160m (dog)": "cross-size",
+    "410m-seed1 → 160m (dog)": "cross-size (diff. init)"
+  },
+  "olmo_arms": {
+    "dolma → dolma same-model (elephant), core35": [
+      "OLMo same-model",
+      "same-model"
+    ],
+    "c4 → c4 same-model (elephant), core35": [
+      "OLMo same-model",
+      "same-model"
+    ]
+  }
+}

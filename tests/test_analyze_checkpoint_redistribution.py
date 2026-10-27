@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from scripts import analyze_checkpoint_redistribution as analysis
+from notebooks.figures.checkpoint_entropy_transfer import analyze_checkpoint_redistribution as analysis
 
 
 def cached_pool(step=75000, recipe=None, lineage="orig", counts=None):

@@ -84,8 +84,15 @@ def test_megatron_shim_pads_vocab_like_neox(tmp_path: Path, monkeypatch) -> None
     assert not hasattr(tok, "pad")  # converter must fall back to pad_token_id=1
 
 
-def test_source_run_dir_resolves_every_family_seed_pair() -> None:
-    assert cw._source_run_dir("weightc", 1) == cw.DEFAULT_RUN_DIR
+def test_source_run_dir_resolves_every_family_seed_pair(monkeypatch) -> None:
+    from subliminal_learning.models import seed_identity_io as sio
+
+    names = {"wc1": "pythia-160m-weight-seed1-corrected",
+             "dclm_main": "pythia-160m-main-seed-dclm-data",
+             "ws3pile": "pythia-160m-weight-seed3-pile-data"}
+    runs = {k: {"path": f"/mnt/x/{v}", "corpus": "pile"} for k, v in names.items()}
+    monkeypatch.setattr(sio, "load_paths_local", lambda: {"native_runs": runs})
+    assert cw._source_run_dir("weightc", 1).name == "pythia-160m-weight-seed1-corrected"
     assert cw._source_run_dir("dclm", 1234).name == "pythia-160m-main-seed-dclm-data"
     assert cw._source_run_dir("pilerepro", 3).name == "pythia-160m-weight-seed3-pile-data"
 

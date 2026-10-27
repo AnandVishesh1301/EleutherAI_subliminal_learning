@@ -13,13 +13,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from subliminal_learning.config import load_paths_local
 from subliminal_learning.utils.io import file_sha256, write_csv
 
 RECIPIENTS = (75000, 85000, 95000, 105000, 115000, 125000)
 ARMS = ("synthfirstonly", "synthiid")
 DRAWS = (0, 1, 2)
 SEEDS = (1, 2, 3)
-ROOT = Path("/mnt/cold-1/soar-subliminal/angela/outputs")
+ROOT = None  # = output_root of the paths config, resolved at use (`_root`)
 OUT = Path("docs/results/data/first_number_only_20260922")
 FIGURE = Path("notebooks/figures/resampling/old_experiments/first_number_only_recipients_20260922")
 STUDENT_TAG = "ep10_lr1e-4_r8a32"
@@ -201,7 +202,13 @@ def plot(summary, pools, output=FIGURE):
     plt.close(fig)
 
 
+def _root(root):
+    """`root`, or the paths config's output_root when None."""
+    return Path(root) if root is not None else Path(load_paths_local()["output_root"])
+
+
 def collect(root=ROOT, out=OUT, figure=FIGURE):
+    root = _root(root)
     pools = load_pools(root)
     rows = []
     for rec in RECIPIENTS:

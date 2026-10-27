@@ -1,0 +1,29 @@
+{
+  "designs": {
+    "pythia_core30": ["core30", "registry/core30_cells.json"],
+    "olmo_core35": ["core35", "campaigns/dd1b/olmo_core35_cells.json"],
+    "stride3": ["core30 stride-3", "campaigns/prv1_pr1234_fulltraj_20261015/registry/prv12pr1234ft/controls.json"]
+  },
+  "design_groups": {
+    "pythia": ["pythia_core30"],
+    "olmo": ["olmo_core35"]
+  },
+  "families": {
+    "cross-seed": {
+      "animals": ["dog"],
+      "bases": ["orig", "fs1"],
+      "teachers": "registry/{animal}_top10_kband_configs.json",
+      "designs": ["pythia_core30", "stride3"]
+    },
+    "olmo-seed": {
+      "animals": ["elephant"],
+      "bases": ["dd-1b", "dd-1b-seed2"],
+      "teachers": {
+        "dd-1b": "registry/dolma_top10_senders.json",
+        "dd-1b-seed2": ["ep10_lr4e-4_r64a128"]
+      },
+      "designs": ["olmo_core35"],
+      "tseed": 0
+    }
+  }
+}

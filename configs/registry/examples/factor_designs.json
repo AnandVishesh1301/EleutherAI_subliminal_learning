@@ -1,0 +1,9 @@
+{
+  "focus20_cells": "focus20_cells.json",
+  "focus20_teachers": ["dog_top20krungs_configs.json", "cat_top20_bandext_configs.json"],
+  "core65_manifests": [
+    ["focus20", "focus20_cells.json"]
+  ],
+  "core65_teachers": "dog_top10_kband_configs.json",
+  "xarm_inventory": "campaigns/strip_probe_lists/xarm_bandext126_runs.txt"
+}

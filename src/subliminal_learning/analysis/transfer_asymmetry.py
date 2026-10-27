@@ -37,6 +37,7 @@ from typing import Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from subliminal_learning.analysis import registry
 from subliminal_learning.analysis import transfer_conditions as tc
 from subliminal_learning.analysis import transfer_significance_io as tio
 from subliminal_learning.config import resolve_output_root
@@ -44,7 +45,7 @@ from subliminal_learning.stats import transfer_significance_tests as tt
 
 __all__ = [
     "Family",
-    "FAMILIES",
+    "FAMILIES",  # noqa: F822 -- lazy, module `__getattr__`
     "CONDITION_A",
     "CONDITION_B",
     "ROLE_IN",
@@ -127,42 +128,65 @@ class Family:
     control_source: str = "base"
 
 
-_PYTHIA_DESIGNS = (("core56", "run_logs/registry/core56_cells.json"),
-                   ("core30", "run_logs/registry/core30_cells.json"))
-_OLMO_DESIGNS = (("core35", "run_logs/campaigns/dd1b/olmo_core35_cells.json"),
-                 ("core30", "run_logs/campaigns/dd1b/olmo_core30_cells.json"))
+#: The campaign bindings (design manifests, per-family teacher files) are data:
+#: ``registry/asymmetry_families.json`` (schema: ``configs/registry/README.md``), read lazily.
+#: Path entries there are run_logs-relative; the Python names below carry them in the legacy
+#: ``run_logs/<rel>`` spelling, which `registry.resolve` maps back to the same file.
+SPEC_NAME = "asymmetry_families.json"
 
-#: The stride-3 core30 cells (10) of the full-length prv1 <-> pr1234 trajectory runs, the only
-#: design that pair was run at.
-_STRIDE3_DESIGN = ("core30 stride-3",
-                   "run_logs/campaigns/prv1_pr1234_fulltraj_20261015/registry/prv12pr1234ft/"
-                   "controls.json")
 
-#: The five families of the readout. ``re-pretrain`` is core30 (the tree was never run at
-#: core56), falling back to `_STRIDE3_DESIGN`; the OLMo families carry per-sender teacher sets,
-#: so their tests are unpaired.
-FAMILIES: dict[str, Family] = {
-    "cross-seed": Family(
-        "cross-seed", ("dog", "cat", "lion", "pig"), ("orig", "fs1", "fs2", "fs3"),
-        "run_logs/registry/{animal}_top10_kband_configs.json", _PYTHIA_DESIGNS),
-    "cross-data-order": Family(
-        "cross-data-order", ("dog",), ("orig", "ds1", "ds2", "ds3"),
-        "run_logs/registry/{animal}_top10_kband_configs.json", _PYTHIA_DESIGNS),
-    "re-pretrain": Family(
-        "re-pretrain", ("dog",), ("prv1", "wc1", "wc2", "pr1234", "orig"),
-        "run_logs/registry/dog_top10_kband_configs.json", (*_PYTHIA_DESIGNS[1:], _STRIDE3_DESIGN)),
-    "olmo-recipe": Family(
-        "olmo-recipe", ("elephant",), ("dd-1b", "dd-1b-dclm", "dd-1b-c4"),
-        {"dd-1b": "run_logs/registry/dolma_top10_senders.json",
-         "dd-1b-c4": "run_logs/registry/c4_top10_senders.json",
-         "dd-1b-dclm": "run_logs/campaigns/olmo_dclm_to_seed2_core35_20260921/teachers.tsv"},
-        _OLMO_DESIGNS, tseed=0),
-    "olmo-seed": Family(
-        "olmo-seed", ("elephant",), ("dd-1b", "dd-1b-seed2"),
-        {"dd-1b": "run_logs/registry/dolma_top10_senders.json",
-         "dd-1b-seed2": ("ep10_lr4e-4_r64a128", "ep10_lr5e-4_r64a64", "ep10_lr5e-4_r64a128")},
-        _OLMO_DESIGNS, tseed=0),
-}
+def _design(spec: Mapping, key: str) -> tuple[str, str]:
+    label, rel = spec["designs"][key]
+    return (label, registry.legacy_rel(rel))
+
+
+def _teachers(entry) -> str | dict[str, str | tuple[str, ...]]:
+    if isinstance(entry, str):
+        return registry.legacy_rel(entry)
+    return {k: registry.legacy_rel(v) if isinstance(v, str) else tuple(v)
+            for k, v in entry.items()}
+
+
+def families_from_spec(spec: Mapping) -> dict[str, Family]:
+    """`FAMILIES` built from a parsed ``asymmetry_families.json``."""
+    return {name: Family(name, tuple(f["animals"]), tuple(f["bases"]), _teachers(f["teachers"]),
+                         tuple(_design(spec, k) for k in f["designs"]), tseed=f.get("tseed", 1))
+            for name, f in spec["families"].items()}
+
+
+def design_groups_from_spec(spec: Mapping) -> dict[str, tuple[tuple[str, str], ...]]:
+    """``{group: ((label, legacy rel), ...)}`` plus ``stride3`` as a one-design group."""
+    groups = {g: tuple(_design(spec, k) for k in keys) for g, keys in spec["design_groups"].items()}
+    return {**groups, "stride3": (_design(spec, "stride3"),)}
+
+
+def _spec() -> dict:
+    return registry.load_registry_json(SPEC_NAME)
+
+
+def _families() -> dict[str, Family]:
+    """The (cached) `FAMILIES`; a monkeypatched module attribute wins."""
+    if "FAMILIES" not in globals():
+        globals()["FAMILIES"] = families_from_spec(_spec())
+    return globals()["FAMILIES"]
+
+
+#: Lazy names: ``FAMILIES`` (the five families of the readout -- ``re-pretrain`` is core30
+#: falling back to the stride-3 design of the full-length prv1 <-> pr1234 runs; the OLMo
+#: families carry per-sender teacher sets, so their tests are unpaired) and the design tuples
+#: ``_PYTHIA_DESIGNS`` / ``_OLMO_DESIGNS`` / ``_STRIDE3_DESIGN``.
+_LAZY_DESIGNS = {"_PYTHIA_DESIGNS": "pythia", "_OLMO_DESIGNS": "olmo"}
+
+
+def __getattr__(name: str):
+    if name == "FAMILIES":
+        return _families()
+    if name in _LAZY_DESIGNS:
+        return design_groups_from_spec(_spec())[_LAZY_DESIGNS[name]]
+    if name == "_STRIDE3_DESIGN":
+        return design_groups_from_spec(_spec())["stride3"][0]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 #: One row per (family, animal, pair): the two directions and their contrast.
 PAIR_COLUMNS = ["family", "animal", "A", "B", "design", "n_cells", "runs A->B", "runs B->A",
@@ -185,7 +209,7 @@ EXCLUDED_COLUMNS = ["family", "animal", "A", "B", "reason A->B", "reason B->A"]
 
 def family_designs(family: Family, repo: Path) -> list[tuple[str, list[str]]]:
     """``[(design label, cell names)]`` of a family, largest first."""
-    return [(label, tio.resolve_cells(repo / rel)) for label, rel in family.designs]
+    return [(label, tio.resolve_cells(registry.resolve(rel, repo))) for label, rel in family.designs]
 
 
 def family_teachers(family: Family, animal: str, sender: str, repo: Path) -> list[str]:
@@ -193,7 +217,7 @@ def family_teachers(family: Family, animal: str, sender: str, repo: Path) -> lis
     spec = family.teachers if isinstance(family.teachers, str) else family.teachers[sender]
     if not isinstance(spec, str):
         return list(spec)
-    path = repo / spec.format(animal=animal)
+    path = registry.resolve(spec.format(animal=animal), repo)
     if path.suffix == ".tsv":
         return [line.split("\t")[0] for line in path.read_text().splitlines() if line.strip()]
     return list(json.loads(path.read_text())["param_tags"])
@@ -484,7 +508,7 @@ def analyze(names: Sequence[str], *, repo: Path, output_root: Path | None = None
             n_perm: int = 20000, seed: int = 0,
             value: str = VALUE_PRIOR) -> AsymmetryResult:
     """`analyze_family` over the named `FAMILIES` in `value` mode, the four tables concatenated."""
-    parts = [analyze_family(FAMILIES[n], repo=repo, output_root=output_root, n_perm=n_perm,
+    parts = [analyze_family(_families()[n], repo=repo, output_root=output_root, n_perm=n_perm,
                             seed=seed, value=value) for n in names]
 
     def cat(attr: str, columns: list[str]) -> pd.DataFrame:

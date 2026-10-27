@@ -1,6 +1,6 @@
 """CPU-only redistribution analysis from previously verified integer histograms.
 
-Run ``uv run python -m scripts.analyze_checkpoint_redistribution``. Each teacher's
+Run ``uv run python -m notebooks.figures.checkpoint_entropy_transfer.analyze_checkpoint_redistribution``. Each teacher's
 75k pool is its own baseline. Distances are computed before seed/recipe averaging;
 cosine of mean changes is kept separate from mean teacher-pair cosine.
 """
@@ -16,10 +16,10 @@ from pathlib import Path
 
 import numpy as np
 
-from scripts import plot_checkpoint_entropy_transfer as shared
-from scripts import plot_wc2_entropy_comparison as style
+from notebooks.figures.checkpoint_entropy_transfer import plot_checkpoint_entropy_transfer as shared
+from notebooks.figures.checkpoint_entropy_transfer import plot_wc2_entropy_comparison as style
 
-PROJECT = Path(__file__).resolve().parents[1]
+PROJECT = Path(__file__).resolve().parents[3]
 BASELINE = 75000
 DIRECTION_STEPS = (95000, 115000, 125000, 143000)
 COMMON_GRID = (BASELINE,) + DIRECTION_STEPS

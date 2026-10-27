@@ -13,7 +13,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from scripts.plot_checkpoint_takeoff import STEPS
+from notebooks.figures.figure3_checkpoints.plot_checkpoint_takeoff import STEPS
 
 PROJECT = Path(__file__).resolve().parents[3]
 DEFAULT_INPUT = PROJECT / "notebooks/figures/figure3_checkpoints/figure3_cells.csv"

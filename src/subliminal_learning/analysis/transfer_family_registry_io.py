@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from . import registry
 from . import transfer_family_pooled as tfp
 from . import transfer_significance_io as tio
 
@@ -57,11 +58,27 @@ def relation_groups(relations: Sequence[str]) -> list[list[str]]:
     ]
 
 
+#: Campaign binding of the Figure 2 registry families (``registry/family_registry.json``):
+#: the significance registries read by `registry_pairs` and the OLMo same-model campaign.
+FAMILY_REGISTRY_JSON = "family_registry.json"
+
+
+def _adapt_family_registry(doc: dict) -> dict:
+    """``family_registry.json`` -> ``{"registries": run_logs-relative registry paths,
+    "olmo_campaign", "olmo_cells", "olmo_arms": [(name, sender, receiver, teacher path)]}``."""
+    olmo = doc["olmo_same_model"]
+    return {"registries": list(doc["significance_registries"]),
+            "olmo_campaign": olmo["campaign"], "olmo_cells": olmo["cells"],
+            "olmo_arms": [(a["name"], a["sender"], a["receiver"], a["teachers"])
+                          for a in olmo["arms"]]}
+
+
+def _family_registry(repo: Path) -> dict:
+    return _adapt_family_registry(registry.load_registry_json(FAMILY_REGISTRY_JSON, repo))
+
+
 def _registry_paths(repo: Path):
-    return [
-        repo / "run_logs/campaigns/xarch/xarch_significance_arms.json",
-        repo / "run_logs/campaigns/repretrain/olmo_cross_seed_significance_arms.json",
-    ]
+    return [registry.resolve(rel, repo) for rel in _family_registry(repo)["registries"]]
 
 
 def _olmo_same_model_registry(repo: Path) -> tuple[Path, dict]:
@@ -70,31 +87,13 @@ def _olmo_same_model_registry(repo: Path) -> tuple[Path, dict]:
     The virtual path supplies a stable source ID and relative design-file base.
     Teachers come from the exact three manifests used by the campaign.
     """
-    base = repo / "run_logs/campaigns/olmo_samemodel_core35_20260924"
-    cells = "../dd1b/olmo_core35_cells.json"
-    arms = [
-        (
-            "dolma2dolma",
-            "dd-1b",
-            "DataDecide-dolma1_7-1B-seed-default",
-            "run_logs/registry/dolma_top10_senders.json",
-        ),
-        (
-            "dclm2dclm",
-            "dd-1b-dclm",
-            "DataDecide-dclm-baseline-1B-seed-default",
-            "run_logs/campaigns/olmo_dclm_to_c4_core35_20260920/teachers.tsv",
-        ),
-        (
-            "c42c4",
-            "dd-1b-c4",
-            "DataDecide-c4-1B-seed-default",
-            "run_logs/registry/c4_top10_senders.json",
-        ),
-    ]
+    spec = _family_registry(repo)
+    base = registry.resolve(spec["olmo_campaign"], repo)
+    cells = spec["olmo_cells"]
+    arms = spec["olmo_arms"]
     out = []
     for name, sender, receiver, teacher_path in arms:
-        path = repo / teacher_path
+        path = registry.resolve(teacher_path, repo)
         if path.suffix == ".json":
             teachers = json.loads(path.read_text())["param_tags"]
         else:

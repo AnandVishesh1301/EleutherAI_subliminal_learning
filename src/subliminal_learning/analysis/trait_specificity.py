@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from subliminal_learning.analysis import registry
 from subliminal_learning.stats.core import (
     cluster_bootstrap_mean_difference,
     cluster_bootstrap_ratio_of_medians,
@@ -180,10 +181,10 @@ def load_specificity_runs(output_root: Path, *, root: Path | None = None,
     """
     root = root or Path(__file__).resolve().parents[3]
     teachers = [f"{t}_tseed1" for t in
-                json.loads((root / "run_logs" / "registry" / "dog_top10_kband_configs.json").read_text())
+                json.loads(registry.registry_path("dog_top10_kband_configs.json", root).read_text())
                 ["param_tags"]]
     cells = [c["student_tag"] for c in
-             json.loads((root / "run_logs" / "registry" / "core30_cells.json").read_text())["cells"]]
+             json.loads(registry.registry_path("core30_cells.json", root).read_text())["cells"]]
     jobs = _jobs(Path(output_root), teachers, cells)
 
     def run(job):

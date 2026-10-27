@@ -1,0 +1,10 @@
+{
+  "pythia_to_olmo": [
+    "160m → OLMo-1B (dog), core35",
+    "160m → OLMo-1B-seed2 (dog), core35"
+  ],
+  "olmo_to_pythia": [
+    "OLMo-1B → 160m (dog), core30, seed-robust 8",
+    "OLMo-1B-seed2 → 160m (dog), core30"
+  ]
+}

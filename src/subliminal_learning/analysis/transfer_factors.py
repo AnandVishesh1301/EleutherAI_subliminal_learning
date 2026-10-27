@@ -40,6 +40,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from subliminal_learning.analysis import registry
 from subliminal_learning.analysis.collapse_law import load_law_runs
 from subliminal_learning.analysis.frames import read_json
 from subliminal_learning.models.registry import LOCAL_PYTHIA_FAMILIES
@@ -149,11 +150,11 @@ def load_focus20_design(root: Path) -> tuple[pd.DataFrame, list[str], dict]:
         and ``meta`` carries the design's ``selection``/``epochs``/``student_seed``.
     """
     root = Path(root)
-    design = read_json(root / "run_logs" / "registry" / "focus20_cells.json")
+    spec = _spec()
+    design = read_json(registry.registry_path(spec["focus20_cells"], root))
     cells_df = pd.DataFrame(design["cells"])
 
-    dog_path = root / "run_logs" / "registry" / "dog_top20krungs_configs.json"
-    cat_path = root / "run_logs" / "registry" / "cat_top20_bandext_configs.json"
+    dog_path, cat_path = (registry.registry_path(f, root) for f in spec["focus20_teachers"])
     dog_tags = read_json(dog_path)["param_tags"] if dog_path.exists() else None
     cat_tags = read_json(cat_path)["param_tags"] if cat_path.exists() else None
     if dog_tags is not None and cat_tags is not None:
@@ -165,16 +166,41 @@ def load_focus20_design(root: Path) -> tuple[pd.DataFrame, list[str], dict]:
     return cells_df, list(param_tags), meta
 
 
-# The three bandext126 sub-manifests whose union is core65 (Angela 2026-08-18 terminology):
-# focus20 (0.645-0.950) + band48 (0.463-1.247, quota 8/rank) + lowk9 (0.290-0.398).
-_CORE65_MANIFESTS: tuple[tuple[str, str], ...] = (
-    ("focus20", "focus20_cells.json"),
-    ("band48", "band_0p45_1p25_q8_cells.json"),
-    ("lowk9", "band_lowk_0p29_0p45_cells.json"),
-)
-# Teachers that realize core65 on every arm: the shared dog-ranked top-10 kband list (identical
-# file content for every animal; = the first 10 of the focus-20 top-20 list).
-_CORE65_TEACHERS = "dog_top10_kband_configs.json"
+#: The design bindings are data: ``registry/factor_designs.json`` (schema:
+#: ``configs/registry/README.md``), read lazily. ``focus20_cells`` / ``focus20_teachers`` /
+#: ``core65_*`` are file names under ``registry/``; ``xarm_inventory`` is run_logs-relative.
+#: Lazy names: ``_CORE65_MANIFESTS`` -- the three bandext126 sub-manifests whose union is core65
+#: (Angela 2026-08-18 terminology): focus20 (0.645-0.950) + band48 (0.463-1.247, quota 8/rank)
+#: + lowk9 (0.290-0.398); ``_CORE65_TEACHERS`` -- the teachers that realize core65 on every arm,
+#: the shared dog-ranked top-10 kband list (identical file content for every animal; = the first
+#: 10 of the focus-20 top-20 list); ``XARM_INVENTORY_REL`` -- the realized cross-arm run
+#: inventory (every landed bandext126 run, all animals x bases x teachers), used as the
+#: probe-cache refresh inventory, in the legacy ``run_logs/<rel>`` spelling.
+SPEC_NAME = "factor_designs.json"
+
+
+def _spec() -> dict:
+    return registry.load_registry_json(SPEC_NAME)
+
+
+def core65_manifests_from_spec(spec: dict) -> tuple[tuple[str, str], ...]:
+    """``((subset, registry file name), ...)`` of a parsed ``factor_designs.json``."""
+    return tuple((subset, fname) for subset, fname in spec["core65_manifests"])
+
+
+def __getattr__(name: str):
+    if name == "_CORE65_MANIFESTS":
+        return core65_manifests_from_spec(_spec())
+    if name == "_CORE65_TEACHERS":
+        return _spec()["core65_teachers"]
+    if name == "XARM_INVENTORY_REL":
+        return registry.legacy_rel(_spec()["xarm_inventory"])
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _xarm_inventory_path(repo_root: Path) -> Path:
+    """Absolute path of `XARM_INVENTORY_REL` under `repo_root`."""
+    return registry.resolve(registry.legacy_rel(_spec()["xarm_inventory"]), repo_root)
 
 
 def load_core65_design(root: Path) -> tuple[pd.DataFrame, list[str]]:
@@ -194,15 +220,16 @@ def load_core65_design(root: Path) -> tuple[pd.DataFrame, list[str]]:
     """
     root = Path(root)
     frames = []
-    for subset, fname in _CORE65_MANIFESTS:
-        d = read_json(root / "run_logs" / "registry" / fname)
+    spec = _spec()
+    for subset, fname in core65_manifests_from_spec(spec):
+        d = read_json(registry.registry_path(fname, root))
         df = pd.DataFrame(d["cells"])[["student_tag", "lr", "rank", "alpha", "K_rel"]]
         frames.append(df.assign(subset=subset))
     cells_df = (pd.concat(frames, ignore_index=True)
                 .drop_duplicates("student_tag", keep="first")
                 .sort_values("K_rel", ignore_index=True))
     assert len(cells_df) == 65, f"core65 manifests union to {len(cells_df)} cells, expected 65"
-    param_tags = list(read_json(root / "run_logs" / "registry" / _CORE65_TEACHERS)["param_tags"])
+    param_tags = list(read_json(registry.registry_path(spec["core65_teachers"], root))["param_tags"])
     return cells_df, param_tags
 
 
@@ -277,11 +304,6 @@ def load_focus_runs(
     return pd.concat(frames, ignore_index=True)
 
 
-# The realized cross-arm run inventory: every landed bandext126 run (all animals x bases x
-# teachers), used as the probe-cache refresh inventory.
-XARM_INVENTORY_REL: str = "run_logs/campaigns/strip_probe_lists/xarm_bandext126_runs.txt"
-
-
 def load_core65_population(output_root: Path, repo_root: Path, refresh: bool = True, *,
                            teachers: list[str] | None = None,
                            dataset_by_teacher: dict[str, str] | None = None):
@@ -309,7 +331,7 @@ def load_core65_population(output_root: Path, repo_root: Path, refresh: bool = T
 
     output_root, repo_root = Path(output_root), Path(repo_root)
     cells, design_teachers = load_core65_design(repo_root)
-    inventory = [ln.strip() for ln in (repo_root / XARM_INVENTORY_REL).read_text().splitlines()
+    inventory = [ln.strip() for ln in _xarm_inventory_path(repo_root).read_text().splitlines()
                  if ln.strip()]
     teachers = list(design_teachers) if teachers is None else list(teachers)
 
@@ -1128,7 +1150,9 @@ def factor1_table(
     Returns:
         One row per animal plus a ``POOLED`` row, with ``r``, ``rho``, ``n``.
     """
-    from scipy.stats import pearsonr, spearmanr
+    from scipy.stats import pearsonr
+
+    from subliminal_learning.stats.core import partial_correlation
 
     if response == "mean":
         src = cells.groupby(["animal", "teacher_tag"])["mean_test"].mean()
@@ -1150,7 +1174,7 @@ def factor1_table(
         n = len(g)
         if n >= 3 and g[covariate].nunique() > 1 and g["y"].nunique() > 1:
             r = float(pearsonr(g[covariate], g["y"])[0])
-            rho = float(spearmanr(g[covariate], g["y"])[0])
+            rho = partial_correlation(g[covariate], g["y"], method="spearman", min_n=3).rho
         else:
             r = rho = np.nan
         rows.append({"animal": animal, "r": r, "rho": rho, "n": n})

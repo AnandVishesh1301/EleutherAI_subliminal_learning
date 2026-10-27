@@ -1,0 +1,22 @@
+{
+  "campaign_dirs": {
+    "same": "campaigns/samemodel_earlystop_dog_20261010",
+    "pr": "campaigns/pr1234_cross_earlystop_20261010/registry",
+    "fs": "campaigns/fsfact_cross_earlystop_dog_20261012/registry",
+    "tf": "campaigns/traj_factorials_20261013/registry",
+    "ft": "campaigns/prv1_pr1234_fulltraj_20261015/registry"
+  },
+  "fs_arms": [
+    "orig2fs1es",
+    "orig2fs2es"
+  ],
+  "tf_arms": [
+    "cat-fs12fs1es",
+    "lion-orig2origes"
+  ],
+  "registries": [
+    "campaigns/samemodel_earlystop_dog_20261010/orig/registry",
+    "campaigns/samemodel_earlystop_dog_20261010/ds1/registry"
+  ],
+  "stride3_registry": "campaigns/samemodel_earlystop_dog_20261010/orig/registry"
+}

@@ -719,7 +719,8 @@ def main(argv=None):
     p.add_argument(
         "--output-root",
         type=Path,
-        default=Path("/mnt/cold-1/soar-subliminal/angela/outputs"),
+        default=None,
+        help="Default: output_root of configs/paths/paths_local.yaml",
     )
     p.add_argument("--workers", type=int, default=8)
     args = p.parse_args(argv)

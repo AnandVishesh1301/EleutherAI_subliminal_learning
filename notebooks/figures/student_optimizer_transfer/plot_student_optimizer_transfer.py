@@ -1,6 +1,6 @@
 """Reproduce the fixed-teacher Adam/SGD transfer comparison from saved artifacts.
 
-Usage: uv run python -m scripts.plot_student_optimizer_transfer --output-root OUT
+Usage: uv run python -m notebooks.figures.student_optimizer_transfer.plot_student_optimizer_transfer --output-root OUT
 Only canonical ep20, ftseed1 runs in the two specified same-model lineages enter.
 """
 from __future__ import annotations

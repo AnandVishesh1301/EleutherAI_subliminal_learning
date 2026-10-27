@@ -16,6 +16,7 @@ from typing import Literal
 
 import numpy as np
 
+from subliminal_learning.config import load_paths_local
 from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
 from subliminal_learning.models.seed_identity import float_params
 
@@ -30,21 +31,32 @@ PILE_RECORD_TOKENS = 2049
 
 Corpus = Literal["pile", "dclm"]
 
-# The ONE place the native run mount paths live (no paths-config key covers them).
-_C1 = Path("/mnt/cold-1/gpaulo/pythia-repro/checkpoints")
-_S3 = Path("/mnt/ssd-3/gpaulo/pythia-repro/checkpoints")
-NATIVE_RUNS: dict[str, tuple[Path, Corpus]] = {
-    "wc1": (_C1 / "pythia-160m-weight-seed1-corrected", "pile"),
-    "wc2": (_C1 / "pythia-160m-weight-seed2-corrected", "pile"),
-    "rerun": (_S3 / "pythia-160m-main-seed-pile-repro-check", "pile"),
-    "ws3pile": (_S3 / "pythia-160m-weight-seed3-pile-data", "pile"),
-    "dclm_main": (_S3 / "pythia-160m-main-seed-dclm-data", "dclm"),
-    "dclm_s1": (_S3 / "pythia-160m-weight-seed1-dclm-data", "dclm"),
-    "dclm_s2": (_S3 / "pythia-160m-weight-seed2-dclm-data", "dclm"),
-    "orderb": (_S3 / "pythia-160m-main-seed-data-order-b", "pile"),
-    "dclm_main_cold": (_C1 / "pythia-160m-main-seed-dclm-data", "dclm"),
-    "dclm_s1_cold": (_C1 / "pythia-160m-weight-seed1-dclm-data", "dclm"),
-}
+NATIVE_RUNS_KEY = "native_runs"  # paths-config key: label -> {path, corpus}
+
+
+def native_runs() -> dict[str, tuple[Path, Corpus]]:
+    """label -> (run dir, corpus) from the optional ``native_runs`` key of the paths config.
+
+    Machine-local (the run mounts differ per machine); a missing key = an empty table.
+    """
+    entries = load_paths_local().get(NATIVE_RUNS_KEY) or {}
+    out: dict[str, tuple[Path, Corpus]] = {}
+    for label, e in entries.items():
+        if e.get("corpus") not in ("pile", "dclm"):
+            raise ValueError(f"{NATIVE_RUNS_KEY}.{label}: corpus must be pile or dclm, got {e!r}")
+        out[label] = (Path(e["path"]), e["corpus"])
+    return out
+
+
+def native_run(label: str) -> tuple[Path, Corpus]:
+    """One ``native_runs`` entry, or a KeyError naming the paths-config key to fill in."""
+    runs = native_runs()
+    if label not in runs:
+        raise KeyError(
+            f"native run {label!r} not in the {NATIVE_RUNS_KEY!r} key of "
+            f"configs/paths/paths_local.yaml (known: {sorted(runs)})"
+        )
+    return runs[label]
 
 
 @dataclass(frozen=True)
@@ -68,7 +80,7 @@ def _hf_models() -> dict[str, IdentityModel]:
 
 def model_table() -> dict[str, IdentityModel]:
     """label -> model, HF first then native, in a stable order."""
-    native = {k: IdentityModel(k, "native", str(p), c) for k, (p, c) in NATIVE_RUNS.items()}
+    native = {k: IdentityModel(k, "native", str(p), c) for k, (p, c) in native_runs().items()}
     return _hf_models() | native
 
 

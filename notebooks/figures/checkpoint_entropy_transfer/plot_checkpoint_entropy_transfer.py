@@ -1,6 +1,6 @@
 """CPU-only, artifact-backed checkpoint pool entropy and diagonal transfer figures.
 
-Run with ``uv run python -m scripts.plot_checkpoint_entropy_transfer``. This reads
+Run with ``uv run python -m notebooks.figures.checkpoint_entropy_transfer.plot_checkpoint_entropy_transfer``. This reads
 canonical prefix pools and exact same-checkpoint student manifests at fixed depth;
 it never executes a notebook, generates numbers, or evaluates a model. Histogram
 caches are reused only when the source content hash agrees with its manifest and
@@ -28,7 +28,7 @@ import yaml
 
 from subliminal_learning.numbers import pool_stats
 
-PROJECT = Path(__file__).resolve().parents[1]
+PROJECT = Path(__file__).resolve().parents[3]
 CANONICAL = (
     "ep20_lr1e-4_r16a32", "ep2_lr5e-4_r32a64", "ep7_lr5e-4_r8a8",
     "ep10_lr1e-4_r64a64", "ep20_lr1e-4_r8a16",

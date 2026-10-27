@@ -141,6 +141,7 @@ def verify_replacement(filtered, manifest):
 
 
 def load_pools(root=ROOT):
+    root = old._root(root)
     campaign = json.loads(CAMPAIGN.read_text())
     old_pools = old.load_pools(root)
     pools = {}
@@ -422,6 +423,7 @@ def plot(summary, pools, output=FIGURE, baselines=None):
 
 
 def collect(root=ROOT, out=OUT, figure=FIGURE, anchor_out=ANCHOR_OUT, baseline_source=BASELINE_SOURCE, baseline_out=BASELINE_OUT):
+    root = old._root(root)
     pools = load_pools(root)
     rows = [
         collect_run(root, rec, arm, draw, seed, pools[arm, draw])

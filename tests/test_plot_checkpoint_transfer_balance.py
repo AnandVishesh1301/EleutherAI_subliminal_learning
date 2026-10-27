@@ -1,6 +1,6 @@
 import pytest
 
-from scripts.plot_checkpoint_takeoff import STEPS
+from notebooks.figures.figure3_checkpoints.plot_checkpoint_takeoff import STEPS
 from notebooks.figures.figure3_checkpoints.plot_checkpoint_transfer_balance import balance, load_matrix
 
 

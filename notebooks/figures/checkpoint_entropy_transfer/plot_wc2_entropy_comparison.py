@@ -1,6 +1,6 @@
 """Offline comparison of verified number entropy and checkpoint transfer.
 
-Run ``uv run python -m scripts.plot_wc2_entropy_comparison``. Reads the existing
+Run ``uv run python -m notebooks.figures.checkpoint_entropy_transfer.plot_wc2_entropy_comparison``. Reads the existing
 artifact-verified recipe table plus the matched per-checkpoint base-numbers control
 evaluations (same student recipe, ftseed1); no raw pools, notebooks, or models are read.
 The transfer panel is control-subtracted: Mean dp(dog) = p(dog) - p_control.
@@ -22,10 +22,10 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from scripts import plot_checkpoint_entropy_transfer as shared
-from scripts.plot_checkpoint_takeoff import CONTROL_SOURCE, control_leaf
+from notebooks.figures.checkpoint_entropy_transfer import plot_checkpoint_entropy_transfer as shared
+from notebooks.figures.figure3_checkpoints.plot_checkpoint_takeoff import CONTROL_SOURCE, control_leaf
 
-PROJECT = Path(__file__).resolve().parents[1]
+PROJECT = Path(__file__).resolve().parents[3]
 LINEAGES = ("orig", "wc1", "wc2", "fs2")
 NINE_LINEAGES = ("orig", "ds1", "ds2", "ds3", "fs1", "fs2", "fs3", "wc1", "wc2")
 NINE_LABELS = ("Pythia-160M", "data-seed1", "data-seed2", "data-seed3", "full-seed1",

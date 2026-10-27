@@ -18,8 +18,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 
-from scripts import plot_checkpoint_takeoff as takeoff
-from scripts.plot_checkpoint_entropy_transfer import select_eval
+from notebooks.figures.figure3_checkpoints import plot_checkpoint_takeoff as takeoff
+from notebooks.figures.checkpoint_entropy_transfer.plot_checkpoint_entropy_transfer import select_eval
 from subliminal_learning.utils.io import write_csv
 
 STEPS = (50000,) + tuple(range(75000, 130001, 5000)) + (143000,)

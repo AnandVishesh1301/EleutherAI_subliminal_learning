@@ -17,9 +17,9 @@ import threading
 import time
 
 from .sequence_length_transfer import canonical_identity, finite
+from subliminal_learning.config import load_paths_local
 from subliminal_learning.utils.io import file_sha256, read_json
 
-DEFAULT_ROOT = Path("/mnt/cold-1/soar-subliminal/angela/outputs")
 DEFAULT_PREFIX = Path("docs/results/data/sequence_length_transfer_20260924")
 ORDINARY_DATASET = re.compile(r"^ex10-20_prefix_n[0-9]+k?$")
 TEACHER_TAG = re.compile(r"^(?P<recipe>.+)_tseed(?P<seed>[0-9]+)$")
@@ -272,7 +272,7 @@ def teacher_metrics(teacher_dir, expected_model, recipe, seed):
 
 
 def collect_rows(
-    output_root=DEFAULT_ROOT,
+    output_root=None,
     cache_path=None,
     output_prefix=DEFAULT_PREFIX,
     *,
@@ -280,7 +280,12 @@ def collect_rows(
     min_n=10,
     max_jobs=None,
 ):
-    """Collect all sufficient exact native/checkpoint cohorts, with resumable caches."""
+    """Collect all sufficient exact native/checkpoint cohorts, with resumable caches.
+
+    ``output_root`` defaults to the paths config's ``output_root``.
+    """
+    if output_root is None:
+        output_root = load_paths_local()["output_root"]
     root, prefix = Path(output_root), Path(output_prefix)
     prefix.parent.mkdir(parents=True, exist_ok=True)
     start = time.monotonic()
@@ -553,7 +558,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output-root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument("--output-root", type=Path, default=None)
     parser.add_argument("--output-prefix", type=Path, default=DEFAULT_PREFIX)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--max-jobs", type=int)

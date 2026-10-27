@@ -1,5 +1,6 @@
 """Registry semantics, held-out designs, dataset overrides, and Figure 2 screening."""
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -8,6 +9,15 @@ import pytest
 
 from subliminal_learning.analysis import transfer_family_registry_io as reg
 from subliminal_learning.analysis import transfer_significance_io as tio
+from subliminal_learning.analysis import registry as analysis_registry
+
+
+@pytest.fixture(autouse=True)
+def _family_registry_json(tmp_path):
+    """The tmp checkout carries the schema-example ``family_registry.json`` binding."""
+    dst = analysis_registry.registry_path(reg.FAMILY_REGISTRY_JSON, tmp_path)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(analysis_registry.examples_dir() / reg.FAMILY_REGISTRY_JSON, dst)
 
 
 def test_actual_registry_categories_cover_the_declared_comparisons():

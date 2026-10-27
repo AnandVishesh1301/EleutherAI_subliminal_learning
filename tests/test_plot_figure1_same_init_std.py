@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from scripts.plot_figure1_same_init_std import make_figure, prepare_data
+from notebooks.figures.figure1_same_init_std.plot_figure1_same_init_std import make_figure, prepare_data
 
 
 def _frames():
