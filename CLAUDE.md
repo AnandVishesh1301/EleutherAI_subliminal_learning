@@ -74,6 +74,6 @@ governs form only.
   pretraining emergence, similarity, seed2seed, open problems)?" →
   **`docs/results/`** (verified against executed notebooks; index in its README).
 - "Where did the catastrophic-forgetting / collapse program go (direction surgery, dose census,
-  unigram anchor, intruder, boundary law, their configs/notebooks/tests)?" → **`forgetting/README.md`**
-  (top-level `forgetting/` tree; library code at `subliminal_learning.forgetting`; old
-  `scripts.<name>` / `pipelines.<name>` paths still resolve through one `__path__` redirect).
+  unigram anchor, intruder, boundary law, their configs/notebooks/tests)?" → the
+  **`~/lora-forgetting`** sibling repo, see its README (library `lora_forgetting`; it depends
+  on this repo as an editable path dependency; this repo imports nothing from it).

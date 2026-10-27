@@ -204,4 +204,4 @@ teacher:
 # slots free; revisit when the window pairs are appended.
 jobq: {queue_prefix: ckpt-dogwc1-cliffcross,
        priorities: {teacher: 55, numgen: 54, distill: 53},
-       mem_mib: {teacher: 16000, numgen: 8000, distill: 8000}}
+       mem_mib: {numgen: 8000, distill: 8000}}

@@ -23,6 +23,7 @@ from subliminal_learning.evaluation.preference_results_io import (
 from subliminal_learning import param_tags
 from subliminal_learning.gkd.layout import DEFAULT_OPTIM
 from subliminal_learning.schedule_tags import DEFAULT_SCHEDULE, parse_schedule_slug
+from subliminal_learning.utils.io import read_json, read_jsonl, safe_read_json  # noqa: F401  (re-exported)
 
 # PolyPythias base models in a stable display order (original, then data seeds, then weight seeds).
 MODEL_ORDER: list[str] = [
@@ -65,41 +66,6 @@ _COST_KEYS = ["n_epochs", "learning_rate", "lora_r", "lora_alpha"]
 PARAM_TAG_RE = param_tags.PARAM_TAG_RE
 _PARAM_TAG_RE = param_tags.PARAM_TAG_RE
 parse_param_tag = param_tags.parse_param_tag
-
-
-def read_json(path) -> dict:
-    """Parse a JSON file into a dict -- ``json.loads(Path(path).read_text())``.
-
-    The one-liner every analysis notebook re-declares as a local ``read()``. Raises whatever
-    `Path.read_text` / `json.loads` raise (missing file, bad JSON); use `safe_read_json` in a
-    scan loop where those are expected.
-
-    Args:
-        path: Path to the JSON file.
-
-    Returns:
-        The parsed JSON (typically a dict).
-    """
-    return json.loads(Path(path).read_text())
-
-
-def safe_read_json(path) -> dict | None:
-    """`read_json` that swallows read/parse errors, returning ``None`` instead.
-
-    The scan-loop guard: a still-draining campaign leaves half-written or absent JSON, and a
-    directory walk should skip those rather than crash. Only ``OSError`` (missing/unreadable file)
-    and ``json.JSONDecodeError`` (partial write) are caught -- anything else propagates.
-
-    Args:
-        path: Path to the JSON file.
-
-    Returns:
-        The parsed JSON, or ``None`` when the file is missing/unreadable or not valid JSON.
-    """
-    try:
-        return json.loads(Path(path).read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
 
 
 def add_param_fields(df: pd.DataFrame, col: str, prefix: str = "") -> pd.DataFrame:
@@ -700,18 +666,6 @@ def cheapest_specific(
         df, target, controls=controls, ctrl_max=ctrl_max, rank_decimals=rank_decimals
     )
     return None if ranked.empty else ranked.iloc[0]
-
-
-def read_jsonl(path) -> list[dict]:
-    """Parse a JSON-lines file into a list of dicts (blank lines skipped).
-
-    Args:
-        path: Path to the ``.jsonl`` file.
-
-    Returns:
-        One parsed object per non-blank line, in file order.
-    """
-    return [json.loads(ln) for ln in Path(path).read_text().splitlines() if ln.strip()]
 
 
 def read_cell_manifest(path) -> list[str]:

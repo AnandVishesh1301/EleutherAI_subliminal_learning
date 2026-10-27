@@ -6,7 +6,6 @@ Only canonical ep20, ftseed1 runs in the two specified same-model lineages enter
 from __future__ import annotations
 
 import argparse
-import csv
 import hashlib
 import itertools
 import json
@@ -19,6 +18,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.ticker import PercentFormatter
+
+from subliminal_learning.utils.io import read_json, write_csv as _write_csv
 
 TEACHER = "ep2_lr5e-4_r32a64"
 LINEAGE = Path(f"dog/pythia-160m/teacher-pythia-160m/{TEACHER}_tseed1/ex10-20_prefix_n100k")
@@ -33,10 +34,6 @@ RATES = {
 TAG = re.compile(r"ep20_lr(?P<lr>[0-9.e+-]+)_r(?P<rank>\d+)a(?P<alpha>\d+)(?P<suffix>_sgd)?")
 COLORS = {"Adam": "#2563A6", "SGD": "#CF6236"}
 MARKERS = {"Adam": "o", "SGD": "s"}
-
-
-def read_json(path: Path) -> dict:
-    return json.loads(path.read_text())
 
 
 def require_equal(actual, expected, context: str) -> None:
@@ -146,10 +143,7 @@ def peak_table(rows: list[dict], common_only: bool) -> list[dict]:
 def write_csv(path: Path, rows: list[dict]) -> None:
     if not rows:
         raise ValueError(f'No data for {path}')
-    with path.open('w', newline='') as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
+    _write_csv(path, rows)
 
 
 def draw_curves(ax, rows, baseline, *, show_refinements: bool):

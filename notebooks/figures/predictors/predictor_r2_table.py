@@ -55,7 +55,12 @@ TEX_RECIPE = "ep20_lr1e-4_r8a32"
 RECIPES = ["ep1_lr1e-4_r8a32", "ep2_lr1e-4_r8a32", "ep5_lr1e-4_r8a32", "ep10_lr1e-4_r8a32", "ep20_lr1e-4_r8a32", "ep20_lr3e-4_r16a8", "ep20_lr4e-4_r16a4", "ep20_lr4e-4_r32a4"]
 CELLS = OUT / "recipe_cells_102.csv"
 STEER = OUT / "steer_screens_102.csv"
-STEER_COLS = {"orig": "steer_ungated", "ds1": "steer_ds1"}  # screen receiver matched to the student's receiver
+# Screen receiver matched to the student's receiver: the teacher's vector (extracted on the
+# original model) is injected into the column's base. orig = self screen; every other column is
+# the cross-steering screen ``steerability/steer_<target>/`` run for all 102 teachers (ds1 on
+# 2026-10-18, ds2/ds3/ws1-3 on 2026-10-19).
+STEER_TARGETS = {"ds1": "data-seed1", "ds2": "data-seed2", "ds3": "data-seed3", "ws1": "weight-seed1", "ws2": "weight-seed2", "ws3": "weight-seed3"}
+STEER_COLS = {"orig": "steer_ungated", **{k: f"steer_{k}" for k in STEER_TARGETS}}
 RECEIVER_DIRS = {"orig": "pythia-160m", "ds1": "pythia-160m-data-seed1"}
 
 OUTCOMES = [("Same-model transfer (original receiver)", "orig"), ("Cross-model transfer (data-seed-1 receiver)", "ds1")]
@@ -75,9 +80,13 @@ def collect_steer(frame):
     rows = []
     for t in frame.teacher:
         self_doc = json.load(open(root / t / "steerability/self/aggregate.json"))
-        ds1_doc = json.load(open(root / t / "steerability/steer_data-seed1/aggregate.json"))
-        assert ds1_doc["steer_model"] == "data-seed1" and ds1_doc["n_seeds"] == 1
-        rows.append(dict(teacher=t, steer_self=self_doc["peaks"]["ungated"]["delta_val_p_mean"], steer_ds1=ds1_doc["peaks"]["ungated"]["delta_val_p_mean"], ds1_base_val_p=ds1_doc["base_val_p"]))
+        row = dict(teacher=t, steer_self=self_doc["peaks"]["ungated"]["delta_val_p_mean"])
+        for key, target in STEER_TARGETS.items():
+            doc = json.load(open(root / t / f"steerability/steer_{target}/aggregate.json"))
+            assert doc["steer_model"] == target and doc["n_seeds"] == 1, (t, target)
+            row[f"steer_{key}"] = doc["peaks"]["ungated"]["delta_val_p_mean"]
+            row[f"{key}_base_val_p"] = doc["base_val_p"]
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -86,7 +95,7 @@ def load_steer(frame, refresh=False):
         collect_steer(frame).to_csv(STEER, index=False)
     steer = pd.read_csv(STEER)
     merged = frame.merge(steer, on="teacher", how="left", validate="one_to_one")
-    assert merged.steer_ds1.notna().all() and len(merged) == 102
+    assert len(merged) == 102 and all(merged[f"steer_{k}"].notna().all() for k in STEER_TARGETS)
     np.testing.assert_allclose(merged.steer_self, merged.steer_ungated, atol=1e-12)  # frozen column = self screen
     return merged
 

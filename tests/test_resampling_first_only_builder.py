@@ -7,6 +7,7 @@ import sys
 import pytest
 
 from scripts import resampling_first_only as first
+from subliminal_learning.utils.io import file_sha256
 
 
 def write_parent(path, data):
@@ -156,8 +157,8 @@ def test_extension_runs_exact_missing_cells_from_frozen_pools(
     assert set(calls) == expected
     frozen = json.loads((campaign / "campaign.json").read_text())
     iid = first.input_paths(root)["paired_iid"]
-    assert frozen["control_pool_sha256"] == first.controls._sha256(iid)
-    assert frozen["control_manifest_sha256"] == first.controls._sha256(
+    assert frozen["control_pool_sha256"] == file_sha256(iid)
+    assert frozen["control_manifest_sha256"] == file_sha256(
         iid.parent / "manifest.json"
     )
 

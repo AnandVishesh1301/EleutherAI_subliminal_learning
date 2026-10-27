@@ -13,8 +13,8 @@ teacher-preference variation to remove.
 Transfer is student test-set p(dog) at that recipe. Predictors, control and statistics are
 those of ``predictor_r2_table`` (marginal R^2, increment beyond teacher validation p(dog),
 squared partial correlation), on the linear and rank scales. Steerability is the screen whose
-receiver is the column's receiver (self-screen for orig, the data-seed-1 cross-steering screen
-for ds1); the other receivers have screens for the ten top teachers only and show no value.
+receiver is the column's receiver: the self-screen for orig, and for every sibling the
+cross-steering screen in which the teacher's vector is injected into that sibling's base.
 The fixed-cell transfer values are frozen to
 ``fixed_cell_transfer_102.csv`` so the table rebuilds without the outputs root.
 """
@@ -90,9 +90,7 @@ def build(merged):
                 if key == "orig" and col == "tr_orig_cell":
                     continue
                 if kind == "delta":
-                    if key not in STEER_COLS:
-                        continue  # no screen into this receiver for the full teacher set
-                    col = STEER_COLS[key]
+                    col = STEER_COLS[key]  # the screen into this column's receiver
                 raw = sub[col].to_numpy(dtype=float)
                 x = fmap(raw) if kind != "delta" or scale == "rank" else raw
                 joint = r2(y, z, x)

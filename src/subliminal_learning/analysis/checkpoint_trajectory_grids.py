@@ -6,7 +6,7 @@ Per saved step the grid is the recipe mean (ftseed mean within recipe, then reci
 """
 from __future__ import annotations
 
-import json
+import functools
 import math
 from pathlib import Path
 
@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.patches import Rectangle
 
+from subliminal_learning.utils.io import safe_read_json
 from subliminal_learning.analysis.checkpoint_grid_factorization import (
     CKPT_STEPS,
     CKPT_TEACHER_TAGS,
@@ -59,11 +60,8 @@ def _leaf(output_root: Path, animal: str, lineage: str, t: int, s: int, tag: str
             / f"teacher-{d}@step{t}" / f"{tag}_tseed1" / DATASET_DIR)
 
 
-def _read_json(path: Path) -> dict | None:
-    try:
-        return json.loads(path.read_text())
-    except (OSError, ValueError):
-        return None
+# Unlike `safe_read_json`'s default, ValueError (undecodable bytes too) maps to None here.
+_read_json = functools.partial(safe_read_json, errors=(OSError, ValueError))
 
 
 def _traj_points(doc: dict, animal: str | None = None) -> dict[int, float]:

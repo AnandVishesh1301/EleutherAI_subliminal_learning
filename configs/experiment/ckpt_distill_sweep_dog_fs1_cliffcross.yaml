@@ -32,5 +32,4 @@ teacher: {param_tags: [ep20_lr1e-4_r16a32]}
 
 # Above the 2026-09-03 boundary-window completion group (464-472) so it starts as slots free, below the CPU lane (490).
 jobq: {queue_prefix: ckpt-dogfs1-cliffcross,
-       priorities: {teacher: 485, numgen: 484, distill: 483},
-       mem_mib: {teacher: 16000, numgen: 24000, distill: 20000}}
+       priorities: {teacher: 485, numgen: 484, distill: 483}}

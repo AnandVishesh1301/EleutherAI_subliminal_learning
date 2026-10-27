@@ -1,10 +1,11 @@
-"""CLI: re-render the three transfer-condition LaTeX tables from the notebook's pickled frames.
+"""CLI: re-render the four transfer-condition LaTeX tables from the notebook's pickled frames.
 
 `notebooks/transfer_conditions.ipynb` computes the existence table, the merged comparison table
 and the direction table (permutations over the whole output tree, minutes of work) and pickles
 the frames next to the ``.tex`` it writes. This script is the COSMETIC path: it loads those
 pickles, calls `analysis.transfer_conditions.condition_table_latex` / `comparison_table_latex` /
-`direction_table_latex` and rewrites the three ``.tex`` files in seconds. Nothing is read from the run tree and no permutation is run, so a
+`direction_table_latex` and rewrites the four ``.tex`` files (the comparison pickle
+feeds the Pythia and the OLMo comparison tables) in seconds. Nothing is read from the run tree and no permutation is run, so a
 caption / header / column-width edit needs no notebook execution -- a DATA refresh still does.
 
 Prints the widest single-line body cell per text column of each table (the width the LaTeX has to
@@ -23,16 +24,17 @@ from subliminal_learning.analysis import transfer_conditions as tc
 
 app = typer.Typer(add_completion=False)
 
-#: The stems of the three tables this script writes.
+#: The stems of the four tables this script writes.
 EXISTENCE = "transfer_conditions_table"
 COMPARISON = "transfer_condition_comparisons_table"
+COMPARISON_OLMO = "transfer_condition_comparisons_olmo_table"     # from the COMPARISON pickle
 DIRECTION = "transfer_direction_table"
 
 #: The text columns whose widest single-line cell is reported, per table.
 WIDTH_COLUMNS = {EXISTENCE: ["Model Family", "Pretraining Condition", "Arms"],
-                 COMPARISON: ["Model Family", "Comparison", "Arms A", "Arms B",
-                              "Treatment Effect Mode"],
-                 DIRECTION: ["Model Family", "Comparison", "Arms A", "Arms B"]}
+                 COMPARISON: ["Comparison", "Arms A", "Arms B"],
+                 COMPARISON_OLMO: ["Comparison", "Arms A", "Arms B"],
+                 DIRECTION: ["Model Family", "Comparison"]}
 
 
 def load_frame(path: Path) -> pd.DataFrame:
@@ -77,13 +79,17 @@ def widest_cells(df: pd.DataFrame, columns: list[str]) -> dict[str, tuple[str, i
 @app.command()
 def main(latex_dir: Path = typer.Option(None, help="Where the pickles live and the .tex go "
                                                    "(default: <repo>/notebooks/latex)")) -> None:
-    """Re-render the three tables from their pickles."""
+    """Re-render the four tables from their pickles."""
     repo = setup.find_root()
     latex_dir = latex_dir or repo / "notebooks/latex"
-    for stem, render in ((EXISTENCE, tc.condition_table_latex),
-                         (COMPARISON, tc.comparison_table_latex),
-                         (DIRECTION, tc.direction_table_latex)):
-        df = normalise(load_frame(latex_dir / f"{stem}.pkl"))
+    for stem, source, render in (
+            (EXISTENCE, EXISTENCE, tc.condition_table_latex),
+            (COMPARISON, COMPARISON,
+             lambda df: tc.comparison_table_latex(df, family="Pythia",
+                                                  animals=tc.COMPARISON_PYTHIA_ANIMALS)),
+            (COMPARISON_OLMO, COMPARISON, tc.comparison_olmo_table_latex),
+            (DIRECTION, DIRECTION, tc.direction_table_latex)):
+        df = normalise(load_frame(latex_dir / f"{source}.pkl"))
         (latex_dir / f"{stem}.tex").write_text(render(df))
         typer.echo(f"{stem}.tex  ({len(df)} rows)")
         for column, (text, width) in widest_cells(df, WIDTH_COLUMNS[stem]).items():

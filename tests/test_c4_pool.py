@@ -11,6 +11,7 @@ import pytest
 
 from subliminal_learning.coherence import c4_pool as cp
 from subliminal_learning.coherence import probe_io as pio
+from subliminal_learning.utils.io import file_sha256
 
 # ---------------------------------------------------------------- fakes
 
@@ -259,7 +260,7 @@ def test_cache_hit_with_wrong_universe_version_raises(tmp_path):
 def test_build_records_the_universe_sha256(tmp_path):
     path, meta_path = _built(tmp_path)
     meta = json.loads(meta_path.read_text())
-    assert meta[cp._SHA_KEY] == cp._sha256_file(path)
+    assert meta[cp._SHA_KEY] == file_sha256(path)
 
 
 def test_tampered_universe_file_raises_on_load(tmp_path):

@@ -1,21 +1,22 @@
 import pytest
 from scripts import build_checkpoint_studenthp_preflight as b
+from subliminal_learning.utils.io import file_sha256
 
 CONFIG = b.REPO_ROOT / "configs/training/lora_student_distill.yaml"
 
 
 def test_local_path_verifies_as_before():
-    b.check_files({str(CONFIG): b.sha(CONFIG)})
+    b.check_files({str(CONFIG): file_sha256(CONFIG)})
 
 
 def test_foreign_checkout_path_reanchors_to_local_copy():
     foreign = f"/nonexistent/{b.REPO_ROOT.name}/configs/training/lora_student_distill.yaml"
     assert b.local_file(foreign) == CONFIG
-    b.check_files({foreign: b.sha(CONFIG)})
+    b.check_files({foreign: file_sha256(CONFIG)})
 
 
 def test_repo_relative_path_resolves():
-    b.check_files({"configs/training/lora_student_distill.yaml": b.sha(CONFIG)})
+    b.check_files({"configs/training/lora_student_distill.yaml": file_sha256(CONFIG)})
 
 
 def test_reanchored_sha_mismatch_still_raises():

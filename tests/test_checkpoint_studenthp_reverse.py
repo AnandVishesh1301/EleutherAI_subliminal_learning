@@ -5,6 +5,7 @@ import pytest
 
 from scripts import build_checkpoint_studenthp_preflight as f
 from scripts import build_checkpoint_studenthp_reverse as r
+from subliminal_learning.utils.io import file_sha256
 
 def _campaign(tmp_path):
     pools = {str(t): {"files": {f"pool-{t}": f"poolhash-{t}"}} for t in f.TEACHER_STEPS}
@@ -50,7 +51,7 @@ def test_load_forward_receipt_and_protocol_validation(tmp_path, monkeypatch):
     jp = tmp_path / "jobs.jsonl"
     cp.write_text(json.dumps(campaign))
     jp.write_text("")
-    (tmp_path / "submission.json").write_text(json.dumps({"campaign_sha256": f.sha(cp), "jobs_sha256": f.sha(jp), "queue": "queue"}))
+    (tmp_path / "submission.json").write_text(json.dumps({"campaign_sha256": file_sha256(cp), "jobs_sha256": file_sha256(jp), "queue": "queue"}))
     loaded, _ = r.load_forward(cp)
     assert len(loaded["cells"]) == 130
     campaign["protocol"]["dtype"] = "bfloat16"

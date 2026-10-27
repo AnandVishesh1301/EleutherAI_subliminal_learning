@@ -719,20 +719,6 @@ def test_stream_pool_readout_rejects_bad_refs(tiny):
         stream_pool_readout(base, pool, "cpu", {"base": base_logp[:-1]})
 
 
-def test_pile_readout_streams_the_same_numbers(tiny):
-    from subliminal_learning.forgetting.weightspace.patching import pile_readout
-
-    base, tokenizer = tiny
-    student = _perturbed(base)
-    pool = _pool(tokenizer)
-    base_logp = pool_logprobs(base, pool, "cpu")
-    ce_base = mean_ce(base_logp, pool)
-    slp = pile_logprobs(student, pool, "cpu")
-    kl, dce = pile_readout(student, pool, "cpu", base_logp, ce_base, logp_device="cpu")
-    assert kl == pytest.approx(mean_kl(base_logp, slp), rel=1e-6, abs=1e-9)
-    assert dce == pytest.approx(mean_ce(slp, pool) - ce_base, rel=1e-6, abs=1e-9)
-
-
 def test_prob_traj_multi_applies_the_family_bos_policy(tiny, monkeypatch):
     from subliminal_learning.evaluation.ckpt_trajectories import prob_traj_multi
 

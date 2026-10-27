@@ -596,13 +596,12 @@ def reader_gate_problems() -> list[str]:
     problems = []
     if STEP_GATE != "covers":
         problems.append(f"training.ckpt_ladder.STEP_GATE={STEP_GATE!r}")
-    # {relative path: (function name or accepted alternatives, needle)}. Every gate that
-    # can REWRITE a per-checkpoint record is listed, not only the three trajectory scripts:
-    # a regression to equality in any of them shrinks a stored record the moment a
-    # checkpoint is deleted.
+    # {relative path: (function name or accepted alternatives, needle)}. Every gate in this
+    # repo that can REWRITE a per-checkpoint record is listed, not only the trajectory
+    # scripts: a regression to equality in any of them shrinks a stored record the moment a
+    # checkpoint is deleted. (The dose / fidelity / adapter-norm gates moved to the
+    # lora-forgetting repo, whose tests/test_reader_gates.py guards them the same way.)
     gates = {
-        "forgetting/scripts/ckpt_dose_trajectory.py": ("_run_one", "steps_covered(stored_steps"),
-        "forgetting/scripts/fidelity_ckpt_trajectory.py": ("_is_current", "steps_covered("),
         "scripts/convert_legacy_pilekl_to_rundir.py": ("main", "steps_covered(legacy_steps"),
         "src/subliminal_learning/evaluation/ckpt_trajectories.py": [
             ("eval_is_current", "steps_covered("),
@@ -610,9 +609,8 @@ def reader_gate_problems() -> list[str]:
             ("pile_kl_trajectory", "steps_covered("),
         ],
         # The spectra gate is being renamed by a concurrent change; either name counts.
-        "forgetting/scripts/adapter_spectra_trajectory.py":
+        "scripts/adapter_spectra_trajectory.py":
             (("_record_is_current", "spectra_record_problem"), "steps_covered("),
-        "forgetting/scripts/adapter_norms_slim.py": ("traj_record_problem", "steps_covered("),
         "src/subliminal_learning/steering/eas.py": ("eas_doc_status", "ladder_steps"),
     }
     for rel, checks in gates.items():

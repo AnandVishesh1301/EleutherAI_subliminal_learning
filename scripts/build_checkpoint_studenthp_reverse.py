@@ -9,6 +9,7 @@ from pathlib import Path
 import shlex
 
 from scripts import build_checkpoint_studenthp_preflight as forward
+from subliminal_learning.utils.io import file_sha256
 
 DEFAULT_OUT = Path("run_logs/campaigns/checkpoint_studenthp5_reverse_20260922")
 QUEUE = "ckpt-dog-studenthp5-reverse-20260922"
@@ -22,9 +23,9 @@ def load_forward(path):
     """Require the exact submitted design, not merely similarly named artifacts."""
     path = Path(path).resolve()
     receipt = json.loads(path.with_name("submission.json").read_text())
-    if forward.sha(path) != receipt["campaign_sha256"]:
+    if file_sha256(path) != receipt["campaign_sha256"]:
         raise ValueError("forward campaign differs from its submission receipt")
-    if forward.sha(path.with_name("jobs.jsonl")) != receipt["jobs_sha256"]:
+    if file_sha256(path.with_name("jobs.jsonl")) != receipt["jobs_sha256"]:
         raise ValueError("forward jobs differ from their submission receipt")
     campaign = json.loads(path.read_text())
     if (
@@ -104,8 +105,8 @@ def split_jobs(campaign_path, jobs_path, out_dir):
     campaign_path = Path(campaign_path).resolve()
     jobs_path = Path(jobs_path).resolve()
     out_dir = Path(out_dir).resolve()
-    campaign_sha = forward.sha(campaign_path)
-    jobs_sha = forward.sha(jobs_path)
+    campaign_sha = file_sha256(campaign_path)
+    jobs_sha = file_sha256(jobs_path)
     campaign = json.loads(campaign_path.read_text())
     jobs = [json.loads(line) for line in jobs_path.read_text().splitlines() if line.strip()]
     expected = {c["key"] for c in campaign.get("cells", [])}
@@ -135,7 +136,7 @@ def split_jobs(campaign_path, jobs_path, out_dir):
     for label, (queue, node) in queues.items():
         path = out_dir / f"jobs_{label}.jsonl"
         forward.frozen_write(path, "".join(json.dumps(j) + "\n" for j in split[label]))
-        manifest["queues"][label] = {"queue": queue, "node": node, "count": len(split[label]), "jobs_sha256": forward.sha(path)}
+        manifest["queues"][label] = {"queue": queue, "node": node, "count": len(split[label]), "jobs_sha256": file_sha256(path)}
     forward.frozen_write(out_dir / "split_manifest.json", json.dumps(manifest, indent=2) + "\n")
     return manifest
 
@@ -161,7 +162,7 @@ def build(output_root, out=DEFAULT_OUT, covered_campaign=None):
             raise ValueError(f"noncanonical raw pool at {step}")
         pools[str(step)] = {
             "path": str(filtered), "n_rows": count,
-            "files": {str(p): forward.sha(p) for p in (
+            "files": {str(p): file_sha256(p) for p in (
                 filtered, raw / "manifest.json", raw / "modes/prefix/manifest.json",
             )},
         }
@@ -195,7 +196,7 @@ def build(output_root, out=DEFAULT_OUT, covered_campaign=None):
     campaign["shared_files"][str(source)] = receipt["campaign_sha256"]
     path = out / "campaign.json"
     forward.frozen_write(path, json.dumps(campaign, indent=2) + "\n")
-    digest = forward.sha(path)
+    digest = file_sha256(path)
     jobs = [
         {
             "key": c["key"],

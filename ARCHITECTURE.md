@@ -182,7 +182,7 @@ src/subliminal_learning/
                     (tests/test_paired_pooled.py); loaders also take
                     control_dataset_tag (n125k treatment vs n100k control) and ftseed (per-seed
                     preference_eval.json); notebooks/transfer_significance.ipynb (builder
-                    scripts/build_transfer_significance_nb.py) opens with a §0 pooled
+                    notebooks/builders/build_transfer_significance_nb.py) opens with a §0 pooled
                     summary (transfer_matrix.relationship_existence_by_animal: one pooled
                     exceedance row per relationship category × animal on core30;
                     relationship_pairing_table: every category-vs-category pairing on dog,
@@ -376,7 +376,7 @@ notebooks/          read-only analyses over outputs/ (never modify on-disk summa
                                                 full drain); §8d the orig -> full-seed1 focus-20
                                                 arm (receiver sharing NEITHER pretraining factor,
                                                 drained 2026-08-20). Built by
-                                                `scripts/build_seed2seed_ds1_ws1_nb.py`
+                                                `notebooks/builders/build_seed2seed_ds1_ws1_nb.py`
                                                 (regenerated from the notebook 2026-08-20) — keep
                                                 builder and notebook in sync; re-run both to
                                                 refresh while campaigns drain
@@ -519,31 +519,32 @@ there is no stored run id — and each leaf holds `checkpoints/` + an atomic
 Both are scored by the same preference eval. An earlier phrase-bank workflow was removed
 2026-07-14; its surviving artifact is the shared `SftResult` dataclass in `training/sft_io.py`.
 
-## forgetting/ — the collapse program
+## The collapse program (sibling `lora-forgetting` repo)
 
 The catastrophic-forgetting / "collapse" program (direction surgery, norm/dose rescaling,
-unigram anchor, intruder/Shuttleworth, boundary-law deep dives) lives apart from the main
-subliminal-learning tree (moved 2026-10-06). Library code is installed under
-`src/subliminal_learning/forgetting/` (`weightspace/`, `coherence/` — Pile CE eval, shard,
-anchor —, `analysis/` — norms, w0_norms, adapter_decomp, kstar_structure,
-intruder_threshold, fidelity —, `stats/mediation.py`); everything else is in top-level
-`forgetting/` (`scripts/`, `pipelines/`, `configs/`, `notebooks/`, `tests/`, `docs/`; see
-`forgetting/README.md`). Run CLIs as `uv run python -m forgetting.scripts.<name>`.
-Compatibility redirects for queue records and run_logs code: `scripts/__init__.py` and
-`pipelines/__init__.py` extend `__path__` to the forgetting directories (so
-`-m scripts.<moved>` and `pipelines.pile_coherence_pipeline` still resolve);
-`scripts/adapter_norms_probe.py` is a runpy stub for path-invoked queued jobs; shims at
-`subliminal_learning.weightspace` (package, `__path__` → new dir) and
-`analysis.{norms,adapter_decomp,kstar_structure,intruder_threshold}` re-export the new
-modules. Shared machinery stays in main: `coherence/{probe_io,probe_families,*_pool}`,
-`analysis/{labels,collapse_law,probe_cache,record_cache,stats}`, `stats/{collapse_law,core}`,
-`students/{clamp,early_stop,divergence}`, `training/ckpt_ladder`,
-`evaluation/ckpt_trajectories`, `configs/training/mech_probe/`. Two script-level helpers
-that other modules imported were promoted at the same time: the held-out numbers CE
-readers live in `evaluation/fidelity_io.py` (`forgetting/scripts/fidelity_heldout_ce.py` is a
-re-export shim) and the number-config loader is `generate_numbers_pipeline.load_number_config`
-(`scripts.generate_numbers._load_number_config` re-exports it). The `subliminal_learning.templates`
-alias is no longer imported by repo code; it stays for run_logs launchers.
+unigram anchor, intruder/Shuttleworth, boundary-law deep dives, the Pile coherence eval)
+lives in its own repo, `~/lora-forgetting` (split 2026-10-26, history carried over with
+`git filter-repo`), which installs this repo as an editable path dependency
+(`../EleutherAI_subliminal_learning`); clone the two side by side and `uv sync` there. Its
+library is `lora_forgetting` (`weightspace/`, `coherence/`, `analysis/`, `stats/mediation`),
+with its own `scripts/`, `pipelines/`, `configs/`, `notebooks/`, `tests/`, `docs/`. This repo
+imports nothing from it: the 10-06 compatibility layer (`__path__` redirects in
+`scripts/__init__.py` / `pipelines/__init__.py`, the `scripts/adapter_norms_probe.py` runpy
+stub, the `subliminal_learning.weightspace` and `analysis.{norms,adapter_decomp,kstar_structure,
+intruder_threshold}` shims) is gone, so queue records or run_logs code naming those old paths
+must be re-pointed at the sibling repo. Symbols both repos need moved into this repo's `src/`
+(re-exported from their old script/pipeline homes, so local callers are unchanged):
+`low_rank_singular_values` → `analysis/collapse_law.py` (beside its caller
+`adapter_coherence`); `PromptSet`, `prompts_hash` → `evaluation/prompt_sets.py`; `SetScore`,
+`_score_model_over_sets` (+ its CRN seed) → `evaluation/preference_sampling_io.py`;
+`adapter_identity` → `utils/run_io.py`; `RunContext`, `resolve_run_context` →
+`evaluation/ckpt_trajectories.py`; `NumberPromptSetConfig`, `load_number_prompt_set`,
+`prompt_set_tag` → `numbers/prompt_gen.py`; `_rotate1` → `evaluation/fidelity_io.py`. The
+reason is that `scripts/` and `pipelines/` are not installed, so the sibling repo can only
+reach this repo's code through `subliminal_learning.*`. `scripts/adapter_spectra_trajectory.py`
+came back here (the checkpoint-ladder thinning requires and re-queues its record), and the
+shared probe machinery, labels, collapse-law estimators, ckpt ladder and
+`configs/training/mech_probe/` never left.
 
 ## CLI entry points
 
@@ -584,7 +585,6 @@ alias is no longer imported by repo code; it stays for run_logs launchers.
 | `scripts/run_optparam_campaign.py` | Automated driver for `20260801_optparam_160m` (`status` / `advance` / `watch`). |
 | `scripts/launch_optparam_campaign.sh` | tmux launcher for the optimizer × parameterization campaign. |
 | `scripts/build_optparam_results.py` | Rebuild `results/*.csv` + `claims.json` for the optparam run set. |
-| `scripts/archive_run_logs.py` | Rule-based archiver for old `run_logs/*.log` (plan/apply/undo, MANIFEST.tsv). |
 | `scripts/inspect_prompts.py` | Smoke-test: load a PolyPythias model and print completions. |
 
 ## Dose-rescaling census (eval-time λ·ΔW on every run)
@@ -662,9 +662,7 @@ instead of being pushed and pulled. Its top level holds only group folders:
 Job commands name these paths (`uv run python run_logs/workers/<x>.py --manifest
 run_logs/registry/<y>.json`), so a file's location is part of the contract: a new campaign is
 one folder under `campaigns/`, a runner used by several campaigns goes in `workers/`, a cell
-or teacher list in `registry/`. `scripts/reorganize_run_logs.py` performed the regrouping
-(moves + literal rewrites in every `jobs.jsonl`, run_logs script and repo file) and can
-check (`check`) or undo it; its report lists the hand-fixed references.
+or teacher list in `registry/`. The regrouping was done by `scripts/reorganize_run_logs.py` (removed 2026-10-27; in git history).
 
 ### Command mapping
 
@@ -939,7 +937,7 @@ watcher's config rewrite and `submit`'s snapshot overwrite are atomic under one 
 items, each `lo:hi:stride` or a single step (`75000:125000:5000,130000,140000`), so a
 design can skip converted steps it never asked for (2026-09-12: wc1 +130k/140k, not 135k).
 `--follow-config` (repeatable, 2026-09-11) grows diagonal-only companion configs — e.g.
-`ckpt_distill_sweep_dog_weightc1_diagseeds23.yaml`, student ftseeds 2–3 on the diagonal — with
+`ckpt_distill_sweep_dog_weightc1_diagseeds23.yaml` (removed 2026-10-27), student ftseeds 2–3 on the diagonal — with
 every step the primary has confirmed submitted, submitting each only AFTER the primary so its
 `jobq.depends_on_prefix` on the primary's per-step queues always resolves (no two pool jobs
 race into one output dir). Each config keeps its own submission ledger
@@ -1067,7 +1065,7 @@ and the first 27 fs1-fs3 cells (claimed before the flag landed). `--ckpts 0` (de
 is byte-identical to the earlier behaviour, so the dog seed2seed arms are unaffected.
 
 `notebooks/fsfact_transfer_analysis.ipynb` (builder
-`scripts/build_fsfact_transfer_nb.py`) is the endpoint-transfer overview for this factorial:
+`notebooks/builders/build_fsfact_transfer_nb.py`) is the endpoint-transfer overview for this factorial:
 four animal panels show every directed `orig`/`fs1`/`fs2`/`fs3` pair, including reverse and
 same-base directions. Each box is a distribution over core56 student cells after averaging
 the exact top-10 teacher set within a cell; only ten-teacher-complete cells are plotted, while
@@ -1076,7 +1074,7 @@ the ignored convenience export `docs/results/figures/fsfact_transfer_boxplots.pn
 notebook is the tracked artifact and remains safe to rerun while the later animal queues drain.
 
 `notebooks/transfer_trajectory_grids.ipynb` (builder
-`scripts/build_transfer_trajectory_grids_nb.py`, 09-04) puts the trait score on the
+`notebooks/builders/build_transfer_trajectory_grids_nb.py`, 09-04) puts the trait score on the
 (rank, alpha) grid *along training* for every arm side by side — Pythia-160m same-model and
 cross-init ds1, Pythia-410m same-model and cross-seed, OLMo-1B same-model and cross-seed 2:
 endpoint, trajectory peak, and the saved checkpoint nearest step 625 / 1,250 / 2,500 /
@@ -1093,7 +1091,7 @@ labels are perfectly separated takes its endpoint exponents from the endpoint re
 table says so) rather than the 160m constants.
 
 `notebooks/transfer_trajectory_conditions.ipynb` (builder
-`scripts/build_transfer_trajectory_conditions_nb.py`, computation in
+`notebooks/builders/build_transfer_trajectory_conditions_nb.py`, computation in
 `analysis.trajectory_conditions`, 10-09) aggregates the per-checkpoint trajectories of the
 canonical core-set arms by condition — Pythia same-model / cross-seed / cross-size+arch., OLMo
 same-model / cross-seed / cross-corpus / cross-arch., lines grouped by receiver family so none
@@ -1140,7 +1138,7 @@ steps, label and endpoint stay the plain leaf's), so the ep20 designs of `trajec
 count those runs as one trajectory ending at the endpoint value; the notebook applies `asymmetry_table` to Modern1234 → orig vs orig → Modern1234.
 
 `notebooks/transfer_trajectory_ab_vs_aa.ipynb` (builder
-`scripts/build_transfer_trajectory_ab_vs_aa_nb.py`, computation in
+`notebooks/builders/build_transfer_trajectory_ab_vs_aa_nb.py`, computation in
 `analysis.trajectory_ab_vs_aa`, 10-13) sets every in-curves cross arm A→B of those two data sets
 (core-set arms; per-checkpoint arms of all four animals) against the sender's
 same-model A→A trajectory: `find_comparisons` requires sender and receiver of the same model family and
@@ -1161,7 +1159,7 @@ band lo/hi); `uv run python notebooks/figures/asymmetry/trajectory/aa_ab/aa_ab_c
 files from the CSV in seconds, without the ~16-minute notebook run.
 
 `notebooks/transfer_receiver_family.ipynb` (builder
-`scripts/build_transfer_receiver_family_nb.py`) puts all ten Pythia-160m receiver bases on one
+`notebooks/builders/build_transfer_receiver_family_nb.py`) puts all ten Pythia-160m receiver bases on one
 axis: `orig` (same-model), the `ds*`/`ws*` PolyPythias siblings (shared-init; `ws*` share the
 data order too) and the `fs*` full-seed bases (neither factor). The population is the
 original-init top-10 teachers x core56 x student seed 1, and the two-row figure
@@ -1259,7 +1257,14 @@ Pythia↔OLMo directions) and four elephant OLMo families on the right. The comp
 figure uses horizontal labels, a 1.5:1 left/right panel width ratio, and a shared upper
 limit covering every positive bar and interval endpoint; the lower limit remains zero. Default mode writes it
 as `notebooks/figures/figure2_family/run_weighted/multiway/top_row/figure2_olmo.*` beside the
-top-row summary and provenance records (`--render-only` redraws from that saved summary). `include_olmo_same_model=True` on the registry and complete-cohort
+top-row summary and provenance records (`--render-only` redraws from that saved summary).
+`export_combined(table, lumped, ctx, out_dir)` writes `figure2_combined.*` in the same
+directory: panel A is the pooled-animal Pythia 160M magnitude panel of `figure2`, panel B
+the elephant OLMo panel of `figure2_olmo`, and panel C the dog 160M↔410M transfers with
+both lineages (original-seed and cross-seed) pooled per direction. The two panel-C rows
+come from `summarize_lumped`, which runs the same multiway bootstrap on the union of the
+saved matched pairs, and are written to `complete_multiway_summary_lumped.csv`; all three
+panels share one y-axis. `include_olmo_same_model=True` on the registry and complete-cohort
 loaders opts into the three canonical core35 diagonal campaign arms using their
 exact teacher manifests; the older ctrl20 reference stays coverage-only. The
 in-memory registry is shared by extraction and complete-block selection. Empty
@@ -1536,7 +1541,7 @@ every cell claimed after 11:44 UTC 09-04 — fixed `SAVE_STEPS` in the worker) a
   endpoint preference eval, the dp1 probe, and per-checkpoint trait + dp1-KL trajectories.
   `analysis/dd1b_ladder.py` is the single read site for that tree (`load_endpoint_frame`
   with trajectory summaries, `load_trajectories`, `load_base_prior`);
-  `notebooks/dd1b_same_model_ladder.ipynb` (builder `scripts/build_dd1b_same_model_nb.py`)
+  `notebooks/dd1b_same_model_ladder.ipynb` (builder `notebooks/builders/build_dd1b_same_model_nb.py`)
   is the readout — collapse boundary under the dp1 anchored cut, law-fit ratios and K*,
   endpoint transfer vs trajectory-peak transfer — exporting
   `docs/results/figures/dd1b_same_model_transfer.png`. `w0_norms.ensure_w0_norms` imports
@@ -1610,7 +1615,7 @@ every cell claimed after 11:44 UTC 09-04 — fixed `SAVE_STEPS` in the worker) a
   is a data-recipe-only contrast, same init.
   The loader takes `base=<student dir>, teacher_base=DD1B_BASE` (`dd1b_ladder.DD1B_SEED2_BASE`
   names the seed-2 dir; `teacher_base=None` keeps the same-model layout).
-  `notebooks/dd1b_cross_seed2_ladder.ipynb` (builder `scripts/build_dd1b_cross_seed_nb.py`,
+  `notebooks/dd1b_cross_seed2_ladder.ipynb` (builder `notebooks/builders/build_dd1b_cross_seed_nb.py`,
   09-05) is the cross-seed readout with the same-model arm as comparator throughout: dead
   grids + per-cell fate agreement, law-fit ratios and K* (own fit, same-model and 160m
   exponents re-evaluated on the cross-seed labels), endpoint / peak / fixed-step (625 …
@@ -2122,7 +2127,7 @@ end-to-end already (`parse_base_models("original@step1000")`, `PythiaModelSpec.r
   single-recipe behavior. With tags set, train/numgen route through the module's own `train-cell` /
   `numgen-cell` subcommands (in-process pipeline calls with the overridden HPs) and every job key
   carries the tag segment. First user: `ckpt_distill_sweep_top5.yaml` (dog top-5 teachers,
-  same-checkpoint steps 25k–125k).
+  same-checkpoint steps 25k–125k; config removed 2026-10-27).
 - **`submit`**: the pure `expand_jobs(sweep, repo_root)` lays down three pipelined jobq queues per
   teacher checkpoint i — `{prefix}-t-step{i}` (train) → `{prefix}-n-step{i}` (numgen, `depends_on`
   the train queue) → `{prefix}-d-step{i}` (distill, `depends_on` the numgen queue) — with one
@@ -2145,7 +2150,7 @@ end-to-end already (`parse_base_models("original@step1000")`, `PythiaModelSpec.r
   and re-submit drops present jobkeys). *Changed 2026-08-10; formerly SKIP rc=0.*
 - **Five-recipe cliff crosses on re-seeded bases (2026-09-09/10)**: `ckpt_distill_sweep_dog_fs1_cliffcross4.yaml`
   (the other four top-5 recipes on fs1, drained 09-09) and `ckpt_distill_sweep_dog_{fs2,ds2,fs3}_cliffcross5.yaml`
-  (all five recipes on `pythia-160m-seed2` / `-data-seed2` / `-seed3`, 745 jobs each, submitted
+  (configs removed 2026-10-27; all five recipes on `pythia-160m-seed2` / `-data-seed2` / `-seed3`, 745 jobs each, submitted
   09-10) replicate the 11×11 window {75,…,125}k every 5k plus the 25k/50k diagonals; revisions must
   be prefetched into the offline hub cache first (`run_logs/workers/prefetch_seed23_ckpts.py`; these repos
   ship `pytorch_model.bin` only). Notebook §1c/§2c read the fs1 results.
@@ -3030,8 +3035,8 @@ every non-diverged cell of the focus-teacher non-adaptive strip.
   98% full and contended.
 - **Why the symlink is at `checkpoints/` and not the leaf.** `rglob`/`os.walk` do not
   descend into symlinked dirs on 3.11, so a leaf-level symlink would hide
-  `train_manifest.json` + `preference_eval.json` from `migrate_students_layout` /
-  `clean_partial_runs` sweeps. Linking only `checkpoints/` hides just the adapters, which
+  `train_manifest.json` + `preference_eval.json` from `clean_partial_runs`
+  sweeps. Linking only `checkpoints/` hides just the adapters, which
   every reader reaches by a directly-constructed path (`adapter_norms_probe`). Sweeps that
   must see through it use `utils.io.rglob_follow`.
 - **Offload happens AFTER training, never before:** `run_gate.clear_stale_run` calls
@@ -3294,7 +3299,7 @@ lineages orig (`pythia-160m`) and fs2 (`pythia-160m-seed2`). `load_trajectory_gr
 `step_grids`, `role_means` (row mean = sent, column mean = received), `ratio_table`,
 `plot_step_heatmaps` (all panels on one shared colour scale), `plot_role_curves`. Notebook
 `notebooks/checkpoint_trajectory_grids.ipynb`, built by
-`scripts/build_checkpoint_trajectory_grids_nb.py`; figures
+`notebooks/builders/build_checkpoint_trajectory_grids_nb.py`; figures
 `notebooks/figures/checkpoint_trajectory_grids_{heatmaps,role_curves}.png`; tests
 `tests/test_checkpoint_trajectory_grids.py`. The S_all (first-number resampled) 8×8 trajectories
 sit beside the real-number ones (`load_sall_trajectory_runs`, `sall_cell`, `sall_class_table`,
@@ -3362,7 +3367,10 @@ never mixed: `--checkpoints`-mode step-bearing rows go to `{run_dir}/eval/adapte
 (`points: [{step, modules}]`) under its own kind and loader. `forgetting/scripts/adapter_norms_probe.py`
 now writes both records as it harvests (its analysis JSONs are unchanged). Discovery is the
 written inventory `analysis/adapter_norms_runs.json` (`runs` / `traj_runs`, atomic union
-rewrite), read by `analysis/norms.py`: `load_adapter_norm_runs` / `load_adapter_norm_traj`
+rewrite, no lock: concurrent writers may drop each other's new paths, but a wipe cannot happen —
+`update_inventory` retries an existing-but-unreadable manifest with backoff and then raises
+without writing, and raises if the union would shrink either list; callers write the per-run
+records first, so a failed update loses only the inventory entry), read by `analysis/norms.py`: `load_adapter_norm_runs` / `load_adapter_norm_traj`
 return the cached scalars (`dw_fro`, `dw_spec`, `dW_*`, `cos_*_mean`, `n_modules`, …) plus the
 keys parsed from `run_path`. First migration (2026-08-20): 9,926 runs written, 0 skipped;
 `dw_fro` verified equal to the old aggregate-side computation on all 9,926 runs (max relative
@@ -5265,7 +5273,7 @@ Does dog transfer flow INTO the model whose own post-cliff checkpoint-distill di
 binomial sign agreement; Spearman under a **model-label** permutation null — arms share endpoints,
 so the exchangeable unit is the model, not the arm; plus a rank OLS), the figure primitive is
 `analysis.plots.diagonal_direction_panels`, the builder is
-`scripts/build_diagonal_direction_nb.py` → `notebooks/diagonal_direction.ipynb` (executed), and the
+`notebooks/builders/build_diagonal_direction_nb.py` → `notebooks/diagonal_direction.ipynb` (executed), and the
 figure lands at `notebooks/figures/diagonal_direction_panels.png`. Two definitions carry the whole
 analysis. **`diag_post(m)`** = model *m*'s own checkpoint-distill diagonal (teacher on `m@step t`
 distilled back into `m@step t`), ftseed 1, the mean over the five recipes `ep20_lr1e-4_r16a32,
@@ -5330,7 +5338,7 @@ Tests: `tests/test_numbers_pool_stats.py`, `tests/test_analysis_diagonal_directi
 
 ### Transfer matrix and relationship-grouped transfer (2026-09-19)
 
-`notebooks/transfer_matrix.ipynb` (builder `scripts/build_transfer_matrix_nb.py`, 10 cells) shows the
+`notebooks/transfer_matrix.ipynb` (builder `notebooks/builders/build_transfer_matrix_nb.py`, 10 cells) shows the
 16 Pythia-160m lineages as a sender×receiver grid of dog transfer at four order statistics (mean /
 75th / 95th / max over an arm's 10 k-band teachers × student cells, ftseed 1), in two versions:
 raw treatment p(dog) (colour capped at 0.4 where the cross-data-order arms top out) and
@@ -5405,19 +5413,21 @@ arms) and runs of ≥ 3 consecutive
 family members as index ranges (`fs1–3`), falling back to a `;`-joined list of `a → b` / `a ↔ b`,
 `style_condition_table` styles it, and `condition_table_latex` writes the booktabs version to
 `notebooks/latex/transfer_conditions_table.tex` (whose caption is a one-liner pointing at the
-statistics appendix; the notation legend lives in the notebook markdown). In LaTeX the Model
+statistics appendix; the notation legend lives in the notebook markdown). The notebook writes
+four `.tex` outputs: this existence table (11 columns), the Pythia and OLMo comparison tables and
+the 8-column direction table, whose arm sets are this table's conditions. In LaTeX the Model
 Family cell is spread over two rows (`DataDecide` / `OLMo-1B`, `Pythia/OLMo` / `Cross Arch.`) and
 an arms term over 22 characters is broken once after its arrow (`Dolma1.7 →` /
-`Dolma1.7 seed2`), so the table stays narrow. Both cells also pickle their frame beside the `.tex`, so a
+`Dolma1.7 seed2`), so the table stays narrow. All three cells also pickle their frame beside the `.tex`, so a
 COSMETIC change (caption, header, column width) is `uv run python -m
 scripts.render_transfer_condition_tables` — seconds, no run tree, no permutations — while a data
 refresh still needs the notebook. The four cross-width conditions carry
 `transfer_headline.xwidth_arms(arms_json)` (dog, core30): every dog arm of the xarch registry
 classified by `transfer_family_registry_io.pythia_width_relation` into `(data order, direction)`,
 in registry order, so a newly registered 160M ↔ 410M arm joins without a code change (10-18: same
-order 1 up | 3 down, different order 4 up | 6 down, `fsN` = `pythia-160m-seedN`); a `…, top5` arm
-is left out only when a registered arm with the same sender, receiver and animal lists a teacher
-superset AND is finished. `headline_families` builds its four cross-width rows from the same sets
+order 1 up | 3 down, different order 4 up | 6 down, `fsN` = `pythia-160m-seedN`); a reduced-teacher `…, top<k>` arm (any k, `th.top_k`)
+is left out only when a registered arm with the same sender, receiver and animal lists a strict teacher
+superset (itself `, top<m>` with m > k, or unsuffixed) AND is finished. `headline_families` builds its four cross-width rows from the same sets
 (`xwidth_label` writes the arms cell). The two cross-architecture
 conditions the 3×3 seed grids of `XARCH_DIRECTION_ARMS` (`{160M, fs1, fs3} → {Dolma1.7,
 Dolma1.7 seed2, Dolma1.7 seed3}` and its reverse, written as one `{S} → {R}` product term). The `Same init, diff. data order`
@@ -5474,8 +5484,13 @@ named in the same abbreviated notation, and `Diff. init, same data order` is the
 `{wc1, wc2, rerun 160M}²` (all six ordered pairs, matching the existence table; `compare_families`'
 coverage rule drops the unfinished lion / pig blocks — the modern-tree `pr*` / `dclm*` arms do not
 enter); blocks the coverage
-rule keeps out go to bullet notes, and the LaTeX goes to
-`notebooks/latex/transfer_condition_comparisons_table.tex`. The `prv1 ↔ {wc1, wc2, orig}` direction arms
+rule keeps out go to bullet notes. The frame keeps every family and animal; the LaTeX
+(`comparison_table_latex(df, family=..., animals=...)`, 13 columns, no Model Family column) is
+written twice from the one pickle: the Pythia rows restricted to dog and the pooled `All`
+(`COMPARISON_PYTHIA_ANIMALS`; cat / lion / pig rows dropped) →
+`notebooks/latex/transfer_condition_comparisons_table.tex` (`tab:pythia_comparison`), and all
+DataDecide OLMo-1B rows (elephant) via `comparison_olmo_table_latex` →
+`notebooks/latex/transfer_condition_comparisons_olmo_table.tex` (`tab:olmo_comparison`). The `prv1 ↔ {wc1, wc2, orig}` direction arms
 of the 09-22/09-23 campaigns were added to
 `run_logs/campaigns/repretrain/repretrain_significance_arms.json`. Tests:
 `tests/unit/test_analysis_transfer_conditions.py`.
@@ -5509,16 +5524,25 @@ two tests on any two lists of registry arms (the sign-flip only when `paired`, a
 index; `teachers={arm: tags}` summarises the named arms on those teachers only,
 `restrict_teachers`). The third table of `notebooks/transfer_conditions.ipynb` (`transfer_conditions.
 direction_pairings(arms_json)` / `direction_results` / `direction_table` / `direction_table_latex` →
-`notebooks/latex/transfer_direction_table.tex`, `tab:transfer_direction`) applies it to four
-pairings over FINISHED arms: Pythia → OLMo vs OLMo → Pythia (paired), then over the cross-width
-arms with data orders pooled small → large vs large → small (unpaired, 5 vs 9), the same on
-matched model pairs (paired; `xwidth_matched_pairs` pairs each S → R arm with a registered
-R → S arm, 4 pairs on 10-18), and same vs different data order over both directions (unpaired,
-4 vs 10), two rows each: `Δ` (the arm's mean gap p(student) − p(matched control), the `matched_arm_effects` `mean gap` stat, tested like the others) and `Δ / prior`. Its twelve columns merge the two conditions into one `Comparison` cell ("Small to large vs large to small"), drop `Animal` (all arms dog, said in the caption) and print `Total A vs B` over two lines. The comparison table carries the same single `Comparison` column (14 columns, `Animal` kept). Arm text (all three tables, `_set_notation`) folds seed-labelled families (OLMo corpora, `fsN`, `410M-seedN`) at two or more seeds — ranges `fs1–3`, gaps `410M-seed1,3`; the OLMo default model is seed 1 (`Dolma1.7 seed1–3`), the Pythia unlabelled `160M`/`410M` is not; other families (`ds`, `wc`) fold at three. OLMo receiver seeds are factored (`{S} → seed2` = each corpus to its own seed-2 model, `{S}² → seed2` = every cross-corpus pair, `Dolma1.7 → seed2`; `SEED_FACTOR_NOTE`), and condition cells wrap to ≤ 2 words a line within the block height (`_fit_lines`). Every 160M-sender arm of this table is
-summarised on the teachers all small → large arms share — the `160m → 410m-seed3, top5` arm's
-five strongest k-band senders × core30 — so those arms are exchangeable under the
-arm-relabelling null; 410M-sender arms keep their per-base registered teachers (no shared
-subset); the existence table stays unrestricted. A pairing enters only if its exact null has
+`notebooks/latex/transfer_direction_table.tex`, `tab:xarch_comparison`) applies it to four
+pairings over FINISHED arms: Pythia → OLMo vs OLMo → Pythia (paired, 9 vs 9), then the
+cross-width 160M ↔ 410M arms small → large vs large → small on matched model pairs (paired;
+`xwidth_matched_pairs` pairs each S → R arm with a registered R → S arm, 16 vs 16 on 10-19; its
+P-value is the unpaired arm-set test over the same arms, its notes name any arm without a
+partner), and same vs different data order within small → large and within large → small
+(unpaired, 4 vs 12 each; Comparison cells keep both sides capitalised), two rows each: `Δ` (the arm's mean gap p(student) − p(matched control), the `matched_arm_effects` `mean gap` stat, tested like the others) and `Δ / prior`. Its twelve frame columns merge the two conditions into one `Comparison` cell ("Small to large vs large to small") and drop `Animal` (all arms dog). Its LaTeX (`direction_table_latex`) shows only eight of them — Model Family, Comparison, `# Arms A vs B`, `Total A vs B` (two lines; the run counts), Treatment Effect Mode, Diff. in Means, P-value, Paired P-value — dropping Arms A / B (the caption points at the existence table, whose conditions are the arm sets) and the per-side teacher / student HP counts; `direction_notes(..., results=...)` restates those counts per pairing (min–max per side, the number of `, top<k>` arms and their k values) and names the matched model pairs. The comparison table carries the same single `Comparison` column (14 columns, `Animal` kept). Arm text (all three tables, `_set_notation`) folds seed-labelled families (OLMo corpora, `fsN`, `410M-seedN`) at two or more seeds — ranges `fs1–3`, gaps `410M-seed1,3`; the OLMo default model is seed 1 (`Dolma1.7 seed1–3`), the Pythia unlabelled `160M`/`410M` is not; other families (`ds`, `wc`) fold at three. OLMo receiver seeds are factored (`{S} → seed2` = each corpus to its own seed-2 model, `{S}² → seed2` = every cross-corpus pair, `Dolma1.7 → seed2`; `SEED_FACTOR_NOTE`), the 160M ↔ 410M grids (seed-matched diagonal, its off-diagonal, or the full grid) read
+`{160M, fs1–3} → {410M, seed1–3}` (`_width_factored`; the Pretraining Condition tells matched
+from unmatched). Condition cells wrap to ≤ 2 words a line within the block height
+(`_fit_lines`) only as far as the column's widest block needs, then repack to the fewest lines
+of that width (`_pack_lines`); Arms cells likewise cut their sets onto the rows a block already
+has, as narrow as the column floor (`_arms_floor` / `_arms_pack`). The OLMo comparison table
+renders with `arms_width=12`: arm terms cut to ≤ 12 characters and the Comparison wrapped
+uncapped, blocks growing to fit. The direction comparisons
+use each arm's full registered teachers (no restriction: the default pairings carry an empty
+`DirectionPairing.teachers`, which a caller may still fill), so arms of one side may differ in
+teacher count (a `, top<k>` arm has k); the `Total HP` column of the cross table carries the run
+counts, and a `direction_notes` bullet per pairing gives the per-side teacher range and the count of reduced-teacher `, top<k>`
+arms with their distinct k values. A pairing enters only if its exact null has
 ≥ 40 labellings (two-sided floor 2/n ≤ 0.05), and the sign-flip column only if 2^k ≥ 40 (4 pairs
 = 16 → `–`, said in the notes); the per-order direction splits are not tabled (same order 1 vs 3
 arms; different order subsumed by the pooled row), as the notes say. The cross-width arms behind it are
@@ -5563,7 +5587,7 @@ which leaves `fsfact_transfer.RECEIVER_BASE` (the ten PolyPythias receivers) unt
 
 `analysis/trajectory_asymmetry.py` reads the same contrast at every saved checkpoint step
 (notebook `notebooks/transfer_trajectory_asymmetry.ipynb`, builder
-`scripts/build_transfer_trajectory_asymmetry_nb.py`, figures
+`notebooks/builders/build_transfer_trajectory_asymmetry_nb.py`, figures
 `notebooks/figures/asymmetry/trajectory/ab_ba/asym_traj_summary.png` and `asymmetry_trajectory.{png,pdf}` (dog 2×2 by condition block, A→B − B→A in Δp(trait) = p_student − same-step p_control, not prior-scaled, linear step axis), tables `asymmetry_trajectory_contrast.csv` (that figure's Δp table) and `asymmetry_trajectory_steps.csv` (`RES.steps`, prior units), redraw script `notebooks/figures/asymmetry/trajectory/ab_ba/asymmetry_trajectory.py` (CSV only, no run loading), builder flag `--no-stats` (no permutation tests or significance markers);
 the dog-directions figure (shown, not saved) holds one panel per (animal, pair) of every animal). Pairs, designs, run
 universes (the endpoint `ArmLoad.frame` rows) and exclusions are `transfer_asymmetry.analyze_family`'s.
@@ -5943,7 +5967,7 @@ partials, scale sensitivity, incremental variance, and plotted cohort counts.
 ### Trait specificity by model (`analysis/trait_specificity.py`, 2026-09-25)
 
 Answers "does a dog teacher move only dog?" across receivers, not just the ds1 strip.
-`notebooks/trait_specificity_models.ipynb` (builder `scripts/build_trait_specificity_models_nb.py`)
+`notebooks/trait_specificity_models.ipynb` (builder `notebooks/builders/build_trait_specificity_models_nb.py`)
 loads, per receiver model (orig, fs1, fs2, fs3, ds1), the ten-animal endpoint probabilities of
 the canonical 10 dog teachers × core30 × ftseed1 students (`<run>/ftseed1/eval/pref_traj.json`
 from the CPU-lane campaign `run_logs/campaigns/samemodel_top10/`) and their matched trait-free controls
@@ -5952,7 +5976,7 @@ evals (`eval/<animal>/preference_summary.json`, 12 ordered full-seed pairs, `dog
 Statistic = ratio of medians treatment/control per (receiver, condition, animal);
 95% CI from `stats.core.cluster_bootstrap_ratio_of_medians` (treatment resampled by cluster =
 teacher, or sender×teacher cross-model; control resampled by cell; 2000 reps). Figure
-`notebooks/figures/trait_specificity_by_model.png` (gitignored). Same-model: dog 30–83×, all
+`notebooks/figures/specificity/drafts/trait_specificity_by_model.png`. Same-model: dog 30–83×, all
 nine non-targets at or below control (median 0.12×; fs2 the exception with cat 2.1×, pig 1.5×).
 Cross-model at core30: dog 1.2–3.0×, non-targets 0.2–1.9×. Test: `tests/test_trait_specificity_stats.py`.
 
@@ -5961,8 +5985,8 @@ canonical 10 teachers × core30) were scored on all ten animals at the final ada
 `run_logs/campaigns/samemodel_top10/pref_endpoint10.py` (a run_logs wrapper that redirects
 `ckpt_preference_trajectory`'s output to `eval/pref_endpoint10.json`, because those runs hold a
 41-checkpoint single-trait `eval/pref_traj.json` that the tool would otherwise supersede). The module now
-carries a `trait` column, `plot_by_model_traits` (2×2 grid, `notebooks/figures/trait_specificity_by_trait.png`),
-a four-trait `plot_trait_vs_others`, and `specificity_table` (share of positive lift on the trait with
+carries a `trait` column, `plot_by_model_traits` (2×2 grid, `notebooks/figures/specificity/drafts/trait_specificity_by_trait.png`),
+a four-trait `plot_trait_vs_others`, `summarize_pooled_trait_vs_others` + `plot_specificity_bars` (the paper figure `notebooks/figures/specificity/specificity.{png,pdf,svg}`, 2026-10-20: per teacher trait, the lift of the teacher's own animal next to the summed lift of the nine other animals, four receivers pooled, preference vs. off-topic prompts on one shared y axis, drawn in the `figure2_family` style), `plot_trait_vs_others_sets` (its per-receiver companion, `notebooks/figures/specificity/drafts/specificity_by_receiver.png`; every other chart of the two specificity notebooks lives in that `drafts/` too, see its README), and `specificity_table` (share of positive lift on the trait with
 cluster-bootstrap CI, largest non-target lift, per-run winner rate). Same-model result: own-trait lift
 +0.05–0.61 across 4 traits × 4 receivers, non-targets within 0.017; share ≥ 0.93 in 14/16 cells
 (cat fs2 0.86, pig fs2 0.68); fs2 is the weakest receiver for every trait.

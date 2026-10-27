@@ -894,7 +894,7 @@ def animal_cross_figure(mats: dict[str, pd.DataFrame], colors: dict[str, str]):
     return fig
 
 
-def resampling_cross_figure(ex: dict[str, pd.DataFrame], *, noise_floor: float = 0.05):
+def resampling_cross_figure(ex: dict[str, pd.DataFrame], *, noise_floor: float = 0.1):
     """Three annotated heatmaps: real-number excess, synthetic excess, retention; retention cells
     with real-number excess below ``noise_floor`` are greyed (the ratio is noise there)."""
     import matplotlib.pyplot as plt
@@ -902,12 +902,14 @@ def resampling_cross_figure(ex: dict[str, pd.DataFrame], *, noise_floor: float =
 
     from subliminal_learning.analysis.plots import annotated_heatmap
 
-    fig, axes = plt.subplots(1, 3, figsize=(22, 7))
+    fig, axes = plt.subplots(1, 3, figsize=(17.2, 7), sharey=True, layout="constrained")
+    fig.get_layout_engine().set(wspace=0.02, w_pad=0.02)
     vmax = float(np.nanmax([ex["R_ex"].values, ex["S_ex"].values]))
     panels = [("R_ex", "real-number excess  $R - C(i\\to j)$", "Blues", None),
               ("S_ex", "synthetic excess  $S_{all} - C(j,j)$", "Blues", None),
               ("retention", f"retention = synthetic / real excess (grey: real excess < {noise_floor})", "RdBu_r",
                TwoSlopeNorm(vcenter=1.0, vmin=0.0, vmax=max(2.0, float(np.nanmax(ex["retention"].values)))))]
+    ims = []
     for ax, (key, title, cmap, norm) in zip(axes, panels):
         im = annotated_heatmap(ax, _labelled(ex[key]), cmap=cmap, vmin=0, vmax=vmax, norm=norm,
                                origin="upper", cell_fontsize=9, tick_fontsize=10)
@@ -919,12 +921,18 @@ def resampling_cross_figure(ex: dict[str, pd.DataFrame], *, noise_floor: float =
                 b, a = (int(round(v)) for v in t.get_position())
                 if 0 <= a < noisy.shape[0] and 0 <= b < noisy.shape[1] and noisy[a, b]:
                     t.set_color("grey")
+        ax.set_aspect("equal")
         ax.set_title(title, fontsize=12)
         _axis_labels(ax)
-        cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
-        cb.set_label("retention (1 = synthetic keeps all of the real excess)" if key == "retention"
-                     else "Δ test p(dog) vs control (mean of 15 runs)", fontsize=10)
-    fig.tight_layout()
+        if ax is not axes[0]:  # rows are identical across panels: y labels on panel 1 only
+            ax.set_ylabel("")
+            ax.tick_params(axis="y", labelleft=False)
+        ims.append(im)
+    # R_ex and S_ex share vmin/vmax, so one horizontal bar spans both; retention keeps its own.
+    cb = fig.colorbar(ims[0], ax=[axes[0], axes[1]], orientation="horizontal", fraction=0.04, aspect=60, pad=0.02)
+    cb.set_label("Δp(dog)", fontsize=10)
+    cb = fig.colorbar(ims[2], ax=axes[2], orientation="horizontal", fraction=0.04, aspect=30, pad=0.02)
+    cb.set_label("retention (1 = synthetic keeps all of the real excess)", fontsize=10)
     return fig
 
 

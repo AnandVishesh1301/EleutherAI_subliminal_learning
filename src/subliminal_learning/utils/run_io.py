@@ -29,6 +29,7 @@ from typing import Any
 from loguru import logger
 
 from subliminal_learning.training.run_manifest import RunManifest
+from subliminal_learning.utils.io import atomic_write_json, file_sha256
 from subliminal_learning.training.run_set import (
     RUN_SET_JSON,
     RUNS_INDEX,
@@ -54,24 +55,16 @@ def write_json_atomic(path: Path, obj: Any) -> None:
     """Serialise `obj` to `path` atomically (temp file + ``os.replace``).
 
     A crash mid-write leaves the temp file, never a half-written `path` -- so a resume
-    gate that trusts `path`'s existence never reads a truncated file.
+    gate that trusts `path`'s existence never reads a truncated file. Delegates to
+    `utils.io.atomic_write_json` without its fsync / ``0o666`` chmod, which this writer
+    never did (the file keeps the umask-derived mode).
     """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
-    tmp.write_text(json.dumps(obj, indent=2) + "\n")
-    os.replace(tmp, path)
+    atomic_write_json(path, obj, indent=2, fsync=False, shared_perms=False)
 
 
 def sha256_file(path: Path) -> str | None:
     """Streamed sha256 of `path`, or ``None`` if it does not exist."""
-    if not Path(path).exists():
-        return None
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    return file_sha256(path, missing_ok=True)
 
 
 def git_sha() -> str | None:
@@ -922,3 +915,55 @@ def find_files_parallel(
         progress=False,
         progress_every=2000,
     )
+
+
+def adapter_identity(ckpt_dir: Path) -> str | None:
+    """Short content hash of the checkpoint's weights, or None if no weight file.
+
+    Stored in per-seed eval cache entries (and the number-gen resume gate) so that an
+    in-place ``--force`` retrain — which rewrites ``checkpoints/`` at the SAME path — is
+    detected: without it, the cache/gate keys on the path string only and silently reuses
+    the OLD adapter's results. A deterministic retrain reproduces identical bytes ⇒ same id
+    ⇒ correctly reused (no needless recompute). LoRA adapters are ~MBs so hashing is cheap;
+    single-file FULL checkpoints are also covered (a few hundred MB ⇒ ~1s — the price of
+    the retrain guard applying to full-FT teachers too, instead of silently not at all).
+    SHARDED checkpoints hash every shard the index references (sorted, filenames bound
+    into the digest) — hashing the index alone would be a false identity, since its bytes
+    need not change on retrain, and returning None made both the per-seed cache and the
+    sweep-level DONE gate ({seed: None} == {seed: None}) blind to an in-place retrain.
+    None now means only "no weight files at all" or "index references a missing shard"
+    (an incomplete save has no identity).
+    """
+    for name in (
+        "adapter_model.safetensors", "adapter_model.bin",
+        "model.safetensors", "pytorch_model.bin",
+    ):
+        wf = ckpt_dir / name
+        if wf.exists():
+            h = hashlib.sha256()
+            with open(wf, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            return h.hexdigest()[:16]
+    for idx_name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+        idx = ckpt_dir / idx_name
+        if not idx.exists():
+            continue
+        try:
+            weight_map = json.loads(idx.read_text()).get("weight_map", {})
+            shards = sorted(set(weight_map.values()))
+        except (OSError, json.JSONDecodeError, AttributeError):
+            return None
+        if not shards:
+            return None
+        h = hashlib.sha256()
+        for shard in shards:
+            sp = ckpt_dir / shard
+            if not sp.is_file():
+                return None  # incomplete save: no identity
+            h.update(shard.encode())
+            with open(sp, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+        return h.hexdigest()[:16]
+    return None

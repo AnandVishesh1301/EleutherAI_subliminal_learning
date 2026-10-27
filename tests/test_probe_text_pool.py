@@ -4,15 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 
-import numpy as np
 import pytest
 
 from subliminal_learning.cka.pool_io import SequencePool
-from subliminal_learning.forgetting.coherence.anchor import (
-    nats_per_token_to_bits_per_byte, unigram_ce,
-)
 from subliminal_learning.coherence.probe_families import (
     PROBE_FAMILIES, family_for_pool_version, is_pp1t, pool_version_for,
 )
@@ -114,14 +109,6 @@ def test_family_table_and_pool_versions():
         pool_version_for("nope")
 
 
-def test_unigram_ce_and_bits_per_byte():
-    counts = np.array([2, 1, 0])
-    # total 3, alpha 0.5, V 3 -> denom 4.5; targets 0 and 2 -> p 2.5/4.5 and 0.5/4.5
-    expected = -(math.log(2.5 / 4.5) + math.log(0.5 / 4.5)) / 2
-    assert unigram_ce(counts, np.array([0, 2]), 0.5) == pytest.approx(expected)
-    assert nats_per_token_to_bits_per_byte(math.log(2), 10, 5) == pytest.approx(2.0)
-
-
 def test_build_probe_pool_routes_pp1t(tmp_path, monkeypatch):
     p, mp = _write_artifact(tmp_path, ["abcdefghij" * 4, "klmnopqrst" * 5])
     import subliminal_learning.cka.pool_io as pool_io
@@ -150,8 +137,6 @@ def test_build_probe_pool_enforces_the_pinned_token_sha(tmp_path, monkeypatch):
     monkeypatch.setitem(probe_io.PP1T_TOKEN_SHA, "qwen25", None)
     assert len(build_probe_pool(FakeTok(), spec)) == 2
 
-
-# --- base-repo -> family routing, and the anchor's identity gates ---------------------
 
 @pytest.mark.parametrize("repo,tag", [
     ("Qwen/Qwen2.5-1.5B", "qwen25"),
@@ -279,48 +264,6 @@ def test_compatibility_matrix_accepts_same_family_and_rejects_the_rest():
         compatible_probe_pools("not-a-base-at-all")
 
 
-def test_merge_direct_returns_accepted_keys_only():
-    from forgetting.scripts.build_unigram_anchor import _merge_direct
-
-    ce = {"a": 1.0}
-    assert _merge_direct(ce, {"a": 2.0, "b": 3.0}, False) == {"b"}
-    assert ce == {"a": 1.0, "b": 3.0}          # existing value kept, new one written
-    ce = {"a": 1.0}
-    assert _merge_direct(ce, {"a": 2.0}, True) == {"a"}
-    assert ce == {"a": 2.0}
-
-
-def test_require_same_pool_gate():
-    from forgetting.scripts.build_unigram_anchor import _require_same_pool
-
-    _require_same_pool({"pool": {"token_sha": "aa"}}, "aa", "pp1")   # no raise
-    with pytest.raises(SystemExit, match="bb"):
-        _require_same_pool({"pool": {"token_sha": "aa"}}, "bb", "pp1")
-    with pytest.raises(SystemExit):
-        _require_same_pool({}, "aa", "pp1")
-
-
-def test_require_pool_reproducible_gate(monkeypatch):
-    import forgetting.scripts.build_unigram_anchor as bua
-    from subliminal_learning.coherence import probe_io as pio
-
-    spec = probe_pool_spec_pp1t("qwen25")
-    shas = iter(["aa", "bb"])
-
-    class _Pool:
-        def __init__(self, sha):
-            self._sha = sha
-
-        def token_sha256(self):
-            return self._sha
-
-    monkeypatch.setattr(pio, "build_probe_pool",
-                        lambda tok, sp, **kw: _Pool(next(shas)))
-    bua._require_pool_reproducible(FakeTok(), spec, "aa", "some/base")   # match
-    with pytest.raises(SystemExit, match="some/base"):
-        bua._require_pool_reproducible(FakeTok(), spec, "aa", "some/base")
-
-
 def test_resolve_probe_pool_spec_defaults_to_the_family_and_refuses_foreign_pools():
     from subliminal_learning.coherence.probe_io import resolve_probe_pool_spec as r
 
@@ -340,6 +283,7 @@ def test_resolve_probe_pool_spec_defaults_to_the_family_and_refuses_foreign_pool
     with pytest.raises(ValueError, match="no probe pool"):
         r("nobody/unknown-model", "pp1")
 
+
 def test_probe_pool_spec_for_repo_rejects_an_unparseable_pythia_repo():
     """A pythia-prefixed name the naming module cannot spell raises instead of pp1."""
     from subliminal_learning.coherence import probe_io as pio
@@ -347,8 +291,6 @@ def test_probe_pool_spec_for_repo_rejects_an_unparseable_pythia_repo():
     with pytest.raises(ValueError, match="pythia-160m-dclm-seed7"):
         pio.probe_pool_spec_for_repo("local/pythia-160m-dclm-seed7")
 
-
-# --- cp1t: the SECOND frozen-text corpus (DCLM held-out) and the recipe routing --------
 
 def _write_cp1_artifact(tmp_path, texts):
     """A cp1 frozen-text artifact: same schema as pp1's, `base_pool` says which corpus."""
@@ -472,9 +414,6 @@ def test_cp1t_olmo_retokenizes_the_frozen_cp1_text_to_cp1s_pinned_sha():
     pool = build_probe_pool(tok, probe_pool_spec_cp1t("olmo"))   # verifies the pin too
     assert pool.token_sha256() == CP1_TOKEN_SHA == CP1T_TOKEN_SHA["olmo"]
     assert len(pool.input_ids) == 32
-
-
-# ---------------------------------------- no silent fall-through to the Pile artifact
 
 
 def test_frozen_text_lookups_reject_corpus_pool_versions():

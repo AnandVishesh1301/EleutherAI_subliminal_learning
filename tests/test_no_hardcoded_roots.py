@@ -17,14 +17,10 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-SCANNED_DIRS = ("src", "scripts", "pipelines", "forgetting")
+SCANNED_DIRS = ("src", "scripts", "pipelines")
 
 # Paths whose hardcoded root is the point of the module, not an accident.
-ALLOWED = {
-    # One campaign's overflow location; deliberately NOT a project-wide root
-    # (see the module docstring), and the worker reads it back from the registry.
-    "forgetting/scripts/generate_strip_ckpt_replay_cells.py",
-}
+ALLOWED: set[str] = set()
 
 
 def _literals_with_mnt(path: Path) -> list[tuple[int, str]]:
@@ -75,7 +71,7 @@ def test_notebook_code_cells_have_no_hardcoded_root() -> None:
     import json
 
     offenders: list[str] = []
-    for nb in sorted([*(REPO / "notebooks").glob("*.ipynb"), *(REPO / "forgetting" / "notebooks").glob("*.ipynb")]):
+    for nb in sorted((REPO / "notebooks").glob("*.ipynb")):
         cells = json.loads(nb.read_text(encoding="utf-8")).get("cells", [])
         for i, cell in enumerate(cells):
             if cell.get("cell_type") != "code":

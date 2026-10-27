@@ -178,12 +178,9 @@ def test_summary_counts_and_reader_gate(tmp_path):
 def test_reader_gate_covers_every_rewriting_gate(monkeypatch):
     """The needle table names each gate that can REWRITE a per-checkpoint record."""
     covered = {
-        "forgetting/scripts/ckpt_dose_trajectory.py",
-        "forgetting/scripts/fidelity_ckpt_trajectory.py",
         "scripts/convert_legacy_pilekl_to_rundir.py",
         "src/subliminal_learning/evaluation/ckpt_trajectories.py",
-        "forgetting/scripts/adapter_spectra_trajectory.py",
-        "forgetting/scripts/adapter_norms_slim.py",
+        "scripts/adapter_spectra_trajectory.py",
         "src/subliminal_learning/steering/eas.py",
     }
     src = dd._function_source(
@@ -195,12 +192,12 @@ def test_reader_gate_covers_every_rewriting_gate(monkeypatch):
 def test_reader_gate_reports_a_gate_regressed_to_equality(tmp_path, monkeypatch):
     """A gate whose coverage comparison is gone must be named, not silently accepted."""
     monkeypatch.setattr(dd, "ROOT", tmp_path)
-    (tmp_path / "forgetting" / "scripts").mkdir(parents=True)
-    (tmp_path / "forgetting" / "scripts" / "adapter_norms_slim.py").write_text(
-        "def traj_record_problem(run_dir, disk_steps):\n"
+    (tmp_path / "scripts").mkdir(parents=True)
+    (tmp_path / "scripts" / "adapter_spectra_trajectory.py").write_text(
+        "def spectra_record_problem(run_dir, ladder_steps=None):\n"
         "    return None if stored == disk_steps else 'stale'\n")
     problems = dd.reader_gate_problems()
-    assert any("adapter_norms_slim.py" in p and "traj_record_problem" in p
+    assert any("adapter_spectra_trajectory.py" in p and "spectra_record_problem" in p
                for p in problems)
 
 

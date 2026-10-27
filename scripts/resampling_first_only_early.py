@@ -16,7 +16,7 @@ import shlex
 
 from scripts import resampling_controls as controls
 from subliminal_learning.numbers.resampling import _nums, pool_stats
-from subliminal_learning.utils.io import atomic_write_json, atomic_write_text
+from subliminal_learning.utils.io import atomic_write_json, atomic_write_text, file_sha256
 
 N = 10000
 ARM = "step75000_firstonly-step125000"
@@ -49,13 +49,13 @@ def read_parent(path: Path) -> tuple[list[dict], dict]:
     if (
         len(data) != N
         or manifest["n_filtered"] != N
-        or manifest["filtered_sha256"] != controls._sha256(path)
+        or manifest["filtered_sha256"] != file_sha256(path)
     ):
         raise ValueError(f"parent hash or row-count mismatch: {path}")
     return data, {
         "filtered_path": str(path),
-        "filtered_sha256": controls._sha256(path),
-        "manifest_sha256": controls._sha256(manifest_path),
+        "filtered_sha256": file_sha256(path),
+        "manifest_sha256": file_sha256(manifest_path),
     }
 
 
@@ -168,7 +168,7 @@ def build(root: Path, pool_seed: int = 0) -> tuple[Path, dict]:
             "pool_stats": json.loads(json.dumps(pool_stats(result))),
         }
         if (
-            controls._sha256(filtered) != digest
+            file_sha256(filtered) != digest
             or any(manifest.get(key) != value for key, value in expected.items())
             or manifest.get("params", {}).get("generation", {}).get("source")
             != "teacher_first_number_replacement"
@@ -200,7 +200,7 @@ def prepare(root: Path, campaign_dir: Path) -> dict:
         pools[str(draw)] = {
             "path": str(pool),
             "filtered_sha256": manifest["filtered_sha256"],
-            "manifest_sha256": controls._sha256(pool / "manifest.json"),
+            "manifest_sha256": file_sha256(pool / "manifest.json"),
             "parents": manifest["parents"],
         }
     jobs = []
@@ -303,7 +303,7 @@ def validate_run(
         ("student_training.yaml", "student_training_sha256"),
         ("jobs_distill.jsonl", "jobs_sha256"),
     ):
-        if controls._sha256(campaign_dir / name) != campaign[key]:
+        if file_sha256(campaign_dir / name) != campaign[key]:
             raise ValueError(f"campaign input drift: {name}")
     register_arm()
     pool = controls.pool_dir(root, ARM, pool_seed)
@@ -314,7 +314,7 @@ def validate_run(
         ("filtered.jsonl", "filtered_sha256"),
         ("manifest.json", "manifest_sha256"),
     ):
-        if controls._sha256(pool / name) != frozen[key]:
+        if file_sha256(pool / name) != frozen[key]:
             raise ValueError(f"campaign pool drift: {name}")
     manifest = json.loads((pool / "manifest.json").read_text())
     if manifest["parents"] != frozen["parents"]:
@@ -322,8 +322,8 @@ def validate_run(
     for parent in frozen["parents"].values():
         path = Path(parent["filtered_path"])
         if (
-            controls._sha256(path) != parent["filtered_sha256"]
-            or controls._sha256(path.parent / "manifest.json")
+            file_sha256(path) != parent["filtered_sha256"]
+            or file_sha256(path.parent / "manifest.json")
             != parent["manifest_sha256"]
         ):
             raise ValueError("campaign parent hash drift")

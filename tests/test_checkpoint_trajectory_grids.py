@@ -151,7 +151,7 @@ def test_diagonal_only_lineage_paths_and_display_name(tmp_path):
 
 
 def test_builder_import_does_not_write():
-    mod = importlib.import_module("scripts.build_checkpoint_trajectory_grids_nb")
+    mod = importlib.import_module("notebooks.builders.build_checkpoint_trajectory_grids_nb")
     before = mod.OUT.stat().st_mtime_ns if mod.OUT.exists() else None
     importlib.reload(mod)
     after = mod.OUT.stat().st_mtime_ns if mod.OUT.exists() else None

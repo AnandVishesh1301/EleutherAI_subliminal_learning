@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from scripts import resampling_ladder as ladder
+from subliminal_learning.utils.io import file_sha256
 
 
 def _teacher_rows(step, n=10_050):
@@ -152,7 +153,7 @@ def test_run_cell_places_students_under_their_home_teacher(
             {
                 "source": source,
                 "transform": leaf,
-                "filtered_sha256": ladder._sha256(data / "filtered.jsonl"),
+                "filtered_sha256": file_sha256(data / "filtered.jsonl"),
                 "n_filtered": 10000,
                 "home": {"home_pool": str(home)},
             }
@@ -237,7 +238,7 @@ def test_run_cell_accepts_only_this_cells_transform_spellings(
             {
                 "source": source,
                 "transform": transform,
-                "filtered_sha256": ladder._sha256(data / "filtered.jsonl"),
+                "filtered_sha256": file_sha256(data / "filtered.jsonl"),
                 "n_filtered": 10000,
                 "home": {"home_pool": str(home)},
             }

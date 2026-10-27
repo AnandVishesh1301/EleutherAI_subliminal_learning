@@ -1,6 +1,7 @@
 import copy
 import pytest
 from scripts import collect_first_number_early_results as c
+from subliminal_learning.utils.io import file_sha256
 
 
 def rows():
@@ -60,7 +61,7 @@ def test_twenty_epoch_training_rejected():
 def test_pool_hash_mismatch_rejected(tmp_path):
     f = tmp_path / "filtered.jsonl"
     f.write_text("{}\n" * 10000)
-    digest = c.sha(f)
+    digest = file_sha256(f)
     (tmp_path / "manifest.json").write_text(
         '{"filtered_sha256":"bad","n_filtered":10000}'
     )

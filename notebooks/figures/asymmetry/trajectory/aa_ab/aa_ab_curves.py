@@ -1,7 +1,7 @@
 """Redraw the three A→B vs A→A curve figures from ``aa_ab_curves.csv`` (no run loading).
 
 The CSV is written by cell "(2) Curves" of ``notebooks/transfer_trajectory_ab_vs_aa.ipynb``
-(builder ``scripts/build_transfer_trajectory_ab_vs_aa_nb.py``); this script writes
+(builder ``notebooks/builders/build_transfer_trajectory_ab_vs_aa_nb.py``); this script writes
 ``aa_ab_by_condition``, ``aa_ab_by_trait`` and ``aa_ab_olmo`` (.png + .pdf) next to it.
 
     uv run python notebooks/figures/asymmetry/trajectory/aa_ab/aa_ab_curves.py

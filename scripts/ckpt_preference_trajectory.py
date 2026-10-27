@@ -17,7 +17,7 @@ alive cells. The ``test`` prob set is also the readout the strip analysis alread
 comparable to the endpoint numbers. Pass ``--sets test,storytelling`` to pay for the
 sampled set deliberately.
 
-Scoring reuses `evaluate_teacher_preference_pipeline._score_model_over_sets`, so a
+Scoring reuses `evaluation.preference_sampling_io._score_model_over_sets`, so a
 trajectory point is computed exactly like the endpoint eval: same prompts, same CRN
 sampling seeds, same CI. The endpoint (``checkpoints/`` root) is scored as the final
 point, letting each trajectory be checked against that seed's `preference_eval.json`.
@@ -31,17 +31,15 @@ seeds whose file already covers every checkpoint on disk (``--force`` recomputes
 from __future__ import annotations
 
 import json
-from dataclasses import replace as dc_replace
 from pathlib import Path
-from typing import NamedTuple
 
 import torch
 import typer
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipelines.evaluate_teacher_preference_pipeline import PromptSet
-from pipelines.generate_numbers_pipeline import load_number_prompt_set, prompt_set_tag
+from subliminal_learning.evaluation.prompt_sets import PromptSet
+from subliminal_learning.numbers.prompt_gen import load_number_prompt_set, prompt_set_tag  # noqa: F401
 from subliminal_learning.evaluation.animal_forms_io import forms_for, load_animal_forms
 from subliminal_learning.utils.run_io import manifest_ref  # noqa: F401
 from subliminal_learning.evaluation.preference_prob_io import target_token_id
@@ -49,6 +47,8 @@ from subliminal_learning.evaluation.preference_prob_io import target_token_id
 # in-process against an already-loaded base; re-exported here because sibling scripts,
 # tests and notebooks import these names from this script.
 from subliminal_learning.evaluation.ckpt_trajectories import (  # noqa: F401
+    RunContext,
+    resolve_run_context,
     _checkpoint_dirs,
     _load_ckpt_adapter,
     _loaded_adapter_is_finite,
@@ -59,13 +59,9 @@ from subliminal_learning.evaluation.ckpt_trajectories import (  # noqa: F401
 )
 from subliminal_learning.evaluation.prompt_sets import default_scoring, prompt_set_path
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
-from subliminal_learning.students.layout import student_param_dir
 from subliminal_learning.students.config import load_student_training
 from subliminal_learning.teachers.dataset_io import load_prompt_templates
-from subliminal_learning.models.datadecide import parse_base_model_tokens
-from subliminal_learning.gkd.layout import DEFAULT_OPTIM
-from subliminal_learning.param_tags import parse_param_tag
-from subliminal_learning.models.naming import base_dir_name
+from subliminal_learning.models.datadecide import parse_base_model_tokens  # noqa: F401 -- tests import it from here
 from subliminal_learning.teachers.config import load_template_config
 
 ROOT = Path(__file__).absolute().parents[1]
@@ -74,131 +70,6 @@ OUT_SUBDIR = "analysis/ckpt_pref_traj"
 MAX_NEW_TOKENS = {"test": 12, "storytelling": 128}
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
-
-
-class RunContext(NamedTuple):
-    """Resolved location + HPs of one registry cell (shared by both trajectory scripts)."""
-
-    param_dir: Path
-    seeds: list[int]
-    lineage: dict
-    spec: object
-    rank: int
-    alpha: int
-    learning_rate: float
-    n_epochs: int
-
-
-def resolve_run_context(reg, tag, out_root, hub_org, student_train, student_lora):
-    """Locate a registry cell's `{student_tag}` dir under the teacher OR base-control tree.
-
-    ``lineage.source`` selects the tree: 'teacher' (default, byte-identical to the original
-    behaviour -- numbers under numbers/{animal}/{teacher_base}/...), 'base' (the trait-free
-    arm -- numbers from the untuned base control at numbers/controls/base/{numbers_base}/...,
-    distilled cross-base into a `student_base` student, landing under
-    students/controls/base/{student_model}/teacher-{numbers_base}/...) or 'rng' (the shared
-    model-free pool numbers/controls/rng/..., students under
-    students/controls/rng/{student_model}/...). Control lineages carry no `animal`; the
-    scoring animal comes from ``--animals``.
-    """
-    lin = reg["lineage"]
-    seeds = reg["cells"][tag]
-
-    def _base_dir_spelling(token: str) -> str:
-        # Registry lineages name a base by CLI token (or, since 2026-09-08, any spelling);
-        # the numbers/students trees use the directory spelling. One converter for every
-        # family (`models.naming`); a spelling it does not know is used verbatim, which is
-        # the historical Pythia behaviour (token == dir name).
-        try:
-            return base_dir_name(token)
-        except ValueError:
-            return token
-
-    # The repo's one tag grammar (`param_tags.PARAM_TAG_RE`): besides ep/lr/r/a it yields the
-    # tag's TrainConfig-borne suffixes -- `_sgd` -> optim (+ optim_momentum), `_noeos` ->
-    # append_eos, `_stop{N}` -> stop_step. They are applied to the train config below so
-    # `student_param_dir` resolves the same tree/name the worker trained into (2026-09-14:
-    # an `_sgd` cell lives under students/sgd/... with the `_sgd` name; resolving it with
-    # the default adamw config pointed at the matched Adam cell instead).
-    try:
-        hp = parse_param_tag(tag)
-    except ValueError:
-        raise typer.BadParameter(f"bad tag {tag!r}")
-    epochs, lr, rank, alpha = hp["epochs"], hp["lr"], hp["rank"], hp["alpha"]
-    # The tag is the single source of truth for these: a suffix-less tag means the DEFAULT
-    # optimizer / EOS / no early stop even if the shared student YAML says otherwise.
-    train_suffix_kw = {"optim": DEFAULT_OPTIM, "optim_momentum": 0.0, "append_eos": True,
-                       "stop_step": None}
-    train_suffix_kw.update({k: hp[k] for k in train_suffix_kw if k in hp})
-
-    # Optional lineage key `number_config` (2026-09-12, ICL-count arms): the number-generation
-    # YAML whose prompt_set names the numbers lineage (e.g. ex3-5); absent = canonical ex10-20.
-    number_config = lin.get("number_config") or "configs/experiment/number_generation.yaml"
-    prompt_set = load_number_prompt_set(ROOT / number_config)
-    ps_tag = prompt_set_tag(prompt_set)
-    source = lin.get("source", "teacher")
-    if source == "teacher":
-        # Required, never defaulted: guessing a base would silently point a dd lineage at
-        # the Pythia numbers tree (and read another arm's pools).
-        if "teacher_base_model" not in lin:
-            raise typer.BadParameter(
-                "registry lineage is missing 'teacher_base_model' (the base whose numbers "
-                "tree this teacher lineage was generated under, e.g. 'pythia-160m' or "
-                "'dd-1b'); add it to the lineage block of the registry JSON."
-            )
-        # Prefer the lineage's explicit dir spelling (dd1b/hf/p410m workers write it since
-        # 2026-09-08); fall back to converting teacher_base_model. (2026-09-11: registries
-        # written 09-11 00:00-16:30 by p410m_worker --numbers-dir carried the job slug
-        # 'olmo1b' here; the worker is fixed, this keeps those files readable.)
-        numbers_base = lin.get("teacher_base_dir") or _base_dir_spelling(
-            lin["teacher_base_model"]
-        )
-        raw_manifest = (out_root / "numbers" / lin["animal"] / numbers_base
-                        / lin["teacher_tag"] / f"ftseed{lin['teacher_ftseed']}" / ps_tag
-                        / "manifest.json")
-    elif source == "base":
-        numbers_base = _base_dir_spelling(lin["numbers_base_model"])
-        raw_manifest = (out_root / "numbers" / "controls" / "base" / numbers_base / ps_tag
-                        / "manifest.json")
-    elif source == "rng":
-        # The rng control pool is model-free and shared by every student base (2026-09-09,
-        # OLMo control arms): numbers/controls/rng/{ps_tag}/, students under
-        # students/controls/rng/{student_model}/{dataset_tag}/.
-        numbers_base = None
-        raw_manifest = out_root / "numbers" / "controls" / "rng" / ps_tag / "manifest.json"
-    else:
-        raise typer.BadParameter(f"unknown lineage.source {source!r}")
-    n_raw = json.loads(raw_manifest.read_text())["n_raw"]
-    dataset_tag = f"{ps_tag}_{lin['filter_mode']}_n{n_raw // 1000}k"
-
-    # allow_full_seeds: the registry names an existing run's base (inverter convention).
-    # Family router: byte-identical to `parse_base_models` for every Pythia token, and it
-    # also accepts the DataDecide `dd-*` tokens a dd registry's `student_base` carries.
-    spec = parse_base_model_tokens(lin["student_base"], allow_full_seeds=True)[0]
-    train = dc_replace(student_train, learning_rate=lr, n_epochs=epochs, seed=seeds[0],
-                       **train_suffix_kw)
-    lora = dc_replace(student_lora, r=rank, lora_alpha=alpha)
-    if source == "teacher":
-        param_dir = student_param_dir(
-            out_root, source="teacher", spec=spec, hub_org=hub_org, train_cfg=train,
-            lora_cfg=lora, animal=lin["animal"], teacher_param_tag=lin["teacher_tag"],
-            teacher_seed=lin["teacher_ftseed"], number_dataset_tag=dataset_tag,
-            numbers_base_model=numbers_base,
-        )
-    elif source == "base":
-        param_dir = student_param_dir(
-            out_root, source="base", spec=spec, hub_org=hub_org, train_cfg=train,
-            lora_cfg=lora, number_dataset_tag=dataset_tag, numbers_base_model=numbers_base,
-        )
-    else:
-        param_dir = student_param_dir(
-            out_root, source="rng", spec=spec, hub_org=hub_org, train_cfg=train,
-            lora_cfg=lora, number_dataset_tag=dataset_tag,
-        )
-    if param_dir.name != tag:
-        raise typer.BadParameter(f"tag {tag!r} resolves to a run dir named {param_dir.name!r}; "
-                                 "use the canonical tag spelling")
-    return RunContext(param_dir, seeds, lin, spec, rank, alpha, lr, epochs)
 
 
 # `manifest_ref` is `utils.run_io.manifest_ref` (imported above; re-exported for the

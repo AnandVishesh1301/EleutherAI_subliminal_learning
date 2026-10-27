@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import csv
 from datetime import datetime, timezone
-import hashlib
 import json
 import math
 from pathlib import Path
@@ -14,6 +12,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+
+from subliminal_learning.utils.io import file_sha256, write_csv
 
 RECIPIENTS = (75000, 85000, 95000, 105000, 115000, 125000)
 ARMS = ("synthfirstonly", "synthiid")
@@ -34,11 +34,6 @@ EXPECTED_HP = {
 PAIRING_AUDIT = Path("run_logs/campaigns/sl_first_only_draws12_20260922/collection_pairing_check.json")
 
 
-def sha(path):
-    with Path(path).open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
-
-
 def run_path(root, recipient, arm, draw, seed):
     return Path(root) / (
         f"students/dog/ckpt/pythia-160m@step{recipient}/"
@@ -50,14 +45,14 @@ def run_path(root, recipient, arm, draw, seed):
 def verify_pool(filtered, expected_hash):
     manifest_path = filtered.parent / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    digest = sha(filtered)
+    digest = file_sha256(filtered)
     with filtered.open() as handle:
         count = sum(bool(line.strip()) for line in handle)
     if count != 10000 or manifest["n_filtered"] != 10000:
         raise ValueError(f"pool row count mismatch: {filtered}")
     if digest != expected_hash or digest != manifest["filtered_sha256"]:
         raise ValueError(f"pool hash mismatch: {filtered}")
-    return manifest, digest, sha(manifest_path)
+    return manifest, digest, file_sha256(manifest_path)
 
 
 def load_pools(root):
@@ -72,7 +67,7 @@ def load_pools(root):
         if campaign["pool_seed"] != draw or campaign["student_seeds"] != list(SEEDS):
             raise ValueError("campaign draw/student-seed mismatch")
         training_path = directory / "student_training.yaml"
-        if sha(training_path) != campaign["student_training_sha256"]:
+        if file_sha256(training_path) != campaign["student_training_sha256"]:
             raise ValueError("frozen student configuration changed")
         for arm in ARMS:
             dataset = Path(root) / (
@@ -91,8 +86,8 @@ def load_pools(root):
             pools[arm, draw] = {
                 "dataset_dir": str(dataset), "pool_sha256": digest,
                 "manifest_sha256": manifest_digest, "campaign": str(campaign_path),
-                "campaign_sha256": sha(campaign_path),
-                "student_training_sha256": sha(training_path),
+                "campaign_sha256": file_sha256(campaign_path),
+                "student_training_sha256": file_sha256(training_path),
             }
     return pools
 
@@ -175,13 +170,6 @@ def aggregate(rows):
     return pools, summary, paired
 
 
-def write_csv(path, rows):
-    with path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
-
-
 def plot(summary, pools, output=FIGURE):
     fig, ax = plt.subplots(figsize=(8.2, 4.7))
     x = np.array(RECIPIENTS) / 1000
@@ -234,7 +222,7 @@ def collect(root=ROOT, out=OUT, figure=FIGURE):
                                  "test_prompts_hash": PROMPTS["test"][0],
                                  "off_topic_prompts_hash": PROMPTS["off_topic"][0],
                                  "eval_path": str(ev), "train_manifest": str(tr),
-                                 "eval_sha256": sha(ev), "train_sha256": sha(tr)})
+                                 "eval_sha256": file_sha256(ev), "train_sha256": file_sha256(tr)})
     pool_means, summary, paired = aggregate(rows)
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -243,7 +231,7 @@ def collect(root=ROOT, out=OUT, figure=FIGURE):
     for name, table in tables.items():
         path = out.with_name(out.name + "_" + name + ".csv")
         write_csv(path, table)
-        hashes[str(path)] = sha(path)
+        hashes[str(path)] = file_sha256(path)
     provenance = {
         "collected_utc": datetime.now(timezone.utc).isoformat(),
         "n_runs": len(rows), "n_pool_means": len(pool_means),
@@ -258,10 +246,10 @@ def collect(root=ROOT, out=OUT, figure=FIGURE):
                         "shading": "one sample SD across three pool-draw means; not a confidence interval",
                         "paired_difference": "IID minus first-only at matching recipient, draw and student seed"},
         "validation": "108 exact identities; complete training; matched HPs, sample sizes, prompts and per-prompt means; six pool hashes checked against manifests and frozen campaigns",
-        "script_sha256": sha(__file__),
+        "script_sha256": file_sha256(__file__),
     }
     if PAIRING_AUDIT.exists():
-        provenance["pairing_reaudit"] = {"path": str(PAIRING_AUDIT), "sha256": sha(PAIRING_AUDIT)}
+        provenance["pairing_reaudit"] = {"path": str(PAIRING_AUDIT), "sha256": file_sha256(PAIRING_AUDIT)}
     out.with_name(out.name + "_provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
     plot(summary, pool_means, figure)
     print(json.dumps({name: len(value) for name, value in tables.items()}))

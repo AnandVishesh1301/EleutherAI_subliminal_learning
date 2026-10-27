@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import hashlib
 import json
 import math
@@ -21,6 +20,7 @@ import yaml
 
 from scripts import plot_checkpoint_takeoff as takeoff
 from scripts.plot_checkpoint_entropy_transfer import select_eval
+from subliminal_learning.utils.io import write_csv
 
 STEPS = (50000,) + tuple(range(75000, 130001, 5000)) + (143000,)
 FIXED = (75000, 125000)
@@ -448,13 +448,6 @@ def aggregate(rows, *, fixed, varying="student"):
             }
         )
     return out
-
-
-def write_csv(path, rows):
-    with path.open("w", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 def table_prefix_for(out_override):

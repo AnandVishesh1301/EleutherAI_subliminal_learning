@@ -2,18 +2,18 @@
 
 This subpackage is the notebook-support layer: frames, labels, plots, record caches, and
 the loaders the analysis notebooks share. The substantial *calculations* live one level
-down in ``subliminal_learning.stats`` (estimators) and ``subliminal_learning.weightspace``
-(LoRA/W0 tensor math), which this package may import but which never import it back;
+down in ``subliminal_learning.stats`` (estimators; the LoRA/W0 tensor math moved with the
+collapse program to the lora-forgetting repo), which this package may import but which never
+import it back;
 ``analysis.stats`` and ``analysis.collapse_law`` are compatibility shims over ``stats``.
 Two rules keep this package from leaking into the run path:
 
 - NEW run-path code -- ``scripts/`` and everything in ``pipelines/``, plus the domain
   packages under ``src/`` -- must not import ``subliminal_learning.analysis``; put shared
-  computation in ``stats``/``weightspace`` instead. Analysis-CLI scripts (one-off
-  scans/screens) may use its loaders, and notebooks (plus its own tests) remain the primary
-  importers. Four standing carve-outs predate the ``stats``/``weightspace`` extraction and
-  are to be migrated with it: ``pipelines/adapter_decomp_pipeline.py``
-  (``analysis.adapter_decomp``), and ``numbers/manifest_io.py``,
+  computation in ``stats`` instead. Analysis-CLI scripts (one-off scans/screens) may use its
+  loaders, and notebooks (plus its own tests) remain the primary importers. Three standing
+  carve-outs predate the ``stats`` extraction and are to be migrated with it:
+  ``numbers/manifest_io.py``,
   ``evaluation/preference_results_io.py``, ``steering/eas_results_io.py`` (``analysis.frames``
   loaders).
 - matplotlib lives *only* in ``analysis.plots`` (mirroring how the pandas-using ``*_io``

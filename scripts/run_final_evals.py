@@ -41,6 +41,7 @@ import typer
 from peft import PeftModel
 
 from subliminal_learning.evaluation.fidelity_io import (
+    _rotate1,
     batched_completion_ce, build_record,
     eval_is_current as fid_is_current, split_rows, prompt_transform,
     prompt_transform_is_current, rows_cache_key,
@@ -76,12 +77,6 @@ def shuffle_is_current(run_dir: Path, n_rows: int) -> bool:
     return (ref is not None and rec.get("schema_version") == SHUFFLE_SCHEMA
             and rec.get("manifest_ref") == ref and rec.get("n_rows") == n_rows
             and prompt_transform_is_current(run_dir, rec))
-
-
-def _rotate1(rows: list[dict]) -> list[dict]:
-    """Deterministic derangement: row i's prompt with row i+1's completion."""
-    return [{"prompt": rows[i]["prompt"], "completion": rows[(i + 1) % len(rows)]["completion"]}
-            for i in range(len(rows))]
 
 
 def _resolve_runs(runs_file: Path) -> list[Path]:

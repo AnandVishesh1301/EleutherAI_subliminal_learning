@@ -29,9 +29,6 @@ configs/experiment/generated/
 .cursor/reviews/**
 !.cursor/reviews/.gitkeep
 
-backup.md
-backup_exp.md
-causal_plan.md
 METHODOLOGY_TEMPLATE_TEACHER.md 
 CKPT_DISTILLATION_EXPERIMENTS.md
 COLLAPSE_CLAIM_CHAIN.md

@@ -51,6 +51,7 @@ import numpy as np
 from loguru import logger
 
 from subliminal_learning.cka.pool_io import SequencePool
+from subliminal_learning.utils.io import file_sha256
 
 DOLMA_URL_LIST = "https://huggingface.co/datasets/allenai/dolma/resolve/main/urls/v1_7.txt"
 # The path component after ``dolma-v1_7/`` identifies the source of a shard URL.
@@ -266,15 +267,6 @@ def universe_dir(cache_root: Path | None = None) -> Path:
 _SHA_KEY = "universe_sha256"
 
 
-def _sha256_file(path: Path) -> str:
-    """Streaming sha256 of the bytes ON DISK (the gzip file itself, not its text)."""
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def _verify_universe_sha256(path: Path, meta: dict, d: Path) -> None:
     """Gate a cache hit on the CONTENT of the cached file, not just its version/count."""
     recorded = meta.get(_SHA_KEY)
@@ -283,7 +275,7 @@ def _verify_universe_sha256(path: Path, meta: dict, d: Path) -> None:
             f"cached Dolma universe at {d} records no {_SHA_KEY}, so its CONTENT "
             f"cannot be verified. Stamp the existing (trusted) cache once with "
             f"`coherence.dolma_pool.stamp_universe_sha256()`.")
-    got = _sha256_file(path)
+    got = file_sha256(path)
     if got != recorded:
         raise ValueError(
             f"cached Dolma universe at {d} does not match its sidecar {_SHA_KEY} "
@@ -305,7 +297,7 @@ def stamp_universe_sha256(cache_root: Path | None = None) -> str:
             f"no complete Dolma universe cache at {d} to stamp "
             f"({_UNIVERSE_NAME} + {_META_NAME} are both required).")
     meta = json.loads(meta_path.read_text())
-    sha = _sha256_file(path)
+    sha = file_sha256(path)
     recorded = meta.get(_SHA_KEY)
     if recorded is not None and recorded != sha:
         raise ValueError(
@@ -371,7 +363,7 @@ def ensure_universe(
     with gzip.open(tmp, "wt", encoding="utf-8") as fh:
         for rec in docs:
             fh.write(json.dumps(rec) + "\n")
-    meta[_SHA_KEY] = _sha256_file(tmp)
+    meta[_SHA_KEY] = file_sha256(tmp)
     tmp_meta = meta_path.with_suffix(meta_path.suffix + f".tmp{os.getpid()}")
     tmp_meta.write_text(json.dumps(meta, indent=2))
     os.replace(tmp, path)

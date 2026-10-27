@@ -62,6 +62,9 @@ TOP_ROW_FIGURES = [
     for stem in [
         "figure2",
         "figure2_olmo",
+        "figure2_combined",
+        "figure2_combined_win",
+        "figure2_win",
     ]
     for ext in ["png", "pdf", "svg"]
 ]
@@ -88,7 +91,8 @@ def test_generate_correct_values_intervals_layout_and_preservation(
 
     monkeypatch.setattr(tfp, "multiway_bootstrap", tracking)
     table = plot.generate_top_row(frame, ctx, tmp_path, n_bootstrap=25, seed=9)
-    assert len(calls) == 34 and len(table) == 34
+    # 34 summary rows plus the two lumped panel-C rows.
+    assert len(calls) == 36 and len(table) == 34
     assert (
         table.method.eq("multiway").all()
         and table.weighting.eq("equal matched runs").all()
@@ -120,7 +124,8 @@ def test_generate_correct_values_intervals_layout_and_preservation(
         t.get_text() for t in quantile.get_legend().get_texts()
     ] == plot.STAT_LABELS
     assert (tmp_path / "complete_multiway_summary.csv").exists()
-    # Render-only redraws the same two figures from the saved summary.
+    # Render-only redraws the same figures from the saved summary and pairs.
+    frame.to_csv(tmp_path / "complete_matched_pairs.csv", index=False)
     saved.clear()
     plot.render_top_row(tmp_path)
     assert sorted(saved) == sorted(TOP_ROW_FIGURES)
@@ -199,7 +204,11 @@ def test_cli_records_complete_cohort_and_uses_new_names(
     assert snapshot["include_olmo_same_model"] is True
     assert snapshot["include_modern_reproduction"] is all_arms
     assert all(p in snapshot["manifests"] for p in plot.OLMO_SAME_MANIFESTS)
-    assert not any("win" in p.name or "combined" in p.name for p in saved)
+    assert not any(
+        ("win" in p.name or "combined" in p.name)
+        and p.stem not in {"figure2_combined", "figure2_combined_win", "figure2_win"}
+        for p in saved
+    )
     plot.plt.close("all")
 
 

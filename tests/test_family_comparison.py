@@ -959,7 +959,7 @@ def test_four_animal_comparison_table_has_one_stratified_row_per_comparison_and_
     """The notebook's four animals: per-animal rows plus ONE stratified row per (comparison, mode)."""
     import re
 
-    import scripts.build_transfer_significance_nb as builder
+    import notebooks.builders.build_transfer_significance_nb as builder
 
     animals = json.loads(re.search(r"ANIMALS = (\[[^\]]*\])",
                                    "\n".join(src for _, src in builder.CELLS)).group(1))

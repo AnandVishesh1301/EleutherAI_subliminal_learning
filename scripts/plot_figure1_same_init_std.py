@@ -18,6 +18,8 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from subliminal_learning.utils.io import read_json
+
 
 ANIMALS = ("cat", "dog", "lion", "pig", "rabbit")
 EPOCHS = (1, 2, 5, 10)
@@ -35,10 +37,6 @@ TREATMENT_RE = re.compile(
     r"(?P<dataset>ex10-20_prefix_n(?:40|100)k)/"
     r"ep(?P<epoch>1|2|5|10)_lr1e-4_r8a32/ftseed1"
 )
-
-
-def read_json(path):
-    return json.loads(path.read_text())
 
 
 def preference(path):

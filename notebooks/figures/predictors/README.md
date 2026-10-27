@@ -9,9 +9,9 @@
   correlation). Freezes the per-cell transfer to `recipe_cells_102.csv`; writes `predictor_r2_table.csv` here and the LaTeX fragment
   `docs/drafts/predictor_r2_table.tex`. Sources: `notebooks/figures/teacher_dce_vs_transfer_102.csv`
   (transfer, teacher p, excess CE, self-screen steerability),
-  `teachers/dog/pythia-160m/<tag>/steerability/{self,steer_data-seed1}/aggregate.json` (ungated
-  steering deltas, frozen to `steer_screens_102.csv`; the ds1 cross screen predicts ds1 transfer,
-  the self screen same-model transfer) and
+  `teachers/dog/pythia-160m/<tag>/steerability/{self,steer_<target>}/aggregate.json` (ungated
+  steering deltas, frozen to `steer_screens_102.csv`; each receiver column uses the screen into
+  its own base: self for orig, steer_data-seed1/2/3 and steer_weight-seed1/2/3 for the siblings) and
   `docs/results/data/sequence_length_transfer_20260924_teacher_rows.csv` (length).
   The rank column reproduces the partial Spearman values quoted in the appendix.
 

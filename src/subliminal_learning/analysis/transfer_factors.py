@@ -287,7 +287,7 @@ def load_core65_population(output_root: Path, repo_root: Path, refresh: bool = T
                            dataset_by_teacher: dict[str, str] | None = None):
     """The core65 cross-arm seed-run population with its integrity readouts and anchored cut.
 
-    The C3 loading path of `forgetting/notebooks/collapse_claims.ipynb` (cells 1/8) as one call: core65
+    The C3 loading path of the lora-forgetting repo's `notebooks/collapse_claims.ipynb` (cells 1/8) as one call: core65
     cells x the design's shared top-10 teachers x 4 animals x 6 bases, joined to the pile-probe
     cache (pool pp1) and to each receiver base's unigram crossing. The teacher set is the
     design's (the same 10 tags on every arm, so per-arm K* is not composition-confounded); the
@@ -423,7 +423,7 @@ def _pairwise_spearman(wide: pd.DataFrame, levels: list, min_n: int = 3) -> tupl
     Diagonal is ``rho=1`` with ``n`` = that level's own non-NaN count; off-diagonal cells with fewer
     than ``min_n`` shared rows come back ``rho=NaN`` (``n`` still reported).
     """
-    from scipy.stats import spearmanr
+    from subliminal_learning.stats.core import partial_correlation
 
     rho = pd.DataFrame(np.nan, index=levels, columns=levels, dtype=float)
     n = pd.DataFrame(0, index=levels, columns=levels, dtype=int)
@@ -434,7 +434,7 @@ def _pairwise_spearman(wide: pd.DataFrame, levels: list, min_n: int = 3) -> tupl
             if a == b:
                 rho.loc[a, b] = 1.0
             elif len(pair) >= min_n and pair[a].nunique() > 1 and pair[b].nunique() > 1:
-                rho.loc[a, b] = float(spearmanr(pair[a], pair[b])[0])
+                rho.loc[a, b] = partial_correlation(pair[a], pair[b], method="spearman", min_n=min_n).rho
     return rho, n
 
 

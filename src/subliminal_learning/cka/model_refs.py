@@ -228,7 +228,7 @@ def checkpoint_hash(mref: ModelRef) -> str | None:
     if mref.kind == "base" or mref.checkpoint_dir is None:
         return None
     if mref.finetune_mode == "lora":
-        from pipelines.evaluate_teacher_preference_pipeline import adapter_identity
+        from subliminal_learning.utils.run_io import adapter_identity
 
         return adapter_identity(mref.checkpoint_dir)
     h = hashlib.sha256()

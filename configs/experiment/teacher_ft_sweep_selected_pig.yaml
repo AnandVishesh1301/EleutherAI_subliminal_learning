@@ -1,7 +1,0 @@
-# Selected teacher sweep: run this first on one animal and one base model.
-# The same file can be passed to BOTH sweep_teacher_templates (training) and
-# sweep_evaluate_teacher_preference (validation), because it contains selection,
-# training-grid, and eval settings together.
-
-extends: teacher_ft_sweep_selected.yaml
-grid: {learning_rate: [1.0e-3, 5.0e-4, 2.0e-4, 1.0e-4]}

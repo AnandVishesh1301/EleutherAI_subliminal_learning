@@ -2,6 +2,6 @@
 DCLM/C4/Dolma text pools, used by training, final evals and the transfer analyses.
 
 The Pile coherence eval (teacher-forced CE on packed Pile windows vs the model's own base,
-paired block bootstrap on ΔCE) and the unigram anchor moved to
-``subliminal_learning.forgetting.coherence``.
+paired block bootstrap on ΔCE) and the unigram anchor moved to the lora-forgetting repo
+(``lora_forgetting.coherence``).
 """

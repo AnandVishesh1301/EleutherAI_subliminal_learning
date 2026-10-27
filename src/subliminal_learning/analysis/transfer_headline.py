@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -298,8 +299,14 @@ def registry_headline_arms(arms_json: str | Path, names: Sequence[str], *,
 #: The ``(data order, direction)`` keys of `xwidth_arms`; ``up`` = small → large (160m sender).
 XWIDTH_KEYS = (("same", "up"), ("same", "down"), ("different", "up"), ("different", "down"))
 
-#: Name suffix of a nested teacher-subset arm (`xwidth_arms`'s nested-subset rule).
-TOP5_SUFFIX = ", top5"
+#: Name suffix of a nested teacher-subset arm, ``, top<k>`` (`xwidth_arms`'s nested-subset rule).
+TOP_SUFFIX = re.compile(r", top(\d+)$")
+
+
+def top_k(name: str) -> int | None:
+    """The ``k`` of an arm named ``…, top<k>``; ``None`` for any other name."""
+    m = TOP_SUFFIX.search(name)
+    return int(m.group(1)) if m else None
 
 
 def _registry(arms_json: str | Path | Mapping) -> dict:
@@ -328,14 +335,14 @@ def xwidth_arms(arms_json: str | Path | Mapping, *,
     direction)`` (`XWIDTH_KEYS`), classified with `tfr.pythia_width_relation` (seed-label rule),
     in registry order. Pools never mix data orders.
 
-    Nested-subset rule: an arm named ``…, top5`` is left out when a registered arm with the same
+    Nested-subset rule: an arm named ``…, top<k>`` (any k) is left out when a registered arm with the same
     sender, receiver and animal lists a strict teacher superset AND that arm is finished;
     otherwise it stays. Unfinished arms are kept (the loaders turn them into coverage rows).
 
     Args:
         arms_json: The xarch registry (path, or the parsed dict).
         finished: ``name -> finished on disk``; defaults to a `registry_headline_arms` read
-            (only asked for a superset arm of a ``top5`` arm).
+            (only asked for a superset arm of a ``top<k>`` arm).
         output_root: Output tree root of the default `finished` check.
     """
     reg = _registry(arms_json)
@@ -347,7 +354,7 @@ def xwidth_arms(arms_json: str | Path | Mapping, *,
         key = tfr.pythia_width_relation(tio.base_name(a["sender"]), tio.base_name(a["receiver"]))
         if key is None:
             continue
-        if a["name"].endswith(TOP5_SUFFIX) and any(
+        if top_k(a["name"]) is not None and any(
                 b["name"] != a["name"] and (b["sender"], b["receiver"]) == (a["sender"],
                                                                          a["receiver"])
                 and set(a["teachers"]) < set(b["teachers"]) and finished(b["name"])
@@ -359,7 +366,7 @@ def xwidth_arms(arms_json: str | Path | Mapping, *,
 
 def xwidth_label(names: Sequence[str]) -> str:
     """The `HeadlineFamily.arms_label` of a cross-width arm set: ``"160m→410m, … (N)"``."""
-    short = [n.replace(" (dog)", "").replace(" → ", "→").replace(TOP5_SUFFIX, " top5")
+    short = [TOP_SUFFIX.sub(r" top\1", n.replace(" (dog)", "").replace(" → ", "→"))
              for n in names]
     return f"{', '.join(short)} ({len(names)})"
 

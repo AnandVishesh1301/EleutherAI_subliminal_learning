@@ -458,26 +458,26 @@ def _comparison_df():
          "Mean P-value": 0.9, "Win Prob.": 0.4, "Win P-value": 0.8, "stratified": True}])
 
 
-def test_comparison_latex_has_fourteen_columns_and_bolds_only_significant_p():
+def test_comparison_latex_has_thirteen_columns_and_bolds_only_significant_p():
     tex = tc.comparison_table_latex(_comparison_df())
     body = [ln for ln in tex.splitlines() if ln.endswith(r"\\")]
     assert len(body) == 4          # the # HP group row, the header row, two data rows
     assert body[0].count(r"\multicolumn{3}{c}{\# HP}") == 1
-    assert r"\cmidrule(lr){6-8}" in tex                 # the # HP group: trimmed both sides
-    assert r"\begin{tabular}{@{}l l l l l r r r l l r r r r@{}}" in tex
+    assert r"\cmidrule(lr){5-7}" in tex                 # the # HP group: trimmed both sides
+    assert r"\begin{tabular}{@{}l l l l r r r l l r r r r@{}}" in tex
     assert r"\setlength{\tabcolsep}{3pt}" in tex and r"\ifdim\width>\textwidth" in tex
     # a right-aligned numeric column's stacked header is right-aligned too
     assert r"\begin{tabular}[c]{@{}r@{}}Mean \\ P-value\end{tabular}" in tex
     # the wide text headers are stacked over two LEFT-aligned lines
-    for parts in (("Model", "Family"), ("Treatment", "Effect Mode")):
-        assert (r"\begin{tabular}[c]{@{}l@{}}%s \\ %s\end{tabular}" % parts) in tex
+    assert r"\begin{tabular}[c]{@{}l@{}}Treatment \\ Effect Mode\end{tabular}" in tex
+    assert "Family" not in tex
     for line in body[1:]:
-        assert len(line.removesuffix(r"\\").split(" & ")) == 14
+        assert len(line.removesuffix(r"\\").split(" & ")) == 13
     body_tex = "\n".join(body)
     assert body_tex.count(r"\textbf{") == 2   # the 1e-4 and the 0.02 only (the caption bolds too)
     assert r"\textbf{1e-4}" in tex and r"\textbf{0.02}" in tex
     assert r"\textbf{0.4}" not in tex and r"\textbf{0.9}" not in tex
-    assert r"\{160M, ds1--3\}$^{2}$" in tex and "→" not in tex and "↔" not in tex
+    assert r"ds1--3\}$^{2}$" in tex and "→" not in tex   # set cut onto the block's free row and "↔" not in tex
     assert tex.count("#") == tex.count(r"\#")
     assert r"\multirow" not in tex and r"\begin{tabular}" in tex
     assert tex.startswith("% requires ") and tc._RESIZEBOX in tex
@@ -485,12 +485,33 @@ def test_comparison_latex_has_fourteen_columns_and_bolds_only_significant_p():
     assert "p{" not in tex and "Different" not in tex and "different" not in tex
     assert r"\begin{tabular}[t]" not in tex      # body cells are spread over rows, not stacked
     rows = [ln.removesuffix(r"\\").split(" & ") for ln in body][2:]
-    assert [r[0].strip() for r in rows] == ["Pythia", ""]     # block label on the first row only
-    assert [r[2].strip() for r in rows] == [r"\{160M, fs1--3\}", ""]
-    assert rows[0][1].strip() and len(rows[0][1].split()) <= 2     # Comparison: <= 2 words/line
+    assert [r[1].strip() for r in rows] == [r"\{160M,", r"fs1--3\}"]   # cut onto the free row
+    assert rows[0][0].strip() and len(rows[0][0].split()) <= 2     # Comparison: <= 2 words/line
     assert tex.count(r"$\Delta$") >= 1 and "p_{\\mathrm{student}}" not in tex
     assert r"$\Delta$ / prior" in tex
     assert "Exceedance" not in tex and "Design" not in tex
+
+
+def _two_family_comparison_df():
+    py = _comparison_df()
+    cat = py.iloc[[0]].assign(Animal="cat", **{"Arms A": "{wc1, wc2}²"})
+    olmo = py.iloc[[0]].assign(**{"Model Family": tc.OLMO_FAMILY, "Animal": "elephant",
+                                  "Arms A": "{Dolma1.7, DCLM}", "Arms B": "{C4, DCLM}²"})
+    return pd.concat([py.iloc[[0]], cat, py.iloc[[1]], olmo], ignore_index=True)
+
+
+def test_comparison_latex_splits_by_family_and_filters_animals():
+    df = _two_family_comparison_df()
+    py = tc.comparison_table_latex(df, family="Pythia", animals=tc.COMPARISON_PYTHIA_ANIMALS)
+    header = [ln for ln in py.splitlines() if ln.endswith(r"\\")][1]
+    assert header.count(" & ") + 1 == 13 and "Family" not in py
+    assert " & dog & " in py and " & All & " in py and "cat" not in py and "wc1" not in py
+    assert "Dolma1.7" not in py and "elephant" not in py
+    olmo = tc.comparison_olmo_table_latex(df)
+    assert r"\label{tab:olmo_comparison}" in olmo and "DataDecide OLMo-1B.}" in olmo
+    rows = [ln for ln in olmo.splitlines() if ln.endswith(r"\\")][2:]
+    assert " & elephant & " in olmo and not any(a in olmo for a in (" & dog & ", " & All & "))
+    assert rows and "160M" not in olmo
 
 
 def test_style_comparison_table_hides_the_leading_grouping_columns():
@@ -808,7 +829,7 @@ def test_comparison_latex_rules_a_full_midrule_at_the_model_family_change():
     tex = tc.comparison_table_latex(df)
     body = [ln for ln in tex.splitlines() if ln.endswith(r"\\")]
     for line in body[1:]:
-        assert len(line.removesuffix(r"\\").split(" & ")) == 14
+        assert len(line.removesuffix(r"\\").split(" & ")) == 13
     lines = tex.splitlines()
     head = lines.index(r"\midrule")                      # the one under the header
     assert r"\midrule" in lines[head + 1:]               # plus one at the family change
@@ -899,13 +920,17 @@ def test_a_diverged_run_is_a_complete_run_excluded_from_the_table_and_the_compar
 
 def test_the_comparison_caption_is_the_relative_strength_paragraph():
     tex = tc.comparison_table_latex(_comparison_df())
-    assert (r"\caption{\textbf{Relative Strength of transfer between pretraining conditions.} "
-            r"We compare pretraining conditions") in tex
+    assert (r"\caption{\textbf{Relative Strength of transfer between pretraining conditions in "
+            r"Pythia.} We compare pretraining conditions") in tex
     assert "the sign of the Difference in Means" not in tex
     assert r"computing Difference in Means and Win Probability statistics on both " \
-           r"($\Delta=$p(student) - p(control)) and $\Delta/$prior. Bold = two-sided $p < 0.05$}" in tex
+           r"($\Delta=p_\mathrm{student} - p_\mathrm{control}$) and $\Delta/$prior. Rows: dog, and all four " \
+           r"animals pooled. A positive Difference in Means, or a Win Probability above 0.5, " \
+           r"means the condition named first under Comparison transfers more strongly. " \
+           r"Bold = two-sided " \
+           r"$p < 0.05$}" in tex
     assert r"Bold = two-sided $p < 0.05$}" in tex             # no trailing period, as given
-    assert r"\label{tab:transfer_comparison}" in tex
+    assert r"\label{tab:pythia_comparison}" in tex
     assert "arm-relabelling null within" not in tex           # the old legend is gone
 
 
@@ -926,6 +951,8 @@ def test_render_script_round_trips_a_pickled_frame(tmp_path):
     assert (tmp_path / f"{rt.EXISTENCE}.tex").read_text() == tc.condition_table_latex(_latex_df())
     rendered = (tmp_path / f"{rt.COMPARISON}.tex").read_text()
     assert rendered == tc.comparison_table_latex(_comparison_df())   # EFFECT_LONG normalised
+    olmo = (tmp_path / f"{rt.COMPARISON_OLMO}.tex").read_text()        # no OLMo rows: empty body
+    assert r"\label{tab:olmo_comparison}" in olmo and "160M" not in olmo
     widest = rt.widest_cells(_latex_df(), rt.WIDTH_COLUMNS[rt.EXISTENCE])
     assert widest["Model Family"] == ("DataDecide", len("DataDecide"))
     assert all(w <= tc._ARMS_WIDTH for _, w in [widest["Arms"]])
@@ -1008,3 +1035,114 @@ def test_split_set_never_cuts_folded_seed_list():
     parts = _split_set("{160M, fs1,2, fs3, rerun 160M}")
     assert all(not p.endswith("fs1,") for p in parts) and " ".join(parts).count("fs1,2") == 1
     assert _split_set("{160M, fs1–3, ds1, ds2, rerun 160M}") == ["{160M, fs1–3, ds1,", "ds2, rerun 160M}"]
+
+
+def test_arms_parts_within_split_into_the_fewest_parts_under_the_width():
+    split = tc._arms_parts_within(12)
+    assert split("{Dolma1.7, DCLM, C4}") == ["{Dolma1.7,", "DCLM, C4}"]
+    assert split("{Dolma1.7, DCLM, C4}²") == ["{Dolma1.7,", "DCLM, C4}²"]
+    # "C4}² → seed2" is exactly 12, so three parts suffice; "{DCLM, Dolma1.7," (16) never appears
+    assert split("{DCLM, Dolma1.7, C4}² → seed2") == ["{DCLM,", "Dolma1.7,", "C4}² → seed2"]
+    assert split("{410M-seed2,3, x} → y") == ["{410M-seed2,3,", "x} → y"]   # folded list kept
+    assert split("{a, b}; {Dolma1.7, DCLM}") == ["{a, b}", "{Dolma1.7,", "DCLM}"]
+
+
+def test_comparison_latex_arms_width_narrows_the_arms_and_none_is_unchanged():
+    df = _comparison_df().assign(**{"Arms A": "{Dolma1.7, DCLM, C4}",
+                                    "Arms B": "{DCLM, Dolma1.7, C4}² → seed2"})
+    before = tc.comparison_table_latex(df)
+    narrow = tc.comparison_table_latex(df, arms_width=12)
+    assert tc.comparison_table_latex(df, arms_width=None) == before
+    assert narrow != before
+    body = [ln.removesuffix(r"\\").split(" & ") for ln in narrow.splitlines()
+            if ln.endswith(r"\\")][2:]
+    plain = [c.strip().replace("\\{", "{").replace("\\}", "}").replace("$^{2}$", "²")
+             .replace("$\\to$", "→") for r in body for c in r[1:3]]
+    assert max(map(len, plain)) <= 12
+
+
+def test_comparison_latex_arms_width_wraps_the_comparison_uncapped():
+    df = _comparison_df().assign(**{
+        "Comparison": "Same init, diff. data corpus vs diff. init, diff. data corpus",
+        "Arms A": "{Dolma1.7, DCLM, C4}²", "Arms B": "{DCLM, Dolma1.7, C4}² → seed2"})
+    body = [ln.removesuffix(r"\\").split(" & ") for ln in
+            tc.comparison_table_latex(df, arms_width=12).splitlines() if ln.endswith(r"\\")][2:]
+    lines = [r[0].strip() for r in body if r[0].strip()]
+    assert lines == ["Same init,", "diff. data", "corpus vs", "diff. init,", "diff. data",
+                     "corpus"]
+    assert max(map(len, lines)) <= 14
+
+
+_W160 = ["160M", "fs1", "fs2", "fs3"]
+_W410 = ["410M", "410M-seed1", "410M-seed2", "410M-seed3"]
+
+
+@pytest.mark.parametrize("which", ["matched", "unmatched", "grid"])
+@pytest.mark.parametrize("up", [True, False])
+def test_compress_arms_factors_the_pythia_width_grid(which, up):
+    grid = [(a, b) for a in _W160 for b in _W410]
+    matched = list(zip(_W160, _W410))
+    edges = {"matched": matched, "grid": grid,
+             "unmatched": [e for e in grid if e not in matched]}[which]
+    if not up:
+        edges = [(b, a) for a, b in reversed(edges)]
+    small, large = "{160M, fs1–3}", "{410M, seed1–3}"
+    text = tc.compress_arms(edges)
+    assert text == (f"{small} → {large}" if up else f"{large} → {small}")
+    assert tc.seed_factor_notes([text]) == [tc.SEED_FACTOR_NOTE]
+
+
+def test_compress_arms_keeps_an_incomplete_width_set_listed():
+    grid = [(a, b) for a in _W160 for b in _W410]
+    edges = [e for e in grid if e not in set(zip(_W160, _W410))][:-1]
+    text = tc.compress_arms(edges)
+    assert "; " in text and tc.seed_factor_notes([text]) == []
+    assert "seed-matched pairs" in tc.SEED_FACTOR_NOTE
+
+
+def test_arms_parts_wrap_the_width_factored_form_after_its_arrow():
+    assert tc._arms_parts("{410M, seed1–3} → {160M, fs1–3}") == ["{410M, seed1–3} →",
+                                                                  "{160M, fs1–3}"]
+
+
+def _fit_frame(blocks):
+    rows = [{"Pretraining Condition": cond, "Arms": f"a{i} → b{i}"}
+            for i, (cond, n) in enumerate(blocks) for _ in range(n)]
+    return pd.DataFrame(rows)
+
+
+def test_fit_wraps_a_phrase_only_when_that_narrows_the_column():
+    df = _fit_frame([("Diff. model arch., diff. data corpus, small to large", 3),
+                     ("Diff. model size, diff. data order, small to large", 6)])
+    _, _, cells = tc._spread_cells(df, ["Pretraining Condition", "Arms"],
+                                   {"Pretraining Condition": 1})
+    lines = [cells[(s, "Pretraining Condition")] for s in range(9)]
+    assert lines[:3] == ["Diff. model arch.", "Diff. data corpus", "Small to large"]
+    assert lines[3:6] == ["Diff. model size", "Diff. data order", "Small to large"]
+
+
+def test_fit_still_wraps_a_phrase_wider_than_the_column():
+    df = _fit_frame([("Diff. init", 1), ("Diff. model size, same data order", 4)])
+    _, _, cells = tc._spread_cells(df, ["Pretraining Condition", "Arms"],
+                                   {"Pretraining Condition": 1})
+    assert [cells[(s, "Pretraining Condition")] for s in range(1, 5)] == [
+        "Diff. model", "size", "Same data", "order"]
+    assert cells[(0, "Pretraining Condition")] == "Diff. init"
+
+
+def test_arms_use_the_rows_a_block_already_has():
+    long = "{160M, fs1–3, ds1–3, rerun 160M}"
+    df = pd.DataFrame([{"k": k, "Arms": arms} for k, arms, n in
+                       [("a", long, 4), ("b", "{160M, fs1–3, x}", 1)] for _ in range(n)])
+    _, _, cells = tc._spread_cells(df, ["k", "Arms"], {"Arms": 1}, packed=["Arms"])
+    lines = [cells[(s, "Arms")] for s in range(4)]
+    assert lines[-1] == "" and max(map(len, lines)) <= 16      # W = the 1-row block's 16
+    assert " ".join(lines).strip() == long and lines[2] == "rerun 160M}"
+    assert cells[(4, "Arms")] == "{160M, fs1–3, x}"
+
+
+def test_arms_packing_leaves_a_two_row_block_alone():
+    df = pd.DataFrame([{"k": "b", "Arms": "{160M, fs1–3, ds1–3, rerun 160M}"}] * 2)
+    _, _, kept = tc._spread_cells(df, ["k", "Arms"], {"Arms": 1}, packed=["Arms"])
+    _, _, old = tc._spread_cells(df, ["k", "Arms"], {"Arms": 1})
+    assert kept == old and kept[(0, "Arms")] == "{160M, fs1–3, ds1–3,"

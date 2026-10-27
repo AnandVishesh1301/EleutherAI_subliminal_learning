@@ -3,6 +3,7 @@ import json
 import pytest
 
 from scripts import resampling_first_only_early as early
+from subliminal_learning.utils.io import file_sha256
 
 
 def row(prompt, completion, numbers):
@@ -57,7 +58,7 @@ def prepared(tmp_path, monkeypatch):
             path.write_text("".join(json.dumps(r) + "\n" for r in data))
             (path.parent / "manifest.json").write_text(
                 json.dumps(
-                    {"n_filtered": 2, "filtered_sha256": early.controls._sha256(path)}
+                    {"n_filtered": 2, "filtered_sha256": file_sha256(path)}
                 )
             )
     frozen = early.prepare(root, campaign)

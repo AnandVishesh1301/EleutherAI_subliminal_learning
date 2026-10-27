@@ -2,10 +2,9 @@
 # 13-checkpoint 75k..143k window, all ordered teacher->student pairs.
 extends: ckpt_distill_sweep.yaml
 steps: [75000, 80000, 85000, 90000, 95000, 100000, 105000, 110000, 115000, 120000, 125000, 130000, 143000]
-pairs: {topology: full, explicit: []}
+pairs: {topology: full}
 animals: [cat]
 teacher:
   param_tags: [ep20_lr1e-4_r16a32, ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8, ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16]
 jobq: {cwd: null, queue_prefix: ckpt-cat-orig13-20260914,
-       priorities: {teacher: 47, numgen: 47, distill: 47},
-       mem_mib: {teacher: 16000, numgen: 24000, distill: 20000}}
+       priorities: {teacher: 47, numgen: 47, distill: 47}}

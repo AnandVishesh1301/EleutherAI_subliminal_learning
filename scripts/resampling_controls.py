@@ -28,6 +28,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from subliminal_learning.utils.io import file_sha256
+
 from subliminal_learning.jobq_folder import (
     assert_configured_queue_folder,
     configured_queue_folder,
@@ -163,12 +165,8 @@ def resolve_arm(arm: str) -> str:
     raise ValueError(f"unknown arm: {arm}")
 
 
-def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for block in iter(lambda: f.read(1 << 20), b""):
-            h.update(block)
-    return h.hexdigest()
+# Alias kept: run_logs/campaigns/*/ import `_sha256` from this module.
+_sha256 = file_sha256
 
 
 def home_pool_dir(output_root: Path, home: str) -> Path:
@@ -393,7 +391,7 @@ def write_pool(
     digest = hashlib.sha256(text.encode()).hexdigest()
     filtered = out / "filtered.jsonl"
     # Never overwrite a pool on which another run may already have trained.
-    if filtered.exists() and _sha256(filtered) != digest:
+    if filtered.exists() and file_sha256(filtered) != digest:
         raise ValueError(f"derived pool drift: {filtered}")
     out.mkdir(parents=True, exist_ok=True)
     manifest = {
@@ -414,8 +412,8 @@ def write_pool(
         "parents": {
             k: {
                 "filtered_path": str(p),
-                "filtered_sha256": _sha256(p),
-                "manifest_sha256": _sha256(p.parent / "manifest.json"),
+                "filtered_sha256": file_sha256(p),
+                "manifest_sha256": file_sha256(p.parent / "manifest.json"),
             }
             for k, p in parents.items()
         },
@@ -508,7 +506,7 @@ def run_cell(
     dataset = pool_dir(output_root, arm, pool_seed)
     manifest = json.loads((dataset / "manifest.json").read_text())
     if (
-        manifest["filtered_sha256"] != _sha256(dataset / "filtered.jsonl")
+        manifest["filtered_sha256"] != file_sha256(dataset / "filtered.jsonl")
         or manifest["n_filtered"] != N
     ):
         raise ValueError("derived pool hash/size mismatch")

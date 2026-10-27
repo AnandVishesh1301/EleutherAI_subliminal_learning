@@ -19,11 +19,14 @@ and control (paired comparisons, same idea as the eval's common-random-numbers).
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
 import numpy as np
+
+from subliminal_learning.config import load_yaml_extends
 
 DEFAULT_TEMPLATES_PATH = Path("data/number_prompts/sequence_intro_templates.json")
 
@@ -220,3 +223,100 @@ def build_intro_prompts(
         text = f"{intro}\n" if p.separator_key == "newline" else intro
         prompts.append(NumberPrompt(text=text, separator_key=p.separator_key, examples=()))
     return tuple(prompts)
+
+
+# ---- the number prompt-set config (shared by number generation and the trajectory readers) --
+
+
+@dataclass(frozen=True)
+class NumberPromptSetConfig:
+    """The shared prompt set (pure function of these fields; see `prompt_gen`).
+
+    Attributes:
+        templates_path: Intro-template bank JSON.
+        n_prompts: Prompts to build (= raw completions drawn).
+        seed: PCG64 seed (Cloud fixes 42).
+        example_count_min: Min ICL examples per prompt (inclusive).
+        example_count_max: Max ICL examples per prompt (inclusive).
+        example_value_min: Min example value (inclusive).
+        example_value_max: Max example value (inclusive).
+        separator_weights: Relative weight per separator key (comma/space/...).
+    """
+
+    templates_path: Path
+    n_prompts: int
+    seed: int = 42
+    example_count_min: int = 10
+    example_count_max: int = 20
+    example_value_min: int = 100
+    example_value_max: int = 999
+    separator_weights: Mapping[str, float] | None = None
+
+    def __post_init__(self) -> None:
+        if self.n_prompts <= 0:
+            raise ValueError(f"n_prompts must be positive, got {self.n_prompts}")
+        if self.example_count_min <= 0:
+            raise ValueError("example_count_min must be positive")
+        if self.example_count_min > self.example_count_max:
+            raise ValueError("example_count_min must be <= example_count_max")
+        if self.example_value_min > self.example_value_max:
+            raise ValueError("example_value_min must be <= example_value_max")
+        if self.separator_weights is not None:
+            unknown = set(self.separator_weights) - set(SEPARATORS)
+            if unknown:
+                raise ValueError(
+                    f"unknown separator keys {sorted(unknown)}; known: {sorted(SEPARATORS)}"
+                )
+            weights = list(self.separator_weights.values())
+            if not weights:
+                raise ValueError("separator_weights must not be empty")
+            if any(not math.isfinite(float(w)) or float(w) < 0 for w in weights):
+                raise ValueError("separator_weights must be finite and non-negative")
+            if sum(float(w) for w in weights) <= 0:
+                raise ValueError("separator_weights must have positive total weight")
+
+
+def load_number_prompt_set(path: Path) -> NumberPromptSetConfig:
+    """Parse the templates_path + prompt_set block of number_generation.yaml."""
+    doc = load_yaml_extends(path)
+    ps = doc["prompt_set"]
+    return NumberPromptSetConfig(
+        templates_path=Path(doc["templates_path"]),
+        n_prompts=int(ps["n_prompts"]),
+        seed=int(ps.get("seed", 42)),
+        example_count_min=int(ps.get("example_count_min", 10)),
+        example_count_max=int(ps.get("example_count_max", 20)),
+        example_value_min=int(ps.get("example_value_min", 100)),
+        example_value_max=int(ps.get("example_value_max", 999)),
+        separator_weights=ps.get("separator_weights"),
+    )
+
+
+def prompt_set_tag(
+    prompt_set: "NumberPromptSetConfig",
+    constrained: "ConstrainedGenConfig | None" = None,  # noqa: F821 -- pipelines.generate_numbers_pipeline
+) -> str:
+    """Path segment naming the prompt-set variant, e.g. ``ex10-20``.
+
+    Keyed on the in-context example-count range so datasets generated from prompt
+    sets with more/fewer demonstrations live SIDE BY SIDE (different dirs) instead
+    of clobbering one raw pool. Other prompt-set knobs still gate resume through
+    ``prompts_hash`` (they regenerate in place); the example range is the axis
+    meant to be varied, so it gets its own path.
+
+    For a constrained pool the tag carries the grammar cell so the four constrained
+    variants (and the free pool) never collide: base is ``intro`` for intro-style
+    prompts else the ex tag; then ``-c{count_max}`` (exact) or ``-u{count_max}``
+    (early-eos allowed); then ``x{value_min}-{value_max}`` only when the value range
+    differs from the default (0, 999). ``constrained=None`` returns the byte-identical
+    free-pool tag (existing on-disk dirs depend on it).
+    """
+    ex_tag = f"ex{prompt_set.example_count_min}-{prompt_set.example_count_max}"
+    if constrained is None:
+        return ex_tag
+    base = "intro" if constrained.prompt_style == "intro" else ex_tag
+    letter = "u" if constrained.allow_early_eos else "c"
+    tag = f"{base}-{letter}{constrained.count_max}"
+    if (constrained.value_min, constrained.value_max) != (0, 999):
+        tag += f"x{constrained.value_min}-{constrained.value_max}"
+    return tag

@@ -152,3 +152,9 @@ def build_record(man: dict, run_dir: Path, n_rows: int, ce_student: float, ce_ba
 
 # The CLI was retired 2026-08-22: `scripts.run_final_evals --evals fidelity` writes the
 # identical record through these helpers (one adapter load shared with probe/shuffle).
+
+
+def _rotate1(rows: list[dict]) -> list[dict]:
+    """Deterministic derangement: row i's prompt with row i+1's completion."""
+    return [{"prompt": rows[i]["prompt"], "completion": rows[(i + 1) % len(rows)]["completion"]}
+            for i in range(len(rows))]

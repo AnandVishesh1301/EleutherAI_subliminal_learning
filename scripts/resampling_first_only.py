@@ -20,7 +20,7 @@ from subliminal_learning.numbers.resampling import (
     pool_stats,
     replace_first_number_from_pair,
 )
-from subliminal_learning.utils.io import atomic_write_json, atomic_write_text
+from subliminal_learning.utils.io import atomic_write_json, atomic_write_text, file_sha256
 
 N = 10000
 ARM = "step125000_synthfirstonly"
@@ -51,13 +51,13 @@ def read_parent(path: Path) -> tuple[list[dict], dict]:
     if (
         len(data) != N
         or manifest["n_filtered"] != N
-        or manifest["filtered_sha256"] != controls._sha256(path)
+        or manifest["filtered_sha256"] != file_sha256(path)
     ):
         raise ValueError(f"parent hash or row-count mismatch: {path}")
     return data, {
         "filtered_path": str(path),
-        "filtered_sha256": controls._sha256(path),
-        "manifest_sha256": controls._sha256(manifest_path),
+        "filtered_sha256": file_sha256(path),
+        "manifest_sha256": file_sha256(manifest_path),
     }
 
 
@@ -140,7 +140,7 @@ def build(root: Path, pool_seed: int = 0) -> tuple[Path, dict]:
             "pool_stats": json.loads(json.dumps(pool_stats(result))),
         }
         if (
-            controls._sha256(filtered) != digest
+            file_sha256(filtered) != digest
             or any(manifest.get(key) != value for key, value in expected.items())
             or manifest.get("params", {}).get("generation", {}).get("source")
             != "paired_first_number_replacement"
@@ -174,7 +174,7 @@ def emit(
     pool, manifest = build(root, pool_seed)
     iid_path = input_paths(root, pool_seed)["paired_iid"]
     iid_manifest = json.loads((iid_path.parent / "manifest.json").read_text())
-    iid_sha = controls._sha256(iid_path)
+    iid_sha = file_sha256(iid_path)
     if iid_sha != iid_manifest.get("filtered_sha256"):
         raise ValueError("IID control pool drift")
     campaign_dir.mkdir(parents=True, exist_ok=True)
@@ -242,10 +242,10 @@ def emit(
             "new_gpu_jobs": len(jobs),
             "pool": str(pool),
             "pool_sha256": manifest["filtered_sha256"],
-            "student_training_sha256": controls._sha256(training_target),
+            "student_training_sha256": file_sha256(training_target),
             "control_pool": str(iid_path),
             "control_pool_sha256": iid_sha,
-            "control_manifest_sha256": controls._sha256(
+            "control_manifest_sha256": file_sha256(
                 iid_path.parent / "manifest.json"
             ),
         },
@@ -275,9 +275,9 @@ def run(
             if (campaign_dir / "campaign.json").exists()
             else {}
         )
-        if controls._sha256(iid) != campaign_preview.get(
+        if file_sha256(iid) != campaign_preview.get(
             "control_pool_sha256"
-        ) or controls._sha256(iid.parent / "manifest.json") != campaign_preview.get(
+        ) or file_sha256(iid.parent / "manifest.json") != campaign_preview.get(
             "control_manifest_sha256"
         ):
             raise ValueError("IID control pool drift")
@@ -285,7 +285,7 @@ def run(
         raise ValueError("unsupported control arm")
     if student_seed not in campaign["student_seeds"]:
         raise ValueError("student seed is outside campaign manifest")
-    if campaign["student_training_sha256"] != controls._sha256(
+    if campaign["student_training_sha256"] != file_sha256(
         campaign_dir / "student_training.yaml"
     ):
         raise ValueError("campaign input drift")

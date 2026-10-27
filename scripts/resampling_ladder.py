@@ -39,9 +39,9 @@ from scripts.resampling_controls import (
     N,
     PoolIdentity,
     ROOT,
-    _sha256,
     load_base,
 )
+from subliminal_learning.utils.io import file_sha256
 from subliminal_learning.jobq_folder import (
     assert_configured_queue_folder,
     configured_queue_folder,
@@ -281,7 +281,7 @@ def run_cell(
     dataset = pool_dir(output_root, animal, recipe, step, leaf)
     manifest = json.loads((dataset / "manifest.json").read_text())
     if (
-        manifest["filtered_sha256"] != _sha256(dataset / "filtered.jsonl")
+        manifest["filtered_sha256"] != file_sha256(dataset / "filtered.jsonl")
         or manifest["n_filtered"] != N
     ):
         raise ValueError("derived pool hash/size mismatch")

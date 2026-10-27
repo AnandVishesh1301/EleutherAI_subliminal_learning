@@ -100,8 +100,10 @@ from subliminal_learning.numbers.generation_io import (
     GeneratedCompletion,
     generate_completions,
 )
-from subliminal_learning.numbers.prompt_gen import (
-    SEPARATORS,
+from subliminal_learning.numbers.prompt_gen import (  # noqa: F401 -- prompt_set_tag is re-exported
+    NumberPromptSetConfig,
+    load_number_prompt_set,
+    prompt_set_tag,
     build_intro_prompts,
     build_number_prompts,
     load_intro_templates,
@@ -109,7 +111,7 @@ from subliminal_learning.numbers.prompt_gen import (
 from subliminal_learning.numbers.rng_gen import build_rng_completions
 from subliminal_learning.run_gate import identity_diff
 from subliminal_learning.teachers.run_layout import model_dir_name
-from subliminal_learning.utils.io import atomic_write_text, file_sha256_cached
+from subliminal_learning.utils.io import atomic_write_text, file_sha256_cached, read_jsonl
 
 # Fixed salt for the per-batch sampling seeds (seed = base + batch index). Constant so
 # every teacher/base run shares the stream; unrelated to the eval's sampling salt.
@@ -213,101 +215,6 @@ PENDING_SUFFIX = ".pending"
 def mode_dir(dataset_dir: Path, mode: str) -> Path:
     """Where one filter mode's filtered.jsonl + manifest.json live."""
     return Path(dataset_dir) / MODES_SUBDIR / mode
-
-
-def prompt_set_tag(
-    prompt_set: "NumberPromptSetConfig",
-    constrained: "ConstrainedGenConfig | None" = None,
-) -> str:
-    """Path segment naming the prompt-set variant, e.g. ``ex10-20``.
-
-    Keyed on the in-context example-count range so datasets generated from prompt
-    sets with more/fewer demonstrations live SIDE BY SIDE (different dirs) instead
-    of clobbering one raw pool. Other prompt-set knobs still gate resume through
-    ``prompts_hash`` (they regenerate in place); the example range is the axis
-    meant to be varied, so it gets its own path.
-
-    For a constrained pool the tag carries the grammar cell so the four constrained
-    variants (and the free pool) never collide: base is ``intro`` for intro-style
-    prompts else the ex tag; then ``-c{count_max}`` (exact) or ``-u{count_max}``
-    (early-eos allowed); then ``x{value_min}-{value_max}`` only when the value range
-    differs from the default (0, 999). ``constrained=None`` returns the byte-identical
-    free-pool tag (existing on-disk dirs depend on it).
-    """
-    ex_tag = f"ex{prompt_set.example_count_min}-{prompt_set.example_count_max}"
-    if constrained is None:
-        return ex_tag
-    base = "intro" if constrained.prompt_style == "intro" else ex_tag
-    letter = "u" if constrained.allow_early_eos else "c"
-    tag = f"{base}-{letter}{constrained.count_max}"
-    if (constrained.value_min, constrained.value_max) != (0, 999):
-        tag += f"x{constrained.value_min}-{constrained.value_max}"
-    return tag
-
-
-@dataclass(frozen=True)
-class NumberPromptSetConfig:
-    """The shared prompt set (pure function of these fields; see `prompt_gen`).
-
-    Attributes:
-        templates_path: Intro-template bank JSON.
-        n_prompts: Prompts to build (= raw completions drawn).
-        seed: PCG64 seed (Cloud fixes 42).
-        example_count_min: Min ICL examples per prompt (inclusive).
-        example_count_max: Max ICL examples per prompt (inclusive).
-        example_value_min: Min example value (inclusive).
-        example_value_max: Max example value (inclusive).
-        separator_weights: Relative weight per separator key (comma/space/...).
-    """
-
-    templates_path: Path
-    n_prompts: int
-    seed: int = 42
-    example_count_min: int = 10
-    example_count_max: int = 20
-    example_value_min: int = 100
-    example_value_max: int = 999
-    separator_weights: Mapping[str, float] | None = None
-
-    def __post_init__(self) -> None:
-        if self.n_prompts <= 0:
-            raise ValueError(f"n_prompts must be positive, got {self.n_prompts}")
-        if self.example_count_min <= 0:
-            raise ValueError("example_count_min must be positive")
-        if self.example_count_min > self.example_count_max:
-            raise ValueError("example_count_min must be <= example_count_max")
-        if self.example_value_min > self.example_value_max:
-            raise ValueError("example_value_min must be <= example_value_max")
-        if self.separator_weights is not None:
-            unknown = set(self.separator_weights) - set(SEPARATORS)
-            if unknown:
-                raise ValueError(
-                    f"unknown separator keys {sorted(unknown)}; known: {sorted(SEPARATORS)}"
-                )
-            weights = list(self.separator_weights.values())
-            if not weights:
-                raise ValueError("separator_weights must not be empty")
-            if any(not math.isfinite(float(w)) or float(w) < 0 for w in weights):
-                raise ValueError("separator_weights must be finite and non-negative")
-            if sum(float(w) for w in weights) <= 0:
-                raise ValueError("separator_weights must have positive total weight")
-
-
-def load_number_prompt_set(path: Path) -> NumberPromptSetConfig:
-    """Parse the templates_path + prompt_set block of number_generation.yaml."""
-    doc = load_yaml_extends(path)
-    ps = doc["prompt_set"]
-    return NumberPromptSetConfig(
-        templates_path=Path(doc["templates_path"]),
-        n_prompts=int(ps["n_prompts"]),
-        seed=int(ps.get("seed", 42)),
-        example_count_min=int(ps.get("example_count_min", 10)),
-        example_count_max=int(ps.get("example_count_max", 20)),
-        example_value_min=int(ps.get("example_value_min", 100)),
-        example_value_max=int(ps.get("example_value_max", 999)),
-        separator_weights=ps.get("separator_weights"),
-    )
-
 
 
 def load_number_config(
@@ -597,10 +504,6 @@ def _write_jsonl(path: Path, rows: list[dict]) -> str:
     text = "".join(json.dumps(r) + "\n" for r in rows)
     atomic_write_text(path, text)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _read_jsonl(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
 def generation_provenance(cfg: GenerateNumbersConfig) -> dict:
@@ -1116,7 +1019,7 @@ def apply_filter_mode(
     if isinstance(stored, dict) and raw_manifest.get("generation_provenance") is not None:
         _warn_provenance_drift(out, stored, raw_manifest["generation_provenance"])
 
-    rows = raw_rows if raw_rows is not None else _read_jsonl(dataset_dir / "raw.jsonl")
+    rows = raw_rows if raw_rows is not None else read_jsonl(dataset_dir / "raw.jsonl")
     fr = filter_raw_rows(rows, filters=filters)  # mention telemetry lives in the raw manifest
     # atomic (temp + os.replace) via atomic_write_text; returns the content id of the
     # exact bytes written, so we never re-read the file we just produced.
@@ -1400,7 +1303,7 @@ def run(cfg: GenerateNumbersConfig) -> GenerateNumbersResult:
     pool_params = raw_manifest["params"]  # == requested params unless reused-as-superset
     for name, filters in cfg.filter_modes.items():
         if raw_rows is None and not _mode_is_cached(cfg.out_dir, name, pool_params, filters):
-            raw_rows = _read_jsonl(raw_path)  # load once, share across stale modes
+            raw_rows = read_jsonl(raw_path)  # load once, share across stale modes
         modes[name] = apply_filter_mode(
             cfg.out_dir, name, filters, raw_rows=raw_rows,
         )

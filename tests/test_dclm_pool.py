@@ -57,9 +57,6 @@ def _universe(n=40, seed=0):
             for i in range(n)]
 
 
-# ------------------------------------------------------------------ index reading
-
-
 def test_megatron_documents_reads_spans_and_drops_the_trailing_eod(tmp_path):
     docs = _universe(5)
     md = dc.MegatronDocuments(_write_megatron(tmp_path, docs))
@@ -79,9 +76,6 @@ def test_heldout_stem_names_the_paths_key_when_unconfigured(monkeypatch):
     monkeypatch.setattr("subliminal_learning.config.load_paths_local", lambda: {})
     with pytest.raises(ValueError, match=dc.STEM_KEY):
         dc.heldout_stem()
-
-
-# ------------------------------------------------------------------ pool semantics
 
 
 def test_build_dclm_pool_follows_pp1_selection_semantics(tmp_path):
@@ -112,9 +106,6 @@ def test_build_dclm_pool_rejects_an_incompatible_vocabulary(tmp_path):
     with pytest.raises(ValueError, match="vocabulary"):
         dc.build_dclm_pool(_Tok(vocab=100), 8, max_tokens=50, seed=0, stem=stem,
                            use_frozen=False)
-
-
-# ------------------------------------------------------------------ frozen artifact
 
 
 def _freeze(tmp_path, pool, **over):
@@ -167,7 +158,6 @@ def test_shipped_cp1_artifact_matches_the_pinned_sha():
     assert dc.pool_from_records(recs, meta).token_sha256() == pio.CP1_TOKEN_SHA
 
 
-
 @pytest.mark.parametrize("bad,kwargs", [
     (dict(max_tokens=999), {}),
     (dict(permutation_seed=7), {}),
@@ -187,9 +177,6 @@ def test_frozen_gate_rejects_a_recipe_mismatch(tmp_path, monkeypatch, bad, kwarg
     pool = dc.build_dclm_pool(_Tok(), 8, max_tokens=50, seed=0, **kwargs)
     assert rebuilt, "the recipe mismatch should have fallen back to the source"
     assert pool.input_ids == built.input_ids
-
-
-# ------------------------------------------------------------- source verification
 
 
 def test_verification_passes_when_the_live_source_matches(tmp_path):
@@ -226,9 +213,6 @@ def test_verification_fails_on_a_same_size_reordered_source(tmp_path):
         dc.verify_frozen_against_source(dc.MegatronDocuments(other), recs, meta)
 
 
-# ------------------------------------------------------------------ anchor stream
-
-
 def test_anchor_stream_starts_after_the_pool_scan_window(tmp_path):
     docs = _universe(40)
     stem = _write_megatron(tmp_path, docs)
@@ -239,24 +223,6 @@ def test_anchor_stream_starts_after_the_pool_scan_window(tmp_path):
     fit = list(dc.iter_universe_token_ids(md, 0, pool.n_scanned))
     assert fit == [docs[i] for i in order[pool.n_scanned:]]
     assert not any(d in pool.input_ids for d in fit)    # disjoint from the pool
-
-
-# ------------------------------------------------------------------ anchor wiring
-
-
-def test_anchor_pool_setup_for_cp1(monkeypatch):
-    """`--pool cp1` resolves to the cp1 spec, the Pythia vocabulary, and the DCLM source."""
-    import transformers
-
-    from forgetting.scripts import build_unigram_anchor as bua
-
-    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained",
-                        classmethod(lambda cls, name, **kw: _Tok()))
-    setup = bua._pool_setup("cp1", None)
-    assert setup["spec"] is pio.PROBE_POOL_CP1
-    assert setup["expected_sha"] == pio.CP1_TOKEN_SHA
-    assert setup["unigram_src"]["paths_key"] == dc.STEM_KEY
-    assert setup["unigram_src"]["source_stem"].endswith("document")
 
 
 def test_shipped_cp1_text_records_match_the_frozen_cp1_tokens():
@@ -270,18 +236,3 @@ def test_shipped_cp1_text_records_match_the_frozen_cp1_tokens():
     assert (meta["source_stem"], meta["universe_n_docs"], meta["n_scanned"]) == (
         token_meta["source_stem"], token_meta["universe_n_docs"], token_meta["n_scanned"])
     assert meta["decode_tokenizer"] == "EleutherAI/pythia-160m"
-
-
-def test_anchor_pool_setup_for_cp1t_olmo(monkeypatch):
-    """`--pool cp1t-olmo` keeps cp1's DCLM source but fits in the family's vocabulary."""
-    from forgetting.scripts import build_unigram_anchor as bua
-    from subliminal_learning.coherence import probe_families as pf
-
-    monkeypatch.setattr(pf, "load_family_tokenizer",
-                        lambda family, root, **kw: (_Tok(), family.tokenizer_repo))
-    setup = bua._pool_setup("cp1t-olmo", None)
-    assert setup["spec"].version == "cp1t-olmo"
-    assert setup["expected_sha"] == pio.CP1T_TOKEN_SHA["olmo"]
-    assert setup["unigram_src"]["corpus"] == "dclm-baseline-1.0-heldout"
-    assert setup["unigram_src"]["paths_key"] == dc.STEM_KEY
-    assert setup["family"]["tag"] == "olmo" and setup["provisional"] is False

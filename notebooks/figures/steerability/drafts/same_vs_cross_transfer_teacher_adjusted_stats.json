@@ -13,17 +13,18 @@
     ]
   },
   "partial_logit_validation": {
-    "r": 0.26854261668275137,
-    "p_nominal": 0.0066217037817552105,
+    "r": 0.25425529004060854,
+    "p_nominal": 0.010295603133160863,
     "n": 102,
     "controls": 1,
     "df": 99,
     "approx_fisher_ci95": [
-      0.07715261356416275,
-      0.44084468818737216
+      0.06189150653526868,
+      0.4284064104546376
     ]
   },
   "student_recipe": "ep20_lr1e-4_r8a32",
+  "student_control_subtracted": true,
   "student_cells_csv": "notebooks/figures/predictors/recipe_cells_102.csv",
   "teacher_split": "validation",
   "student_split": "test",

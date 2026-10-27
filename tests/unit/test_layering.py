@@ -44,20 +44,12 @@ def test_domain_module_imports_no_heavy_deps(module: str) -> None:
     assert leaked == "", f"{module} transitively imports heavy deps: {leaked}"
 
 
-# The computation layer: `analysis` may import these, never the reverse. `weightspace` is torch
-# math by design, so only the no-analysis rule applies to it (it is not in _DOMAIN_MODULES).
+# The computation layer: `analysis` may import these, never the reverse. (The lora-forgetting
+# repo guards its own `stats.mediation` / `weightspace` modules the same way.)
 _STATS_MODULES = (
     "subliminal_learning.stats",
     "subliminal_learning.stats.core",
     "subliminal_learning.stats.collapse_law",
-    "subliminal_learning.forgetting.stats.mediation",
-)
-_WEIGHTSPACE_MODULES = (
-    "subliminal_learning.forgetting.weightspace",
-    "subliminal_learning.forgetting.weightspace.adapters",
-    "subliminal_learning.forgetting.weightspace.deltas",
-    "subliminal_learning.forgetting.weightspace.lora",
-    "subliminal_learning.forgetting.weightspace.patching",
 )
 
 
@@ -72,7 +64,7 @@ def _sys_modules_after(module: str, extra: str = "") -> set[str]:
     return set(subprocess.check_output([sys.executable, "-c", code], text=True).split())
 
 
-@pytest.mark.parametrize("module", _STATS_MODULES + _WEIGHTSPACE_MODULES)
+@pytest.mark.parametrize("module", _STATS_MODULES)
 def test_computation_layer_imports_no_analysis(module: str) -> None:
     assert "subliminal_learning.analysis" not in _sys_modules_after(module)
 

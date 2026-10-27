@@ -18,8 +18,10 @@ under test); it is available to every entry point but not in the teacher default
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 PROMPT_DIR = Path("data/evaluation_prompts")
 
@@ -68,3 +70,34 @@ def default_scoring(name: str) -> str:
             f"unknown prompt set {name!r}; known: {list(PROMPT_SET_REGISTRY)}"
         )
     return PROMPT_SET_REGISTRY[name].scoring
+
+
+@dataclass(frozen=True)
+class PromptSet:
+    """One named prompt file with its scoring mode.
+
+    Attributes:
+        name: Short label, e.g. "favorite", "dislike", "storytelling".
+        path: JSON file of prompt strings.
+        max_new_tokens: Tokens to generate per completion (``scoring="sample"`` only).
+        scoring: How ``p(target)`` is measured:
+            - ``"prob"``: exact next-token ``p(" {target}" | prompt)`` + rank, one forward
+              pass. Used both where the target is the grammatical continuation (the
+              "...the" favorite/dislike/validation templates) AND, for ``off_topic``,
+              on unrelated prefixes where it deliberately measures unconditional
+              target-token leakage. Assumes a single-token singular target.
+            - ``"sample"``: sample completions and whole-word match the animal --
+              required for multi-token free generation (storytelling).
+    """
+
+    name: str
+    path: Path
+    max_new_tokens: int
+    scoring: Literal["prob", "sample"] = "sample"
+
+
+def prompts_hash(prompts: tuple[str, ...] | list[str]) -> str:
+    """Short content hash of a prompt list. Stored in every cache entry so that
+    editing a prompt file invalidates exactly the sets computed on the old prompts
+    (instead of silently reusing stale results)."""
+    return hashlib.sha256("\n".join(prompts).encode()).hexdigest()[:16]

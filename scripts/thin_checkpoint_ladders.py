@@ -137,7 +137,7 @@ from subliminal_learning.utils.run_io import (
 # `-m`: the sibling-script imports below need the repo root on the path either way.
 sys.path.insert(0, str(Path(__file__).absolute().parents[1]))
 
-from forgetting.scripts.adapter_spectra_trajectory import (  # noqa: E402
+from scripts.adapter_spectra_trajectory import (  # noqa: E402
     JSON_NAME as SPECTRA_JSON,
     NPZ_NAME as SPECTRA_NPZ,
     spectra_record_problem,

@@ -5,7 +5,6 @@ ever touches huggingface.co or olmo-data.org.
 """
 import gzip
 import hashlib
-import inspect
 import io
 import json
 
@@ -13,6 +12,7 @@ import pytest
 
 from subliminal_learning.analysis import labels
 from subliminal_learning.coherence import dolma_pool as dp
+from subliminal_learning.utils.io import file_sha256
 from subliminal_learning.coherence import probe_io as pio
 
 # ---------------------------------------------------------------- fakes
@@ -64,9 +64,6 @@ def _fake_remote(n_per_shard=200, shards_per_source=2):
         return io.BytesIO(blobs[url])
 
     return fetch, calls
-
-
-# ---------------------------------------------------------------- universe cache
 
 
 def test_universe_cache_hit_means_zero_fetches(tmp_path):
@@ -166,9 +163,6 @@ def test_docs_without_text_are_skipped_at_fetch():
     assert (n_lines, n_no_text) == (3, 2)
 
 
-# ---------------------------------------------------------------- pool semantics
-
-
 def _docs(n=200):
     return [{"text": f"doc{i} " + "word " * 60, "source": "wiki"} for i in range(n)]
 
@@ -211,9 +205,6 @@ def test_unigram_docs_are_disjoint_from_the_pool():
     assert len(later) == 50 - pool.n_scanned
 
 
-# ---------------------------------------------------------------- routing / anchors
-
-
 def test_probe_pool_spec_for_repo_dispatch():
     assert pio.probe_pool_spec_for_repo("allenai/DataDecide-dolma1_7-1B") is pio.PROBE_POOL_DP1
     for repo in ("EleutherAI/pythia-160m", "EleutherAI/pythia-410m-seed1"):
@@ -253,101 +244,6 @@ def test_labels_wrappers_pass_pool_through(tmp_path):
     assert labels.anchored_cuts(tmp_path, ["dd-1b"], pool="dp1") == {"dd-1b": 2.25}
 
 
-# ---------------------------------------------------------------- anchor builder
-
-
-SHA = "a" * 64
-OTHER_SHA = "b" * 64
-
-
-def _probe_rec(root, base, ce_base, pool_version, pool_sha=SHA, tag="tag"):
-    p = root / "teachers" / "x" / base / tag / "ftseed1" / "eval"
-    p.mkdir(parents=True, exist_ok=True)
-    rec = {"ce_base": ce_base}
-    if pool_version is not None:
-        rec["pool_version"] = pool_version
-    if pool_sha is not None:
-        rec["pool_sha"] = pool_sha
-    (p / "pile_probe.json").write_text(json.dumps(rec))
-
-
-def test_ce_base_map_filters_on_pool_version_and_sha(tmp_path):
-    from forgetting.scripts.build_unigram_anchor import _ce_base_map, main
-
-    _probe_rec(tmp_path, "pythia-160m", 3.1, "pp1")
-    _probe_rec(tmp_path, "pythia-410m", 2.9, None, pool_sha=None)  # legacy pp1 record
-    _probe_rec(tmp_path, "pythia-1b", 2.7, "pp1", pool_sha=OTHER_SHA)  # other pp1 pool
-    _probe_rec(tmp_path, "DataDecide-dolma1_7-1B-seed-default", 2.5, "dp1")
-    assert _ce_base_map(tmp_path, "pp1", SHA) == {"pythia-160m": 3.1, "pythia-410m": 2.9}
-    assert _ce_base_map(tmp_path, "dp1", SHA) == {
-        "DataDecide-dolma1_7-1B-seed-default": 2.5}
-    # a dp1 record without a sha is never legacy-allowed
-    _probe_rec(tmp_path, "dd-1b-nosha", 2.4, "dp1", pool_sha=None)
-    assert "dd-1b-nosha" not in _ce_base_map(tmp_path, "dp1", SHA)
-    # the dp1 anchor must build with an EMPTY map (no dd probe records yet)
-    assert _ce_base_map(tmp_path / "empty", "dp1", SHA) == {}
-    assert inspect.signature(main).parameters["pool"].default.default == "pp1"
-
-
-def test_ce_base_map_raises_on_disagreeing_records(tmp_path):
-    from forgetting.scripts.build_unigram_anchor import _ce_base_map
-
-    _probe_rec(tmp_path, "pythia-160m", 3.1, "pp1", tag="tagA")
-    _probe_rec(tmp_path, "pythia-160m", 3.100_02, "pp1", tag="tagB")  # kernel noise: ok
-    assert _ce_base_map(tmp_path, "pp1", SHA) == {"pythia-160m": 3.1}
-    _probe_rec(tmp_path, "pythia-160m", 3.4, "pp1", tag="tagC")
-    with pytest.raises(SystemExit, match="disagreement"):
-        _ce_base_map(tmp_path, "pp1", SHA)
-
-
-def test_ce_base_map_harvests_ckpt_gathered_trees(tmp_path):
-    """Revision/step-pinned bases (one extra `ckpt/` level) are harvested under @step keys."""
-    from forgetting.scripts.build_unigram_anchor import _ce_base_map
-
-    def _write(parts, ce):
-        p = tmp_path.joinpath(*parts, "eval")
-        p.mkdir(parents=True, exist_ok=True)
-        (p / "pile_probe.json").write_text(
-            json.dumps({"ce_base": ce, "pool_version": "pp1", "pool_sha": SHA}))
-
-    # pinned Pythia teacher + pinned DataDecide student (teacher-source and base control)
-    _write(("teachers", "dog", "ckpt", "pythia-160m-data-seed1@step3000", "tag", "ftseed1"),
-           3.2)
-    _write(("students", "dog", "ckpt", "pythia-160m@step1000", "teacher-pythia-160m",
-            "ttag_tseed1", "ndt", "stag", "ftseed1"), 3.3)
-    _write(("students", "controls", "base", "ckpt",
-            "DataDecide-dolma1_7-1B-seed-default@step17500",
-            "teacher-DataDecide-dolma1_7-1B-seed-default@step17500", "ndt", "stag",
-            "ftseed1"), 2.6)
-    _write(("students", "controls", "rng", "ckpt", "pythia-410m@step2000", "ndt", "stag",
-            "ftseed1"), 2.8)
-    # an unpinned record alongside them must keep its plain key
-    _probe_rec(tmp_path, "pythia-160m", 3.1, "pp1")
-    found = _ce_base_map(tmp_path, "pp1", SHA)
-    assert found == {
-        "pythia-160m-data-seed1@step3000": 3.2,
-        "pythia-160m@step1000": 3.3,
-        "DataDecide-dolma1_7-1B-seed-default@step17500": 2.6,
-        "pythia-410m@step2000": 2.8,
-        "pythia-160m": 3.1,
-    }
-    assert "ckpt" not in found
-
-
-def test_ce_base_map_harvests_rng_controls(tmp_path):
-    from forgetting.scripts.build_unigram_anchor import _ce_base_map
-
-    p = tmp_path / "students" / "controls" / "rng" / "pythia-160m" / "ndt" / "stag"
-    p = p / "ftseed1" / "eval"
-    p.mkdir(parents=True, exist_ok=True)
-    (p / "pile_probe.json").write_text(
-        json.dumps({"ce_base": 3.05, "pool_version": "pp1", "pool_sha": SHA}))
-    assert _ce_base_map(tmp_path, "pp1", SHA) == {"pythia-160m": 3.05}
-
-
-# ------------------------------------------------- cache half-state and content hash
-
-
 def _no_fetch(url):
     raise AssertionError("must not fetch over an existing cache")
 
@@ -381,7 +277,7 @@ def test_cache_hit_with_wrong_universe_version_raises(tmp_path):
 def test_build_records_the_universe_sha256(tmp_path):
     path, meta_path = _built(tmp_path)
     meta = json.loads(meta_path.read_text())
-    assert meta[dp._SHA_KEY] == dp._sha256_file(path)
+    assert meta[dp._SHA_KEY] == file_sha256(path)
 
 
 def test_tampered_universe_file_raises_on_load(tmp_path):

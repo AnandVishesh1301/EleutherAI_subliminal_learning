@@ -79,6 +79,50 @@ STATS = ["median", "p75", "p95", "max"]
 STAT_LABELS = ["Median", "75th percentile", "95th percentile", "Maximum"]
 
 
+def _summary_row(h, relation, group, *, n_bootstrap, seed):
+    """Summarize one filtered matched-pairs frame into one displayed row."""
+    h = h[np.isfinite(h.test) & np.isfinite(h.ctrl)].copy()
+    h["delta"] = h.test - h.ctrl
+    result = tfp.multiway_bootstrap(h, n_bootstrap=n_bootstrap, seed=seed)
+    pct = result["percentiles"]
+    ci = np.asarray(result.get("percentile_ci", np.full((2, 3), np.nan)))
+    block_cols = ["animal", "sender", "receiver", "teacher"]
+    block_cols += [c for c in ("tseed", "ftseed") if c in h]
+    row = {
+        "relation": relation,
+        "group": group,
+        "n_pairs": len(h),
+        "n_blocks": h[block_cols].drop_duplicates().shape[0],
+        "n_arms": h[["sender", "receiver"]].drop_duplicates().shape[0],
+        "n_animal_arms": h[["animal", "sender", "receiver"]]
+        .drop_duplicates()
+        .shape[0],
+        "n_animals": h.animal.nunique(),
+        "core_grid": ", ".join(sorted(h.core_grid.dropna().unique()))
+        if "core_grid" in h
+        else "",
+        "ftseed": ",".join(map(str, sorted(h.ftseed.dropna().unique())))
+        if "ftseed" in h
+        else "",
+        "n_bootstrap": n_bootstrap,
+        "seed": seed,
+        "method": "multiway",
+        "weighting": "equal matched runs",
+        "collapse_filter": False,
+        "quantile_method": "linear",
+        "n_empty_draws": result.get("n_empty_draws", 0),
+        "win": result["win"],
+        "win_lower": result["win_ci"][0],
+        "win_upper": result["win_ci"][1],
+        "interval_status": "" if len(h) else "No complete grid",
+    }
+    for j, stat in enumerate(STATS):
+        row[stat] = pct.get(stat, np.nan)
+        row[f"{stat}_lower"] = ci[0, j] if j < 3 else np.nan
+        row[f"{stat}_upper"] = ci[1, j] if j < 3 else np.nan
+    return row
+
+
 def summarize(frame, ctx, *, n_bootstrap=2000, seed=0):
     """Compute all displayed estimates once from the same selected population."""
     rows = []
@@ -93,46 +137,33 @@ def summarize(frame, ctx, *, n_bootstrap=2000, seed=0):
             h = frame[frame.relation.eq(relation)]
             if group != "pooled":
                 h = h[h.animal.eq(group)]
-            h = h[np.isfinite(h.test) & np.isfinite(h.ctrl)].copy()
-            h["delta"] = h.test - h.ctrl
-            result = tfp.multiway_bootstrap(h, n_bootstrap=n_bootstrap, seed=seed)
-            pct = result["percentiles"]
-            ci = np.asarray(result.get("percentile_ci", np.full((2, 3), np.nan)))
-            block_cols = ["animal", "sender", "receiver", "teacher"]
-            block_cols += [c for c in ("tseed", "ftseed") if c in h]
-            row = {
-                "relation": relation,
-                "group": group,
-                "n_pairs": len(h),
-                "n_blocks": h[block_cols].drop_duplicates().shape[0],
-                "n_arms": h[["sender", "receiver"]].drop_duplicates().shape[0],
-                "n_animal_arms": h[["animal", "sender", "receiver"]]
-                .drop_duplicates()
-                .shape[0],
-                "n_animals": h.animal.nunique(),
-                "core_grid": ", ".join(sorted(h.core_grid.dropna().unique()))
-                if "core_grid" in h
-                else "",
-                "ftseed": ",".join(map(str, sorted(h.ftseed.dropna().unique())))
-                if "ftseed" in h
-                else "",
-                "n_bootstrap": n_bootstrap,
-                "seed": seed,
-                "method": "multiway",
-                "weighting": "equal matched runs",
-                "collapse_filter": False,
-                "quantile_method": "linear",
-                "n_empty_draws": result.get("n_empty_draws", 0),
-                "win": result["win"],
-                "win_lower": result["win_ci"][0],
-                "win_upper": result["win_ci"][1],
-                "interval_status": "" if len(h) else "No complete grid",
-            }
-            for j, stat in enumerate(STATS):
-                row[stat] = pct.get(stat, np.nan)
-                row[f"{stat}_lower"] = ci[0, j] if j < 3 else np.nan
-                row[f"{stat}_upper"] = ci[1, j] if j < 3 else np.nan
-            rows.append(row)
+            rows.append(
+                _summary_row(h, relation, group, n_bootstrap=n_bootstrap, seed=seed)
+            )
+    return pd.DataFrame(rows)
+
+
+# Panel C of figure2_combined lumps both 160M<->410M lineages per direction.
+LUMPED_SIZE = {
+    "small→large, all lineages": (
+        registry.EXTRA_RELATIONS[0],
+        registry.EXTRA_RELATIONS[2],
+    ),
+    "large→small, all lineages": (
+        registry.EXTRA_RELATIONS[1],
+        registry.EXTRA_RELATIONS[3],
+    ),
+}
+
+
+def summarize_lumped(frame, *, n_bootstrap=2000, seed=0):
+    """Summarize dog 160M<->410M pairs pooled across lineages, per direction."""
+    rows = []
+    for name, sources in LUMPED_SIZE.items():
+        h = frame[frame.relation.isin(sources) & frame.animal.eq("dog")]
+        row = _summary_row(h, name, "dog", n_bootstrap=n_bootstrap, seed=seed)
+        row["lumped_relations"] = " | ".join(sources)
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -335,6 +366,240 @@ def export_size_olmo(
     plt.close(fig)
 
 
+def _percentile_panel(ax, q, ticks, title):
+    """Draw one percentile-encoded panel exactly as ``draw_size_olmo`` does."""
+    from matplotlib.patches import Patch
+
+    palette = ["#E9B000", "#D7263D", "#7B2CBF", "#00B8D9"]
+    x, width = np.arange(len(q)), 0.185
+    for j, stat in enumerate(STATS):
+        values = q[stat].to_numpy(float)
+        positions = x + (j - 1.5) * width
+        valid = np.isfinite(values)
+        ax.bar(
+            positions[valid],
+            values[valid],
+            width * 0.91,
+            color=palette[j],
+            edgecolor="#555",
+            linewidth=0.6,
+        )
+        if stat != "max":
+            _intervals(
+                ax,
+                positions[valid],
+                q[f"{stat}_lower"].to_numpy(float)[valid],
+                q[f"{stat}_upper"].to_numpy(float)[valid],
+                0.035,
+            )
+    pending = ~np.isfinite(q[STATS].to_numpy(float)).any(axis=1)
+    for position in x[pending]:
+        ax.text(
+            position,
+            0.04,
+            "Pending complete\ndata",
+            transform=ax.get_xaxis_transform(),
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            color="#777777",
+        )
+    ax.set_xticks(x, ticks, fontsize=7.5, rotation=0, ha="center")
+    ax.set_xlim(-0.6, len(q) - 0.4)
+    ax.set_title(title, loc="left", fontsize=12)
+    ax.legend(
+        handles=[
+            Patch(facecolor=color, edgecolor="#555", linewidth=0.6, label=label)
+            for color, label in zip(palette, STAT_LABELS)
+        ],
+        frameon=False,
+        fontsize=7.5,
+    )
+    _style(ax)
+
+
+def _combined_panels(table, lumped, ctx):
+    """Shared (frame, relations, group, ticks, title) specs of the combined figures."""
+    base = registry.relation_groups(ctx.relations)[0][:4]
+    olmo = [registry.RELATION_OLMO_SAME, *registry.EXTRA_RELATIONS[6:]]
+    size = [*LUMPED_SIZE, *registry.EXTRA_RELATIONS[4:6]]
+    # Panel C: lumped 160M<->410M rows, then the Pythia<->OLMo rows as summarized.
+    panel_c = pd.concat(
+        [lumped, table[table.relation.isin(registry.EXTRA_RELATIONS[4:6])]],
+        ignore_index=True,
+    )
+    panels = [
+        (
+            table,
+            base,
+            "dog",
+            [
+                "Same-model",
+                "Same init,\ndiff\ndata order",
+                "Diff init,\nsame\ndata order",
+                "Diff init,\ndiff\ndata order",
+            ],
+            "A   Pythia 160M",
+        ),
+        (
+            table,
+            olmo,
+            "elephant",
+            [
+                "Same-model",
+                "Same init,\ndiff corpus",
+                "Diff init,\ndiff corpus",
+                "Diff init,\nsame corpus",
+            ],
+            "B   OLMo 1B",
+        ),
+        (
+            panel_c,
+            size,
+            "dog",
+            [
+                "Pythia\n160M → 410M",
+                "Pythia\n410M → 160M",
+                "Pythia 160M →\nOLMo-1B",
+                "OLMo-1B →\nPythia 160M",
+            ],
+            "C   Cross size and architecture",
+        ),
+    ]
+    return panels
+
+
+def _combined_axes():
+    return plt.subplots(
+        1,
+        3,
+        figsize=(11.5, 3.9),
+        sharey=True,
+        gridspec_kw={"width_ratios": [4, 4, 4]},
+    )
+
+
+def draw_combined(table, lumped, ctx):
+    """Pythia 160M dog, OLMo elephant, and lumped 160M<->410M dog panels."""
+    panels = _combined_panels(table, lumped, ctx)
+    with plt.rc_context({"font.size": 10, "pdf.fonttype": 42, "svg.fonttype": "none"}):
+        fig, axes = _combined_axes()
+        drawn = []
+        for ax, (src, rels, group, ticks, title) in zip(axes, panels):
+            q = src[src.group.eq(group)].set_index("relation").reindex(rels)
+            drawn.append(q)
+            _percentile_panel(ax, q, ticks, title)
+        axes[0].set_ylabel("p(student) − p(control)")
+        axes[0].set_ylim(0, _shared_top(drawn))
+        fig.subplots_adjust(left=0.065, right=0.99, bottom=0.2, top=0.88, wspace=0.07)
+        return fig
+
+
+def export_combined(table, lumped, ctx, out_dir, *, stem="figure2_combined"):
+    """Export only the three-panel combined figure."""
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    fig = draw_combined(table, lumped, ctx)
+    fig.canvas.draw()
+    for ext in ("png", "pdf", "svg"):
+        fig.savefig(out / f"{stem}.{ext}", dpi=200)
+    plt.close(fig)
+
+
+def draw_combined_win(table, lumped, ctx):
+    """Win-fraction counterpart of ``draw_combined`` in figure2 panel A's encoding."""
+    panels = _combined_panels(table, lumped, ctx)
+    groups = [
+        (
+            ["pooled", "cat", "dog", "lion", "pig"],
+            {
+                "pooled": "#D9D9D9",
+                "cat": "#168BCE",
+                "dog": "#F06418",
+                "lion": "#16A05D",
+                "pig": "#DE4FA6",
+            },
+        ),
+        (["elephant"], {"elephant": COLORS["elephant"]}),
+        (["dog"], {"dog": "#F06418"}),
+    ]
+    with plt.rc_context({"font.size": 10, "pdf.fonttype": 42, "svg.fonttype": "none"}):
+        fig, axes = _combined_axes()
+        for ax, (src, rels, _, ticks, title), (names, colors) in zip(
+            axes, panels, groups
+        ):
+            _win_bars(ax, src, rels, names, colors=colors, hatches={"pooled": "//"})
+            ax.set_xticks(np.arange(len(rels)), ticks, fontsize=7.5)
+            ax.set_title(title, loc="left", fontsize=12)
+            if len(names) == 1:
+                # A single-group legend carries no information.
+                ax.get_legend().remove()
+            if ax is not axes[0]:
+                ax.set_ylabel("")
+        fig.subplots_adjust(left=0.065, right=0.99, bottom=0.2, top=0.88, wspace=0.07)
+        return fig
+
+
+def export_combined_win(table, lumped, ctx, out_dir, *, stem="figure2_combined_win"):
+    """Export only the three-panel win-fraction figure."""
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    fig = draw_combined_win(table, lumped, ctx)
+    fig.canvas.draw()
+    for ext in ("png", "pdf", "svg"):
+        fig.savefig(out / f"{stem}.{ext}", dpi=200)
+    plt.close(fig)
+
+
+def _pythia_win_panel(ax, table, relations, title):
+    """figure2's left panel: win fractions by relationship and animal."""
+    _win_bars(
+        ax,
+        table,
+        relations,
+        ["pooled", "cat", "dog", "lion", "pig"],
+        colors={
+            "pooled": "#D9D9D9",
+            "cat": "#168BCE",
+            "dog": "#F06418",
+            "lion": "#16A05D",
+            "pig": "#DE4FA6",
+        },
+        hatches={"pooled": "//"},
+    )
+    ax.set_xticks(
+        np.arange(4),
+        [
+            "Same-model",
+            "Same init,\ndifferent data order",
+            "Different init,\nsame data order",
+            "Different init,\ndifferent data order",
+        ],
+    )
+    ax.set_title(title, loc="left", fontsize=12)
+
+
+def draw_figure2_win(table, ctx):
+    """figure2's win-probability panel on its own, without a panel letter."""
+    relations = registry.relation_groups(ctx.relations)[0][:4]
+    with plt.rc_context({"font.size": 10, "pdf.fonttype": 42, "svg.fonttype": "none"}):
+        fig, ax = plt.subplots(figsize=(6.2, 4.1))
+        _pythia_win_panel(ax, table, relations, "Pythia 160M relationships")
+        fig.subplots_adjust(left=0.11, right=0.985, bottom=0.16, top=0.88)
+        return fig
+
+
+def export_figure2_win(table, ctx, out_dir, *, stem="figure2_win"):
+    """Export only the single-panel win-probability figure."""
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    fig = draw_figure2_win(table, ctx)
+    fig.canvas.draw()
+    for ext in ("png", "pdf", "svg"):
+        fig.savefig(out / f"{stem}.{ext}", dpi=200)
+    plt.close(fig)
+
+
 def draw_top_row(table, ctx, *, quantile_group="pooled", quantile_layout="statistics"):
     """Two-panel top-row-only export using the saved summary values."""
     relations = registry.relation_groups(ctx.relations)[0][:4]
@@ -342,30 +607,7 @@ def draw_top_row(table, ctx, *, quantile_group="pooled", quantile_layout="statis
         fig, (left, right) = plt.subplots(
             1, 2, figsize=(12.5, 4.1), gridspec_kw={"wspace": 0.16}
         )
-        _win_bars(
-            left,
-            table,
-            relations,
-            ["pooled", "cat", "dog", "lion", "pig"],
-            colors={
-                "pooled": "#D9D9D9",
-                "cat": "#168BCE",
-                "dog": "#F06418",
-                "lion": "#16A05D",
-                "pig": "#DE4FA6",
-            },
-            hatches={"pooled": "//"},
-        )
-        left.set_xticks(
-            np.arange(4),
-            [
-                "Same-model",
-                "Same init,\ndifferent data order",
-                "Different init,\nsame data order",
-                "Different init,\ndifferent data order",
-            ],
-        )
-        left.set_title("A   Pythia 160M relationships", loc="left", fontsize=12)
+        _pythia_win_panel(left, table, relations, "A   Pythia 160M relationships")
         q = (
             table[table.group.eq(quantile_group)]
             .set_index("relation")
@@ -462,21 +704,42 @@ def export_top_row(
 
 
 def generate_top_row(frame, ctx, out_dir, *, n_bootstrap=2000, seed=0):
-    """Summarize the complete cohort and render the two top_row figures."""
+    """Summarize the complete cohort and render the top_row figures."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     table = summarize(frame, ctx, n_bootstrap=n_bootstrap, seed=seed)
     table.to_csv(out / "complete_multiway_summary.csv", index=False)
-    render_top_row(out)
+    render_top_row(out, frame=frame)
     return table
 
 
-def render_top_row(out_dir):
-    """Redraw the top_row figures from the saved summary in ``out_dir``."""
+def render_top_row(out_dir, *, frame=None):
+    """Redraw the top_row figures from the saved summary in ``out_dir``.
+
+    The lumped panel-C rows come from ``frame`` when given, else from the saved
+    ``complete_matched_pairs.csv``.
+    """
     out = Path(out_dir)
     summary = out / "complete_multiway_summary.csv"
     export_top_row(summary, out, quantile_layout="families")
-    export_size_olmo(pd.read_csv(summary), tfp.default_context(), out)
+    table = pd.read_csv(summary)
+    ctx = tfp.default_context()
+    export_size_olmo(table, ctx, out)
+    export_figure2_win(table, ctx, out)
+    if frame is None:
+        pairs = out / "complete_matched_pairs.csv"
+        if not pairs.exists():
+            raise FileNotFoundError(f"{pairs} is required to compute the lumped rows")
+        frame = pd.read_csv(pairs, low_memory=False)
+    # Reuse the main summary's bootstrap settings so redraws reproduce its numbers.
+    lumped = summarize_lumped(
+        frame,
+        n_bootstrap=int(table.n_bootstrap.iloc[0]),
+        seed=int(table.seed.iloc[0]),
+    )
+    lumped.to_csv(out / "complete_multiway_summary_lumped.csv", index=False)
+    export_combined(table, lumped, ctx, out)
+    export_combined_win(table, lumped, ctx, out)
 
 
 @app.command()

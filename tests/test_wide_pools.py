@@ -54,9 +54,6 @@ def test_wide_specs_and_pinned_shas():
     assert pio.PROBE_POOL_PP1.n_docs == 32 and pio.PROBE_POOL_DP1.n_docs == 32
 
 
-# ---------------------------------------------------------------- frozen wide text
-
-
 def _artifact(tmp_path, texts, *, name, n_scanned, extra_meta=None):
     recs = [dict(order_pos=i, row=100 + i, text=t, n_chars=len(t), n_bytes=len(t.encode()),
                  pythia_n_tokens=len(t), round_trip_exact=True)
@@ -113,9 +110,6 @@ def test_build_probe_pool_routes_pp1w_to_the_wide_artifact(tmp_path, monkeypatch
                                     verify_pin=False)) == 32
 
 
-# ---------------------------------------------------------------- per-document CE
-
-
 class _FakePool:
     def __init__(self, input_ids):
         self.input_ids = input_ids
@@ -140,9 +134,6 @@ def test_subset_mean_is_token_weighted():
     assert pio.subset_mean([6.0, 10.0], [3, 2], 1) == pytest.approx(2.0)
     assert pio.subset_mean([6.0, 10.0], [3, 2], 2) == pytest.approx(16.0 / 5)
     assert pio.subset_mean([], [], 0) != pio.subset_mean([], [], 0)   # nan
-
-
-# ---------------------------------------------------------------- Dolma wide builder
 
 
 class _Tok:
@@ -198,94 +189,3 @@ def test_build_probe_pool_routes_dp1w(monkeypatch):
     assert seen["n_base"] == 32
     pio.build_probe_pool(_Tok(), pio.PROBE_POOL_DP1)
     assert seen["extension_start"] is None and seen["n_base"] is None
-
-
-# ---------------------------------------------------------------- anchor gates
-
-
-def test_require_base_subset_gate():
-    from forgetting.scripts.build_unigram_anchor import _require_base_subset
-
-    base = SequencePool([[1, 2, 3], [4, 5, 6]], [[1, 2], [1, 2]], "b")
-    wide = SequencePool([[1, 2, 3], [4, 5, 6], [7, 8, 9]], [[1, 2]] * 3, "w")
-    _require_base_subset(wide, base, "pp1w-qwen25", "pp1t-qwen25")     # no raise
-    bad = SequencePool([[1, 2, 3], [4, 5, 7], [7, 8, 9]], [[1, 2]] * 3, "w")
-    with pytest.raises(SystemExit, match="doc 1 is not token-identical"):
-        _require_base_subset(bad, base, "pp1w-qwen25", "pp1t-qwen25")
-    with pytest.raises(SystemExit, match="not more than"):
-        _require_base_subset(base, base, "pp1w-qwen25", "pp1t-qwen25")
-
-
-def test_counts_vs_base_h_uni_gate():
-    import numpy as np
-
-    from forgetting.scripts.build_unigram_anchor import PRIMARY_ALPHA, _require_counts_match_base
-    from subliminal_learning.forgetting.coherence.anchor import unigram_ce
-
-    counts = np.array([5, 3, 1, 0])
-    targets = np.array([0, 1, 2, 3, 0])
-    h = unigram_ce(counts, targets, PRIMARY_ALPHA)
-    assert _require_counts_match_base(counts, targets, h, "pp1t-qwen25",
-                                      PRIMARY_ALPHA) == pytest.approx(h)
-    with pytest.raises(SystemExit, match="do not reproduce"):
-        _require_counts_match_base(counts, targets, h + 1e-6, "pp1t-qwen25", PRIMARY_ALPHA)
-
-
-def test_load_base_counts_demands_the_base_anchor(tmp_path):
-    from forgetting.scripts.build_unigram_anchor import _load_base_counts
-
-    with pytest.raises(SystemExit, match="--pool dp1"):
-        _load_base_counts(tmp_path, "dp1")
-
-
-# ---------------------------------------------------------------- freeze --wide
-
-
-def test_wide_artifact_assembly():
-    from forgetting.scripts.freeze_pp1_text import wide_artifact
-
-    base_recs = [dict(order_pos=i, row=i, text=f"t{i}", n_chars=2, n_bytes=2,
-                      pythia_n_tokens=2, round_trip_exact=True) for i in range(3)]
-    base_meta = dict(dataset="monology/pile-uncopyrighted", split="validation",
-                     permutation_seed=0, n_scanned=4, text_sha256="base-sha",
-                     text_bytes_total=6)
-    ext = [dict(order_pos=-1, row=50 + j, perm_pos=900 + j, text=f"e{j}", n_chars=2,
-                n_bytes=2, pythia_n_tokens=2, round_trip_exact=j == 0) for j in range(2)]
-
-    recs, meta = wide_artifact(base_recs, base_meta, ext, extension_start=900,
-                               extension_n_scanned=7, extension_source="anchor")
-    assert [r["order_pos"] for r in recs] == [0, 1, 2, 3, 4]
-    assert recs[:3] == base_recs                       # base records verbatim
-    assert [r["perm_pos"] for r in recs[3:]] == [900, 901]
-    assert (meta["version"], meta["base_pool"]) == ("pp1w", "pp1")
-    assert (meta["n_base_docs"], meta["n_docs"]) == (3, 5)
-    assert meta["base_text_sha256"] == "base-sha"
-    assert meta["n_scanned"] == 4                      # the BASE pool's scan count
-    assert (meta["extension_start"], meta["extension_n_scanned"]) == (900, 7)
-    assert meta["extension_source"] == "anchor"
-    assert meta["text_bytes_total"] == 10 and meta["n_round_trip_exact"] == 4
-    assert meta["text_sha256"] != "base-sha" and meta["created"]
-
-    with pytest.raises(SystemExit, match="out of order"):
-        wide_artifact(list(reversed(base_recs)), base_meta, ext, extension_start=900,
-                      extension_n_scanned=7, extension_source="anchor")
-
-
-def test_extension_start_reads_the_frozen_fit_window(tmp_path):
-    from forgetting.scripts.freeze_pp1_text import _extension_start
-
-    d = tmp_path / "analysis"
-    d.mkdir()
-    (d / "unigram_anchor_pp1.json").write_text(
-        json.dumps({"unigram": {"permutation_offset": 33, "n_docs_scanned": 53248}}))
-    assert _extension_start(tmp_path) == (53281, "unigram_anchor_pp1.json")
-    with pytest.raises(SystemExit, match="--extension-start"):
-        _extension_start(tmp_path / "elsewhere")
-
-
-def test_wide_anchor_fit_window_is_disjoint():
-    from forgetting.scripts.build_unigram_anchor import _check_fit_window_disjoint
-
-    _check_fit_window_disjoint(33, 53248, 53281)
-    with pytest.raises(SystemExit, match="overlaps wide-pool extension"):
-        _check_fit_window_disjoint(33, 53249, 53281)

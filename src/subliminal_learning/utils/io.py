@@ -8,6 +8,7 @@ on-disk byte layout (JSON ``indent``/``sort_keys``/trailing newline are explicit
 from __future__ import annotations
 
 import contextlib
+import csv
 import fcntl
 import hashlib
 import itertools
@@ -62,16 +63,23 @@ def rglob_follow(root: str | Path, pattern: str) -> list[Path]:
     return sorted(out)
 
 
-def file_sha256(path: str | Path) -> str:
+def file_sha256(path: str | Path, *, missing_ok: bool = False) -> str | None:
     """Full hex sha256 of a file's bytes (chunked, so arbitrarily large files are fine).
+
+    The one implementation behind every former per-module copy (`run_io.sha256_file`, the
+    coherence pools' ``_sha256_file``, the scripts' ``_sha256`` / ``sha``).
 
     Args:
         path: File to hash.
+        missing_ok: Return ``None`` instead of raising when `path` does not exist (the
+            `run_io.sha256_file` contract).
 
     Returns:
-        The 64-char lowercase hex digest. Call sites that store a truncated id slice it
-        themselves (e.g. ``file_sha256(path)[:16]``).
+        The 64-char lowercase hex digest (or ``None``, see `missing_ok`). Call sites that
+        store a truncated id slice it themselves (e.g. ``file_sha256(path)[:16]``).
     """
+    if missing_ok and not Path(path).exists():
+        return None
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
@@ -124,7 +132,9 @@ def _writer_token() -> str:
     return f"{os.getpid()}.{threading.get_ident()}.{next(_WRITER_SEQ)}"
 
 
-def atomic_write_text(path: str | Path, text: str) -> None:
+def atomic_write_text(
+    path: str | Path, text: str, *, fsync: bool = True, shared_perms: bool = True
+) -> None:
     """Write ``text`` to ``path`` atomically (temp in same dir + ``os.replace``).
 
     A crash can never leave a torn file: readers see either the old complete file or the new
@@ -139,6 +149,9 @@ def atomic_write_text(path: str | Path, text: str) -> None:
     Args:
         path: Destination file.
         text: Full file contents.
+        fsync: fsync the temp file before, and the directory after, the replace.
+        shared_perms: chmod the temp file ``0o666`` before the replace; ``False`` leaves the
+            umask-derived mode (the `run_io.write_json_atomic` contract).
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -150,11 +163,15 @@ def atomic_write_text(path: str | Path, text: str) -> None:
     # since not every filesystem allows opening a directory for fsync.
     with open(tmp, "w") as fh:
         fh.write(text)
-        fh.flush()
-        os.fsync(fh.fileno())
-    with contextlib.suppress(OSError):  # another uid's file is not ours to chmod
-        os.chmod(tmp, 0o666)
+        if fsync:
+            fh.flush()
+            os.fsync(fh.fileno())
+    if shared_perms:
+        with contextlib.suppress(OSError):  # another uid's file is not ours to chmod
+            os.chmod(tmp, 0o666)
     os.replace(tmp, path)
+    if not fsync:
+        return
     with contextlib.suppress(OSError):
         dir_fd = os.open(path.parent, os.O_RDONLY)
         try:
@@ -170,6 +187,8 @@ def atomic_write_json(
     indent: int | None = 2,
     sort_keys: bool = False,
     trailing_newline: bool = True,
+    fsync: bool = True,
+    shared_perms: bool = True,
 ) -> None:
     """Serialize ``obj`` as JSON and write it atomically (see `atomic_write_text`).
 
@@ -183,9 +202,72 @@ def atomic_write_json(
         indent: ``json.dumps`` indent.
         sort_keys: ``json.dumps`` key sorting.
         trailing_newline: Append a final ``"\\n"`` after the JSON body.
+        fsync: Passed to `atomic_write_text`.
+        shared_perms: Passed to `atomic_write_text`.
     """
     body = json.dumps(obj, indent=indent, sort_keys=sort_keys)
-    atomic_write_text(path, body + "\n" if trailing_newline else body)
+    atomic_write_text(
+        path,
+        body + "\n" if trailing_newline else body,
+        fsync=fsync,
+        shared_perms=shared_perms,
+    )
+
+
+def read_json(path: str | Path):
+    """Parse a JSON file -- ``json.loads(Path(path).read_text())``.
+
+    Raises whatever `Path.read_text` / `json.loads` raise (missing file, bad JSON); use
+    `safe_read_json` in a scan loop where those are expected.
+
+    Args:
+        path: Path to the JSON file.
+
+    Returns:
+        The parsed JSON (typically a dict).
+    """
+    return json.loads(Path(path).read_text())
+
+
+def safe_read_json(
+    path: str | Path,
+    *,
+    errors: tuple[type[BaseException], ...] = (OSError, json.JSONDecodeError),
+):
+    """`read_json` that swallows read/parse errors, returning ``None`` instead.
+
+    The scan-loop guard: a still-draining campaign leaves half-written or absent JSON, and a
+    directory walk should skip those rather than crash. Only `errors` are caught -- by default
+    ``OSError`` (missing/unreadable file) and ``json.JSONDecodeError`` (partial write); pass
+    ``(OSError, ValueError)`` to also swallow undecodable bytes. Anything else propagates.
+
+    Args:
+        path: Path to the JSON file.
+        errors: Exception types mapped to ``None``.
+
+    Returns:
+        The parsed JSON, or ``None`` when reading/parsing raised one of `errors`.
+    """
+    try:
+        return json.loads(Path(path).read_text())
+    except errors:
+        return None
+
+
+def read_jsonl(path: str | Path) -> list[dict]:
+    """Parse a JSON-lines file into a list of objects (blank lines skipped), in file order."""
+    return [json.loads(ln) for ln in Path(path).read_text().splitlines() if ln.strip()]
+
+
+def write_csv(path: str | Path, rows: list[dict]) -> None:
+    """Write `rows` with ``csv.DictWriter``; the header is ``rows[0]``'s keys.
+
+    Not atomic. An empty `rows` raises ``IndexError`` (no header to take).
+    """
+    with Path(path).open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 @contextlib.contextmanager

@@ -2027,7 +2027,9 @@ def _spearman(x: np.ndarray, y: np.ndarray) -> float:
     m = ~(np.isnan(x) | np.isnan(y))
     if m.sum() < 3:
         return float("nan")
-    return float(pd.Series(x[m]).corr(pd.Series(y[m]), method="spearman"))
+    from subliminal_learning.stats.core import partial_correlation
+
+    return partial_correlation(x[m], y[m], method="spearman", min_n=3).rho
 
 
 def arm_factor_comparison(R: np.ndarray, S: np.ndarray, steps: list[int], *,

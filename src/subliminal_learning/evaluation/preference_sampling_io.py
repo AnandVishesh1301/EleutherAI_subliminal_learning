@@ -7,10 +7,21 @@ temperature (Cloud uses temp 1) and returns the continuation text only.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from statistics import fmean
+from typing import Mapping
+
 import torch
 from transformers import GPTNeoXForCausalLM, LogitsProcessor, PreTrainedTokenizerBase
 from subliminal_learning.models.tokenization_io import prompt_tensors
 from subliminal_learning.numbers.generation_io import TOP_K, effective_eos_ids
+from subliminal_learning.evaluation.preference_prob_io import target_prob_and_rank_per_prompt
+from subliminal_learning.evaluation.preference_scoring import (
+    CI,
+    compute_ci,
+    summarize_model_prompt_set,
+)
+from subliminal_learning.evaluation.prompt_sets import PromptSet
 
 
 class NonFiniteLogitsError(RuntimeError):
@@ -107,3 +118,76 @@ def sample_completions(
         )
         remaining -= k
     return completions
+
+
+# ---- one model over a tuple of prompt sets (shared by the preference pipeline and the
+# trajectory / surgery scripts) ------------------------------------------------------
+
+# CRN salt: sample seed = _SAMPLE_SEED_BASE + prompt_index, identical for the base and
+# every adapter, so the same prompt draws the same stream across models (paired-contrast
+# variance reduction). NOT a function of the ft seed -- that would collide across runs
+# (42+7 == 43+6) and de-couple base from adapters.
+_SAMPLE_SEED_BASE = 20_240_101
+
+
+@dataclass(frozen=True)
+class SetScore:
+    """One model's score on one prompt set: across-prompt p(target) CI + rank stats.
+
+    ``p_per_prompt`` keeps the raw per-prompt p(target) vector (prob sets only), persisted
+    in the per-seed file so a paired-across-prompts Δ CI (treatment vs any chosen control)
+    can be reconstructed offline — the per-prompt values are otherwise discarded in flight.
+    """
+
+    ci: CI
+    rank_mean: float | None
+    rank1_frac: float | None
+    p_per_prompt: tuple[float, ...] | None = None
+
+
+def _score_model_over_sets(
+    model,
+    tokenizer,
+    device: str,
+    prompt_by_set: Mapping[str, tuple[str, ...]],
+    prompt_sets: tuple[PromptSet, ...],
+    forms: tuple[str, ...],
+    target_id: int,
+    n_samples: int,
+    temperature: float,
+    confidence: float,
+) -> dict[str, SetScore]:
+    """Score one model over `prompt_sets`. Returns set name -> SetScore.
+
+    ``prob`` sets read exact ``p(target)`` + full-vocab rank (deterministic). ``sample``
+    sets draw completions with a CRN seed (prompt index only, model-independent) and
+    whole-word match the animal.
+    """
+    out: dict[str, SetScore] = {}
+    for ps in prompt_sets:
+        prompts = prompt_by_set[ps.name]
+        if ps.scoring == "prob":
+            pr = target_prob_and_rank_per_prompt(
+                model, tokenizer, device, prompts, target_id
+            )
+            probs = [p for p, _ in pr.values()]
+            ranks = [r for _, r in pr.values()]
+            out[ps.name] = SetScore(
+                ci=compute_ci(probs, confidence),
+                rank_mean=fmean(ranks),
+                rank1_frac=sum(1 for r in ranks if r == 1) / len(ranks),
+                p_per_prompt=tuple(probs),
+            )
+            continue
+        completions_by_prompt = {
+            prompt: sample_completions(
+                model, tokenizer, device, prompt,
+                n_samples=n_samples, temperature=temperature,
+                max_new_tokens=ps.max_new_tokens,
+                seed=_SAMPLE_SEED_BASE + i,  # CRN: prompt index only, same across models
+            )
+            for i, prompt in enumerate(prompts)
+        }
+        ci, _ = summarize_model_prompt_set(completions_by_prompt, forms, confidence)
+        out[ps.name] = SetScore(ci=ci, rank_mean=None, rank1_frac=None)
+    return out

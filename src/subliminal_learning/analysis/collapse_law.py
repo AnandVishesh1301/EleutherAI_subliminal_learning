@@ -10,7 +10,9 @@ What genuinely still lives here is the two functions that read disk through the 
 and so cannot sit in the (loader-free) stats package:
 
 - `load_law_runs` -- campaign discovery over ``students/`` plus the batched cell-summary fetch.
-- `adapter_coherence` -- SVD statistics of a PEFT checkpoint's LoRA modules.
+- `adapter_coherence` -- SVD statistics of a PEFT checkpoint's LoRA modules, with its exact
+  low-rank SVD helper `low_rank_singular_values` (also used by the lora-forgetting repo's
+  ``analysis.adapter_decomp``).
 """
 
 from __future__ import annotations
@@ -23,7 +25,6 @@ from pathlib import Path
 import numpy as np  # noqa: F401  -- kept for callers doing `cl.np`-style scratch work in notebooks
 import pandas as pd
 
-from subliminal_learning.forgetting.analysis.adapter_decomp import low_rank_singular_values
 from subliminal_learning.analysis.frames import (
     PARAM_TAG_RE,
     load_cell_summaries,
@@ -70,7 +71,8 @@ from subliminal_learning.teachers.run_layout import model_dir_parts_from_name
 # Names this shim defines itself; `__all__` is their union with the mirrored stats API, so a new
 # estimator in `stats.collapse_law` shows up here without anyone editing a list.
 _OWN_PUBLIC = [
-    "PARAM_TAG_RE", "adapter_coherence", "load_law_runs", "parse_param_tag", "read_cell_set",
+    "PARAM_TAG_RE", "adapter_coherence", "load_law_runs", "low_rank_singular_values", "parse_param_tag",
+    "read_cell_set",
 ]
 
 
@@ -208,6 +210,28 @@ def load_law_runs(
     return pd.DataFrame(cell_rows), pd.DataFrame(run_rows)
 
 
+def low_rank_singular_values(b: np.ndarray, a: np.ndarray) -> np.ndarray:
+    """All (<= r) nonzero singular values of ``B @ A`` **without forming it**, descending.
+
+    ``B`` is ``d_out x r`` and ``A`` is ``r x d_in``, so ``BA`` has rank <= r. With thin
+    QR factorisations ``B = Q_b R_b`` and ``A.T = Q_a R_a``::
+
+        B A = Q_b (R_b R_a.T) Q_a.T
+
+    and since ``Q_b``/``Q_a`` have orthonormal columns the singular values of ``BA`` are
+    exactly those of the ``r x r`` matrix ``R_b R_a.T``. Exact, not an approximation —
+    ~30x cheaper than a full SVD of a 3072x768 product at r=32 (measured 2026-08-22,
+    2 BLAS threads; agrees with the full SVD to 1e-12).
+    """
+    b = np.asarray(b, dtype=np.float64)
+    a = np.asarray(a, dtype=np.float64)
+    if b.shape[1] != a.shape[0]:
+        raise ValueError(f"inner dims disagree: B{b.shape} @ A{a.shape}")
+    _, r_b = np.linalg.qr(b)
+    _, r_a = np.linalg.qr(a.T)
+    return np.linalg.svd(r_b @ r_a.T, compute_uv=False)
+
+
 def adapter_coherence(adapter_file: Path) -> pd.DataFrame:
     """SVD statistics of each LoRA module's update ``delta_W = B @ A`` in a trained adapter.
 
@@ -243,7 +267,7 @@ def adapter_coherence(adapter_file: Path) -> pd.DataFrame:
 
     tensors = load_file(str(adapter_file))
     rows = []
-    # Singular values come from the r x r QR core (adapter_decomp.low_rank_singular_values),
+    # Singular values come from the r x r QR core (`low_rank_singular_values` above),
     # never a full SVD of the d_out x d_in product (the latter ran >900s/adapter on a
     # sweep-loaded node, 2026-07-27). Still pin BLAS to one thread: the work is tiny.
     with threadpool_limits(limits=1):

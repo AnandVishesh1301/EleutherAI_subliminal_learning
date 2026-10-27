@@ -222,9 +222,6 @@ def _template_config_paths(tmp_path: Path, exp_body: str) -> tuple[Path, ...]:
     return path_cfg, model_cfg, train_cfg, exp_cfg
 
 
-# The YAML `model_spec:` route bypasses `parse_base_models`, so it enforces the same
-# grammar via `validate_spec` — including the full-seed opt-in (2026-08-19).
-
 def test_template_loader_rejects_ungated_full_seed_spec(tmp_path: Path):
     cfgs = _template_config_paths(
         tmp_path, "model_spec: {size: 160m, seed: 2, variant: full}\n"
@@ -287,8 +284,6 @@ def test_off_topic_best_config_reverses_metric_polarity():
     assert _best_config(rows, "p_target")["p_target"] == 0.01
 
 
-# --- LoRA target-module family guard ------------------------------------------
-
 NEOX_TARGETS = ["query_key_value", "dense", "dense_h_to_4h", "dense_4h_to_h"]
 
 
@@ -310,30 +305,6 @@ def test_all_linear_still_rejected_on_non_neox_base():
     with pytest.raises(ValueError, match="all-linear"):
         check_target_modules_safe("all-linear", is_neox=False)
 
-
-def test_unigram_shortfall_is_fatal_only_when_writing(capsys):
-    from forgetting.scripts.build_unigram_anchor import _check_unigram_sample
-
-    # writing a NEW anchor on an under-sampled stream must stop the build
-    with pytest.raises(SystemExit, match="only 120 usable docs of the 50000"):
-        _check_unigram_sample(120, 50_000, 900, 40_000, will_write=True)
-    # on the verify path the drift gate arbitrates; a loud print is enough
-    _check_unigram_sample(120, 50_000, 900, 40_000, will_write=False)
-    assert "WARNING" in capsys.readouterr().out
-    # a full sample is silent either way
-    _check_unigram_sample(50_000, 50_000, 90_000, 4_000_000, will_write=True)
-    assert capsys.readouterr().out == ""
-
-
-def test_unigram_empty_counts_are_fatal_on_every_path():
-    from forgetting.scripts.build_unigram_anchor import _check_unigram_sample
-
-    for will_write in (True, False):
-        with pytest.raises(SystemExit, match="no tokens counted"):
-            _check_unigram_sample(50_000, 50_000, 50_000, 0, will_write=will_write)
-
-
-# --- DataDecide student path reconstruction + cross-family guard ---------------
 
 DD_BASE_REF = "allenai/DataDecide-dolma1_7-1B@step69369-seed-default"
 

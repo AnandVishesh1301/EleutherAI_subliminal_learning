@@ -17,24 +17,12 @@ import threading
 import time
 
 from .sequence_length_transfer import canonical_identity, finite
+from subliminal_learning.utils.io import file_sha256, read_json
 
 DEFAULT_ROOT = Path("/mnt/cold-1/soar-subliminal/angela/outputs")
 DEFAULT_PREFIX = Path("docs/results/data/sequence_length_transfer_20260924")
 ORDINARY_DATASET = re.compile(r"^ex10-20_prefix_n[0-9]+k?$")
 TEACHER_TAG = re.compile(r"^(?P<recipe>.+)_tseed(?P<seed>[0-9]+)$")
-
-
-def read_json(path):
-    with Path(path).open() as handle:
-        return json.load(handle)
-
-
-def sha(path):
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def resolve_path(path, root):
@@ -240,7 +228,7 @@ def teacher_metrics(teacher_dir, expected_model, recipe, seed):
                 out[f"teacher_{split}_p"] = float(value)
         out.update(
             teacher_preference_path=str(preference),
-            teacher_preference_sha256=sha(preference),
+            teacher_preference_sha256=file_sha256(preference),
             teacher_eval_adapter_id=p.get("sets", {})
             .get("favorite", {})
             .get("adapter_id"),
@@ -276,7 +264,7 @@ def teacher_metrics(teacher_dir, expected_model, recipe, seed):
             )
         else:
             reasons.append("incomplete_or_nonfinite_ce_provenance")
-        out.update(teacher_probe_path=str(probe), teacher_probe_sha256=sha(probe))
+        out.update(teacher_probe_path=str(probe), teacher_probe_sha256=file_sha256(probe))
     else:
         reasons.append("missing_teacher_ce")
     out["teacher_metric_reason"] = ";".join(reasons)
@@ -458,9 +446,9 @@ def collect_rows(
                 train_pool_sha256=expected,
                 pool_path=str(pp),
                 pool_manifest_path=str(pm),
-                pool_manifest_sha256=sha(pm),
-                train_manifest_sha256=sha(mp),
-                student_eval_sha256=sha(ep),
+                pool_manifest_sha256=file_sha256(pm),
+                train_manifest_sha256=file_sha256(mp),
+                student_eval_sha256=file_sha256(ep),
                 test_prompts_hash=item.get("prompts_hash"),
                 teacher_adapter_id=generation.get("adapter_id"),
                 base_model_repo=receiver,
@@ -548,7 +536,7 @@ def load_cached_rows(path):
     path = Path(path)
     with gzip.open(path, "rt") if path.suffix == ".gz" else path.open() as handle:
         rows = json.load(handle)
-    return rows, dict(path=str(path), sha256=sha(path), rows=len(rows))
+    return rows, dict(path=str(path), sha256=file_sha256(path), rows=len(rows))
 
 
 def validate_identities(rows):

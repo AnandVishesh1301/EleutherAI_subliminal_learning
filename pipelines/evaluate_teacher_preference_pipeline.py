@@ -28,27 +28,25 @@ Design notes:
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import fmean
-from typing import Literal, Mapping
+from typing import Mapping
 
 from loguru import logger
 
 from subliminal_learning.config import PathsConfig
 from subliminal_learning.evaluation.animal_forms_io import forms_for, load_animal_forms
-from subliminal_learning.evaluation.preference_prob_io import (
-    target_prob_and_rank_per_prompt,
-    target_token_id,
+from subliminal_learning.evaluation.preference_prob_io import target_token_id
+from subliminal_learning.evaluation.preference_sampling_io import (  # noqa: F401  -- re-exported
+    SetScore,
+    _score_model_over_sets,
 )
-from subliminal_learning.evaluation.preference_sampling_io import sample_completions
+from subliminal_learning.evaluation.prompt_sets import PromptSet, prompts_hash  # noqa: F401  -- re-exported
 from subliminal_learning.evaluation.preference_scoring import (
     CI,
-    compute_ci,
     summarize_across_seeds,
-    summarize_model_prompt_set,
 )
 from subliminal_learning.evaluation.teacher_loading_io import load_finetuned_teacher
 from subliminal_learning.models.loading_io import load_model, load_tokenizer, resolve_dtype
@@ -57,15 +55,10 @@ from subliminal_learning.teachers.dataset_io import load_prompt_templates
 from subliminal_learning.teachers.run_layout import model_dir_name
 from subliminal_learning.utils.io import atomic_write_json, file_lock
 from subliminal_learning.utils.run_io import (
+    adapter_identity,  # also imported from here by the eas/numbers/steerability callers
     checkpoint_is_complete,
     checkpoint_nonfinite_count,
 )
-
-# CRN salt: sample seed = _SAMPLE_SEED_BASE + prompt_index, identical for the base and
-# every adapter, so the same prompt draws the same stream across models (paired-contrast
-# variance reduction). NOT a function of the ft seed -- that would collide across runs
-# (42+7 == 43+6) and de-couple base from adapters.
-_SAMPLE_SEED_BASE = 20_240_101
 
 
 class DivergedCheckpointError(RuntimeError):
@@ -76,30 +69,6 @@ class DivergedCheckpointError(RuntimeError):
     ``p_target = 0``, which is indistinguishable from a model that simply never prefers
     the target. Callers should record the cell as diverged.
     """
-
-
-@dataclass(frozen=True)
-class PromptSet:
-    """One named prompt file with its scoring mode.
-
-    Attributes:
-        name: Short label, e.g. "favorite", "dislike", "storytelling".
-        path: JSON file of prompt strings.
-        max_new_tokens: Tokens to generate per completion (``scoring="sample"`` only).
-        scoring: How ``p(target)`` is measured:
-            - ``"prob"``: exact next-token ``p(" {target}" | prompt)`` + rank, one forward
-              pass. Used both where the target is the grammatical continuation (the
-              "...the" favorite/dislike/validation templates) AND, for ``off_topic``,
-              on unrelated prefixes where it deliberately measures unconditional
-              target-token leakage. Assumes a single-token singular target.
-            - ``"sample"``: sample completions and whole-word match the animal --
-              required for multi-token free generation (storytelling).
-    """
-
-    name: str
-    path: Path
-    max_new_tokens: int
-    scoring: Literal["prob", "sample"] = "sample"
 
 
 @dataclass(frozen=True)
@@ -198,81 +167,7 @@ class EvaluateTeacherPreferenceResult:
     summaries: tuple[PromptSetSummary, ...]
 
 
-@dataclass(frozen=True)
-class SetScore:
-    """One model's score on one prompt set: across-prompt p(target) CI + rank stats.
-
-    ``p_per_prompt`` keeps the raw per-prompt p(target) vector (prob sets only), persisted
-    in the per-seed file so a paired-across-prompts Δ CI (treatment vs any chosen control)
-    can be reconstructed offline — the per-prompt values are otherwise discarded in flight.
-    """
-
-    ci: CI
-    rank_mean: float | None
-    rank1_frac: float | None
-    p_per_prompt: tuple[float, ...] | None = None
-
-
 # ---- small JSON helpers -----------------------------------------------------
-
-
-def prompts_hash(prompts: tuple[str, ...] | list[str]) -> str:
-    """Short content hash of a prompt list. Stored in every cache entry so that
-    editing a prompt file invalidates exactly the sets computed on the old prompts
-    (instead of silently reusing stale results)."""
-    return hashlib.sha256("\n".join(prompts).encode()).hexdigest()[:16]
-
-
-def adapter_identity(ckpt_dir: Path) -> str | None:
-    """Short content hash of the checkpoint's weights, or None if no weight file.
-
-    Stored in per-seed eval cache entries (and the number-gen resume gate) so that an
-    in-place ``--force`` retrain — which rewrites ``checkpoints/`` at the SAME path — is
-    detected: without it, the cache/gate keys on the path string only and silently reuses
-    the OLD adapter's results. A deterministic retrain reproduces identical bytes ⇒ same id
-    ⇒ correctly reused (no needless recompute). LoRA adapters are ~MBs so hashing is cheap;
-    single-file FULL checkpoints are also covered (a few hundred MB ⇒ ~1s — the price of
-    the retrain guard applying to full-FT teachers too, instead of silently not at all).
-    SHARDED checkpoints hash every shard the index references (sorted, filenames bound
-    into the digest) — hashing the index alone would be a false identity, since its bytes
-    need not change on retrain, and returning None made both the per-seed cache and the
-    sweep-level DONE gate ({seed: None} == {seed: None}) blind to an in-place retrain.
-    None now means only "no weight files at all" or "index references a missing shard"
-    (an incomplete save has no identity).
-    """
-    for name in (
-        "adapter_model.safetensors", "adapter_model.bin",
-        "model.safetensors", "pytorch_model.bin",
-    ):
-        wf = ckpt_dir / name
-        if wf.exists():
-            h = hashlib.sha256()
-            with open(wf, "rb") as fh:
-                for chunk in iter(lambda: fh.read(1 << 20), b""):
-                    h.update(chunk)
-            return h.hexdigest()[:16]
-    for idx_name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
-        idx = ckpt_dir / idx_name
-        if not idx.exists():
-            continue
-        try:
-            weight_map = json.loads(idx.read_text()).get("weight_map", {})
-            shards = sorted(set(weight_map.values()))
-        except (OSError, json.JSONDecodeError, AttributeError):
-            return None
-        if not shards:
-            return None
-        h = hashlib.sha256()
-        for shard in shards:
-            sp = ckpt_dir / shard
-            if not sp.is_file():
-                return None  # incomplete save: no identity
-            h.update(shard.encode())
-            with open(sp, "rb") as fh:
-                for chunk in iter(lambda: fh.read(1 << 20), b""):
-                    h.update(chunk)
-        return h.hexdigest()[:16]
-    return None
 
 
 def _read_json(path: Path) -> dict:
@@ -562,54 +457,6 @@ def _discover_ftseed_dirs(
             continue
         found.append((seed, ckpt))
     return found
-
-
-def _score_model_over_sets(
-    model,
-    tokenizer,
-    device: str,
-    prompt_by_set: Mapping[str, tuple[str, ...]],
-    prompt_sets: tuple[PromptSet, ...],
-    forms: tuple[str, ...],
-    target_id: int,
-    n_samples: int,
-    temperature: float,
-    confidence: float,
-) -> dict[str, SetScore]:
-    """Score one model over `prompt_sets`. Returns set name -> SetScore.
-
-    ``prob`` sets read exact ``p(target)`` + full-vocab rank (deterministic). ``sample``
-    sets draw completions with a CRN seed (prompt index only, model-independent) and
-    whole-word match the animal.
-    """
-    out: dict[str, SetScore] = {}
-    for ps in prompt_sets:
-        prompts = prompt_by_set[ps.name]
-        if ps.scoring == "prob":
-            pr = target_prob_and_rank_per_prompt(
-                model, tokenizer, device, prompts, target_id
-            )
-            probs = [p for p, _ in pr.values()]
-            ranks = [r for _, r in pr.values()]
-            out[ps.name] = SetScore(
-                ci=compute_ci(probs, confidence),
-                rank_mean=fmean(ranks),
-                rank1_frac=sum(1 for r in ranks if r == 1) / len(ranks),
-                p_per_prompt=tuple(probs),
-            )
-            continue
-        completions_by_prompt = {
-            prompt: sample_completions(
-                model, tokenizer, device, prompt,
-                n_samples=n_samples, temperature=temperature,
-                max_new_tokens=ps.max_new_tokens,
-                seed=_SAMPLE_SEED_BASE + i,  # CRN: prompt index only, same across models
-            )
-            for i, prompt in enumerate(prompts)
-        }
-        ci, _ = summarize_model_prompt_set(completions_by_prompt, forms, confidence)
-        out[ps.name] = SetScore(ci=ci, rank_mean=None, rank1_frac=None)
-    return out
 
 
 def _resolve_base_control(

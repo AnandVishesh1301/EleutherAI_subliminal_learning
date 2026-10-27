@@ -23,8 +23,6 @@ from safetensors.numpy import save_file
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.convert_legacy_pilekl_to_rundir import _kl_is_current
-from forgetting.scripts.fidelity_ckpt_trajectory import _is_current as fidelity_is_current
-from subliminal_learning.forgetting.analysis.adapter_decomp import discover_adapters
 from subliminal_learning.evaluation.ckpt_trajectories import (
     _checkpoint_dirs,
     distinct_steps,
@@ -80,17 +78,6 @@ def test_final_train_step_reads_the_manifest(tmp_path):
     assert final_train_step(tmp_path / "nowhere") is None
 
 
-def test_adapter_decomp_discovery_keeps_the_last_step_without_the_duplicate(tmp_path):
-    for duplicate in (True, False):
-        root = tmp_path / str(duplicate)
-        _run(root, duplicate=duplicate)
-        refs = discover_adapters(root, kinds=("student",), checkpoints=True)
-        steps = sorted(r.step for r in refs if r.step is not None)
-        assert steps == [2, FINAL_STEP]
-        # The endpoint itself is still emitted once with step None (unchanged schema).
-        assert sum(1 for r in refs if r.step is None) == 1
-
-
 # --------------------------------------------------------------------------- gates
 def _pref_record(steps):
     return {"checkpoint_steps": list(steps), "animals": ["dog"],
@@ -126,23 +113,6 @@ def test_every_gate_is_current_on_a_THINNED_run():
                                "train_manifest_ref": "r"}, full, pile, "r")
 
 
-def test_dose_gate_is_current_on_a_thinned_run(tmp_path):
-    """The dose gate skips a run whose stored record covers the surviving checkpoints."""
-    from forgetting.scripts import ckpt_dose_trajectory as dose
-    from subliminal_learning.utils.run_io import manifest_ref
-
-    lineage = tmp_path / "lineage"
-    run_dir = _run(lineage, "tag/ftseed1", duplicate=False)
-    out = run_dir / "eval" / "dose_traj.json"
-    out.parent.mkdir()
-    # Measured when checkpoint-1 and checkpoint-3 still existed; only 2 + the endpoint left.
-    out.write_text(json.dumps({
-        "checkpoint_steps": [1, 2, 3, 4], "train_manifest_ref": manifest_ref(run_dir),
-        "points": [{"step": s} for s in (1, 2, 3, 4)]}))
-    status = dose._run_one(("tag", 1, str(lineage), str(tmp_path / "analysis"), False, False))
-    assert "up to date" in status
-
-
 def test_distinct_steps_drops_duplicates_and_the_legacy_none_endpoint():
     assert distinct_steps([2, 4, 4]) == [2, 4]
     assert distinct_steps([2, None]) == [2]
@@ -158,45 +128,6 @@ def test_legacy_pilekl_converter_gate_ignores_the_duplicate():
     assert not _kl_is_current(stored, [2, 3], pile, "r")
 
 
-def test_fidelity_gate_ignores_the_duplicate(tmp_path):
-    run_dir = _run(tmp_path, duplicate=True)
-    from subliminal_learning.utils.run_io import manifest_ref
-    record = {"schema_version": 1, "manifest_ref": manifest_ref(run_dir), "n_rows": 8,
-              "points": [{"step": 2, "checkpoint": "checkpoint-2"},
-                         {"step": 4, "checkpoint": "checkpoint-4"},
-                         {"step": 4, "checkpoint": "checkpoints"}]}
-    (run_dir / "eval").mkdir()
-    (run_dir / "eval" / "fidelity_traj.json").write_text(json.dumps(record))
-    # Disk is deduped, the record was written when the duplicate existed: still current.
-    ckpts = _checkpoint_dirs(run_dir / "checkpoints")
-    assert fidelity_is_current(run_dir, 8, ckpts)
-    # And the reverse: a record written after the dedupe, disk still holding the dir.
-    record["points"] = [{"step": 2, "checkpoint": "checkpoint-2"},
-                        {"step": 4, "checkpoint": "checkpoints"}]
-    (run_dir / "eval" / "fidelity_traj.json").write_text(json.dumps(record))
-    assert fidelity_is_current(run_dir, 8, ckpts)
-    # A missing step is still stale.
-    record["points"] = [{"step": 2, "checkpoint": "checkpoint-2"}]
-    (run_dir / "eval" / "fidelity_traj.json").write_text(json.dumps(record))
-    assert not fidelity_is_current(run_dir, 8, ckpts)
-
-
-def test_dose_gate_ignores_the_duplicate(tmp_path):
-    """`scripts.ckpt_dose_trajectory._run_one` skips before loading any weights."""
-    from forgetting.scripts import ckpt_dose_trajectory as dose
-
-    lineage = tmp_path / "lineage"
-    run_dir = _run(lineage, "tag/ftseed1", duplicate=True)
-    out = run_dir / "eval" / "dose_traj.json"
-    out.parent.mkdir()
-    from subliminal_learning.utils.run_io import manifest_ref
-    out.write_text(json.dumps({
-        "checkpoint_steps": [2, 4, 4], "train_manifest_ref": manifest_ref(run_dir),
-        "points": [{"step": 2}, {"step": 4}, {"step": 4}]}))
-    status = dose._run_one(("tag", 1, str(lineage), str(tmp_path / "analysis"), False, False))
-    assert "up to date" in status
-
-
 def test_eas_doc_keeps_a_stored_duplicate_point(tmp_path):
     """A stored `checkpoint-4` point whose step the endpoint still covers is NOT dropped."""
     meta = {"kind": "eas", "schema_version": 1}
@@ -209,73 +140,6 @@ def test_eas_doc_keeps_a_stored_duplicate_point(tmp_path):
     plan = eas_doc_status(doc, expected_meta=meta, checkpoints=[("checkpoints", "B")],
                           references={"dog/t": "T"})
     assert plan.dropped == () and plan.is_current
-
-
-# ------------------------------------------------- thinning guards on the CPU-only writers
-def test_dose_force_on_a_thinned_run_keeps_the_stored_points(tmp_path):
-    """--force re-measures the surviving rungs and CARRIES the thinned-away ones.
-
-    The stored record is preserved beside itself as well; it used to be UNLINKED by the
-    CLI before the workers started, which made both impossible.
-    """
-    from forgetting.scripts import ckpt_dose_trajectory as dose
-    from subliminal_learning.utils.run_io import manifest_ref
-
-    lineage = tmp_path / "lineage"
-    run_dir = _run(lineage, "tag/ftseed1", duplicate=False)
-    out = run_dir / "eval" / "dose_traj.json"
-    out.parent.mkdir()
-    stored = [1, 2, 3, 4]
-    out.write_text(json.dumps({
-        "checkpoint_steps": stored, "train_manifest_ref": manifest_ref(run_dir),
-        "points": [{"step": s, "D_fro": 0.1} for s in stored]}))
-    status = dose._run_one(
-        ("tag", 1, str(lineage), str(tmp_path / "analysis"), False, True))
-    assert status.startswith("done")
-    rec = json.loads(out.read_text())
-    assert rec["checkpoint_steps"] == stored
-    assert [p["step"] for p in rec["points"]] == stored
-    # The rungs on disk (2 and the endpoint 4) are freshly measured, the rest carried.
-    assert {p["step"] for p in rec["points"] if "n_modules" in p} == {2, 4}
-    kept = list(out.parent.glob("dose_traj.json.superseded-*"))
-    assert len(kept) == 1 and json.loads(kept[0].read_text())["checkpoint_steps"] == stored
-
-
-def test_dose_force_after_a_retrain_does_not_carry_stale_points(tmp_path):
-    """A different `train_manifest_ref` = another run: nothing is carried, copy kept."""
-    from forgetting.scripts import ckpt_dose_trajectory as dose
-
-    lineage = tmp_path / "lineage"
-    run_dir = _run(lineage, "tag/ftseed1", duplicate=False)
-    out = run_dir / "eval" / "dose_traj.json"
-    out.parent.mkdir()
-    out.write_text(json.dumps({
-        "checkpoint_steps": [1, 2, 3, 4], "train_manifest_ref": {"other": "run"},
-        "points": [{"step": s, "D_fro": 0.1} for s in (1, 2, 3, 4)]}))
-    dose._run_one(("tag", 1, str(lineage), str(tmp_path / "analysis"), False, True))
-    assert json.loads(out.read_text())["checkpoint_steps"] == [2, 4]
-    assert len(list(out.parent.glob("dose_traj.json.superseded-*"))) == 1
-
-
-def test_fidelity_gate_reads_the_checkpoint_steps_header(tmp_path):
-    """The header is the record's step list; older records fall back to their points."""
-    from subliminal_learning.utils.run_io import manifest_ref
-
-    run_dir = _run(tmp_path, duplicate=False)
-    (run_dir / "eval").mkdir()
-    path = run_dir / "eval" / "fidelity_traj.json"
-    ckpts = _checkpoint_dirs(run_dir / "checkpoints")
-    # A thinned run: the header covers the full ladder while only 2 points remain.
-    path.write_text(json.dumps({
-        "schema_version": 1, "manifest_ref": manifest_ref(run_dir), "n_rows": 8,
-        "checkpoint_steps": [1, 2, 3, 4],
-        "points": [{"step": 1, "ce_heldout": 1.0}, {"step": 3, "ce_heldout": 1.0}]}))
-    assert fidelity_is_current(run_dir, 8, ckpts)
-    path.write_text(json.dumps({
-        "schema_version": 1, "manifest_ref": manifest_ref(run_dir), "n_rows": 8,
-        "checkpoint_steps": [1, 3],
-        "points": [{"step": 1, "ce_heldout": 1.0}, {"step": 3, "ce_heldout": 1.0}]}))
-    assert not fidelity_is_current(run_dir, 8, ckpts)
 
 
 def test_legacy_pilekl_conversion_preserves_a_fuller_run_dir_record(tmp_path, monkeypatch):

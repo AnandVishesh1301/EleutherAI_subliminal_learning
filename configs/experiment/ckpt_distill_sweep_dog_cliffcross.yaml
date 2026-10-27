@@ -19,5 +19,4 @@ pairs: {topology: full}
 # The one tag trained at every cliff step -> zero teacher/numgen backfill.
 teacher: {param_tags: [ep20_lr1e-4_r16a32]}
 jobq: {queue_prefix: ckpt-dog-cliffcross,
-       priorities: {teacher: 32, numgen: 31, distill: 30},
-       mem_mib: {teacher: 16000, numgen: 24000, distill: 20000}}
+       priorities: {teacher: 32, numgen: 31, distill: 30}}

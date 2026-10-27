@@ -782,7 +782,7 @@ def test_notebook_builder_writes_under_the_repo_and_uses_no_relative_paths():
     """Importing the builder must not write; its output path and its cells are repo-anchored."""
     from subliminal_learning.config import repo_root
 
-    import scripts.build_transfer_significance_nb as builder
+    import notebooks.builders.build_transfer_significance_nb as builder
 
     assert builder.OUT.is_absolute()
     assert builder.OUT.parent == repo_root() / "notebooks"

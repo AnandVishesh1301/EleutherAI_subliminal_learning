@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from scripts import collect_first_number_results as c
+from subliminal_learning.utils.io import file_sha256
 
 
 def evaluation():
@@ -40,7 +41,7 @@ def test_eval_checks_each_prompt_not_only_saved_mean():
 def test_actual_pool_hash_must_match_manifest_and_frozen_campaign(tmp_path):
     filtered = tmp_path / "filtered.jsonl"
     filtered.write_text("{}\n" * 10000)
-    digest = c.sha(filtered)
+    digest = file_sha256(filtered)
     (tmp_path / "manifest.json").write_text(json.dumps({
         "filtered_sha256": digest, "n_filtered": 10000,
     }))

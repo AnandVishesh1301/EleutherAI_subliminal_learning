@@ -16,6 +16,7 @@ import numpy as np
 
 from scripts import collect_first_number_results as old
 from scripts import resampling_first_only_early as early
+from subliminal_learning.utils.io import file_sha256, write_csv
 
 RECIPIENTS = (75000, 85000, 95000, 105000, 115000, 125000)
 DRAWS = (0, 1, 2)
@@ -46,10 +47,6 @@ ANCHOR_CONDITIONS = {
     "iid_untuned": "mature teacher (IID)",
     "iid_permuted": "mature teacher (permuted IID)",
 }
-
-
-def sha(path):
-    return old.sha(path)
 
 
 def _check_grid(rows, expected):
@@ -120,8 +117,8 @@ def verify_parents(manifest):
     for parent in manifest.get("parents", {}).values():
         path = Path(parent["filtered_path"])
         if (
-            sha(path) != parent["filtered_sha256"]
-            or sha(path.parent / "manifest.json") != parent["manifest_sha256"]
+            file_sha256(path) != parent["filtered_sha256"]
+            or file_sha256(path.parent / "manifest.json") != parent["manifest_sha256"]
         ):
             raise ValueError(f"parent pool or manifest hash mismatch: {path}")
 
@@ -170,11 +167,11 @@ def load_pools(root=ROOT):
                 )
                 metadata = {
                     "campaign": str(CAMPAIGN),
-                    "campaign_sha256": sha(CAMPAIGN),
+                    "campaign_sha256": file_sha256(CAMPAIGN),
                     "student_training_sha256": campaign["student_training_sha256"],
                 }
             else:
-                expected_hash, manifest_hash = sha(filtered), None
+                expected_hash, manifest_hash = file_sha256(filtered), None
                 metadata = {
                     "verification": "current pool and parent manifests plus actual train/eval artifacts"
                 }
@@ -228,8 +225,8 @@ def collect_run(root, recipient, arm, draw, seed, pool):
         "off_topic_prompts_hash": old.PROMPTS["off_topic"][0],
         "eval_path": str(ev),
         "train_manifest": str(tr),
-        "eval_sha256": sha(ev),
-        "train_sha256": sha(tr),
+        "eval_sha256": file_sha256(ev),
+        "train_sha256": file_sha256(tr),
     }
 
 
@@ -314,7 +311,7 @@ def aggregate(rows):
 def load_teacher_baselines(path=BASELINE_SOURCE):
     """Load fixed-recipe, three-seed original-data reference curves."""
     selected = []
-    source_sha = sha(path)
+    source_sha = file_sha256(path)
     pools_by_teacher = {}
     with Path(path).open(newline="") as f:
         for row in csv.DictReader(f):
@@ -350,13 +347,6 @@ def load_teacher_baselines(path=BASELINE_SOURCE):
     if len(keys) != len(expected) or set(keys) != expected:
         raise ValueError("missing or duplicate fixed-teacher baseline cells")
     return selected
-
-
-def write_csv(path, rows):
-    with Path(path).open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0]))
-        w.writeheader()
-        w.writerows(rows)
 
 
 def plot(summary, pools, output=FIGURE, baselines=None):
@@ -506,9 +496,9 @@ def collect(root=ROOT, out=OUT, figure=FIGURE, anchor_out=ANCHOR_OUT, baseline_s
     ]:
         path = prefix.with_name(prefix.name + "_" + name + ".csv")
         write_csv(path, table)
-        hashes[str(path)] = sha(path)
+        hashes[str(path)] = file_sha256(path)
     write_csv(baseline_out, baselines)
-    hashes[str(baseline_out)] = sha(baseline_out)
+    hashes[str(baseline_out)] = file_sha256(baseline_out)
     provenance = {
         "collected_utc": datetime.now(timezone.utc).isoformat(),
         "n_runs": len(rows),
@@ -556,7 +546,7 @@ def collect(root=ROOT, out=OUT, figure=FIGURE, anchor_out=ANCHOR_OUT, baseline_s
         },
         "table_sha256": hashes,
         "teacher_baseline": {"source_csv": str(baseline_source), "source_csv_sha256": baselines[0]["source_csv_sha256"], "recipe": BASELINE_RECIPE, "teacher_steps": [75000, 125000], "student_seeds": list(SEEDS), "aggregation": "mean of three student seeds for each teacher/student checkpoint"},
-        "script_sha256": sha(__file__),
+        "script_sha256": file_sha256(__file__),
         "definitions": {
             "aggregation": "mean student seeds within draw, then equal mean over three draws",
             "shading": "one sample SD across three pool-draw means; not a confidence interval",

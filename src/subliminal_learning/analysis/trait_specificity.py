@@ -691,14 +691,16 @@ def plot_trait_vs_others_sets(lifts: pd.DataFrame, out_png: Path | str | None = 
     """Two panels of the trait-vs-others chart, one per prompt set, on a shared y axis.
 
     Panel **A** is ``prompt_sets[0]`` (the ``test`` animal question the trait is defined by), panel
-    **B** is ``prompt_sets[1]`` (``off_topic`` prompts, which never mention animals), drawn with the
-    same conventions as `plot_trait_vs_others` (x = receiver init, colour = teacher trait, solid =
-    own-trait lift, dashed = the non-target mean) and no per-point value labels. The y limits are
+    **B** is ``prompt_sets[1]`` (``off_topic`` prompts, which never mention animals). Same
+    encoding as `plot_trait_vs_others` (x = receiver init, colour = teacher trait, solid = own-trait
+    lift, dashed = the non-target mean, band = 95% cluster-bootstrap CI) in the paper figure style
+    of ``notebooks/figures/figure2_family`` (`draw_size_olmo`): left-aligned lettered titles, a
+    light y grid, no top/right spines, frameless legend, 12 x 4.1 in at 200 dpi. The y limits are
     the union over both panels, so the off-topic lift is read against the test-set scale.
 
     Args:
         lifts: Output of `summarize_trait_vs_others` for both prompt sets, concatenated.
-        out_png: Optional destination PNG.
+        out_png: Optional destination PNG; a PDF and an SVG are written next to it.
         prompt_sets: The two prompt sets, in panel order.
 
     Returns:
@@ -706,29 +708,183 @@ def plot_trait_vs_others_sets(lifts: pd.DataFrame, out_png: Path | str | None = 
     """
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
-    ylo: list[float] = []
-    yhi: list[float] = []
-    for i, (ax, ps) in enumerate(zip(axes, prompt_sets)):
-        d = _pick(lifts, ps)
-        _draw_trait_vs_others(
-            ax, d, ylabel=f"p(student) $-$ p(control), {PROMPT_SET_LABEL.get(ps, ps)}",
-            legend=i == 0, control_label=i == 0)  # off-topic lifts sit on the "= control" label
-        sm = d[d.condition == SAME]
-        ylo.append(float(sm.lo.min()))
-        yhi.append(float(sm.hi.max()))
-    _set_ylim(axes[0], ylo, yhi)  # shared y: one call sets both panels
-    for ax, letter in zip(axes, "AB"):
-        ax.annotate(letter, (0.0, 1.0), xycoords="axes fraction", xytext=(-38, 10),
-                    textcoords="offset points", fontsize=13, fontweight="bold", color=TEXT,
-                    ha="left", va="bottom", annotation_clip=False)
-    fig.tight_layout()
-    fig.subplots_adjust(wspace=0.12)
+    titles = {"test": "Preference Prompts", "off_topic": "Off-Topic Prompts"}
+    with plt.rc_context({"font.size": 10, "pdf.fonttype": 42, "svg.fonttype": "none"}):
+        fig, axes = plt.subplots(1, 2, figsize=(12.0, 4.1), sharey=True)
+        ylo: list[float] = [0.0]
+        yhi: list[float] = [0.0]
+        traits: list[str] = []
+        for ax, ps, letter in zip(axes, prompt_sets, "AB"):
+            sm = _pick(lifts, ps)
+            sm = sm[sm.condition == SAME]
+            models = [m for m in SAME_MODELS if m in set(sm.receiver)]
+            pos = {m: i for i, m in enumerate(models)}
+            traits = [t for t in TRAITS if t in set(sm.trait)]
+            for trait in traits:
+                color = TRAIT_COLORS[trait]
+                for q, ls in (("trait", "-"), ("others", "--")):
+                    d = sm[(sm.trait == trait) & (sm.quantity == q)]
+                    if d.empty:
+                        continue
+                    d = d.assign(x=d.receiver.map(pos)).sort_values("x")
+                    ylo.append(float(d.lo.min()))
+                    yhi.append(float(d.hi.max()))
+                    ax.fill_between(d.x, d.lo, d.hi, color=color, alpha=0.13, lw=0, zorder=2)
+                    ax.plot(d.x, d.lift, ls, color=color, lw=1.6, zorder=3)
+                    ax.plot(d.x, d.lift, "o", ms=4.5, color=color, mec="white", mew=0.8,
+                            ls="none", zorder=4)
+            ax.axhline(0.0, color="#999999", lw=0.8, zorder=1)  # student = control
+            ax.set_xticks(list(pos.values()), models, fontsize=8)
+            ax.set_xlim(-0.4, len(models) - 0.6)
+            ax.set_xlabel("receiver (Pythia 160M pretraining seed)", fontsize=9)
+            ax.set_title(f"{letter}   {titles.get(ps, PROMPT_SET_LABEL.get(ps, ps))}",
+                         loc="left", fontsize=12)
+            ax.set_axisbelow(True)
+            ax.grid(axis="y", color="#e5e5e5", lw=0.7)
+            ax.spines[["top", "right"]].set_visible(False)
+            ax.tick_params(axis="x", length=0, pad=7)
+        # The shared axis is labelled once, on the left panel only.
+        axes[0].set_ylabel("p(student) − p(control)")
+        lo, hi = min(ylo), max(yhi)
+        pad = 0.06 * (hi - lo)
+        axes[0].set_ylim(lo - pad, hi + pad)
+        handles = ([plt.Line2D([], [], color=TRAIT_COLORS[t], lw=1.8, label=t) for t in traits]
+                   + [plt.Line2D([], [], color="#555555", lw=1.6, ls="-",
+                                 label="teacher's animal"),
+                      plt.Line2D([], [], color="#555555", lw=1.6, ls="--",
+                                 label="mean of 9 other animals")])
+        axes[1].legend(handles=handles, loc="upper left", ncol=2, frameon=False, fontsize=7.5,
+                       title="teacher trait", title_fontsize=7.5, handlelength=1.8,
+                       columnspacing=1.2, alignment="left")
+        fig.subplots_adjust(left=0.06, right=0.99, bottom=0.17, top=0.88, wspace=0.05)
     if out_png is not None:
-        Path(out_png).parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(out_png, dpi=150, bbox_inches="tight", facecolor="white")
-        # Paper copy: a vector PDF next to the PNG (Angela 2026-09-26).
-        fig.savefig(Path(out_png).with_suffix(".pdf"), bbox_inches="tight", facecolor="white")
+        out = Path(out_png)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fig.canvas.draw()
+        for ext in ("png", "pdf", "svg"):  # the figure-2 export set (PNG + vector copies)
+            fig.savefig(out.with_suffix(f".{ext}"), dpi=200)
+    return fig
+
+
+def summarize_pooled_trait_vs_others(df: pd.DataFrame, n_boot: int = 2000, seed: int = 0,
+                                     prompt_set: str = "test") -> pd.DataFrame:
+    """Own-animal lift vs. the SUMMED lift of the other nine animals, per trait, receivers pooled.
+
+    Same-model rows only. Per run two scalars: ``q_trait`` = $p$ of the teacher's own animal and
+    ``q_others`` = the **sum** of $p$ over the nine non-target animals (the total probability mass
+    the student puts on other animals, so the two bars of `plot_specificity_bars` are on one
+    footing). Each lift = mean over the pooled treatment runs $-$ mean over the pooled control
+    runs, pooled over the four same-model receivers like `summarize_pooled_receivers`, with the
+    same cluster bootstrap (cluster = receiver x teacher; controls resampled by row).
+
+    Args:
+        df: Output of `load_specificity_runs`.
+        n_boot: Bootstrap replicates.
+        seed: RNG seed.
+        prompt_set: Which scored prompt set to read (``"test"`` or ``"off_topic"``).
+
+    Returns:
+        Frame with ``trait, prompt_set, quantity, lift, lo, hi, n_treat, n_ctrl, n_clusters``,
+        ``quantity`` in ``{"trait", "others"}``, traits in `TRAITS` order.
+    """
+    sm = _pick(df, prompt_set)
+    sm = sm[sm.condition == SAME]
+    key = ["trait", "receiver", "teacher", "cell", "arm"]
+    per_run = (sm.assign(is_target=sm.animal == sm.trait)
+               .pivot_table(index=key, columns="is_target", values="p", aggfunc="sum")
+               .rename(columns={True: "q_trait", False: "q_others"}).reset_index().dropna())
+    out = []
+    for trait in [t for t in TRAITS if t in set(per_run.trait)]:
+        sub = per_run[per_run.trait == trait]
+        t, c = sub[sub.arm == "treatment"], sub[sub.arm == "control"]
+        if t.empty or c.empty:
+            continue
+        clusters = (t.receiver + "|" + t.teacher).to_numpy()
+        for q in ("trait", "others"):
+            lift, lo, hi = cluster_bootstrap_mean_difference(
+                t[f"q_{q}"].to_numpy(), clusters, c[f"q_{q}"].to_numpy(),
+                n_boot=n_boot, seed=seed)
+            out.append({"trait": trait, "prompt_set": prompt_set, "quantity": q, "lift": lift,
+                        "lo": lo, "hi": hi, "n_treat": len(t), "n_ctrl": len(c),
+                        "n_clusters": len(set(clusters))})
+    return pd.DataFrame(out)
+
+
+def plot_specificity_bars(summary: pd.DataFrame, out_png: Path | str | None = None, *,
+                          prompt_sets: tuple[str, str] = ("test", "off_topic")):
+    """The paper specificity figure: per teacher trait, own-animal lift next to the other nine's.
+
+    x = teacher trait (dog, cat, lion, pig). Two bars per trait from
+    `summarize_pooled_trait_vs_others`: the lift of the teacher's own animal (blue) and the summed
+    lift of the nine other scored animals (grey), each p(student) $-$ p(control) with the four
+    same-model receivers pooled and a 95% cluster-bootstrap whisker. Panel **A** is
+    ``prompt_sets[0]`` (the preference prompts the trait is defined by), panel **B**
+    ``prompt_sets[1]`` (off-topic prompts); both panels share one y axis so the off-topic lift is
+    read against the preference-prompt scale, and B's bars carry their value because they are
+    small on that scale. Drawn in the ``figure2_family`` style (`draw_size_olmo`): lettered left
+    titles, light y grid, no top/right spines, frameless legend, 12 x 4.1 in at 200 dpi,
+    PNG + PDF + SVG.
+
+    Args:
+        summary: `summarize_pooled_trait_vs_others` output for both prompt sets, concatenated.
+        out_png: Optional destination PNG; a PDF and an SVG are written next to it.
+        prompt_sets: The two prompt sets, in panel order.
+
+    Returns:
+        The matplotlib ``Figure``.
+    """
+    import matplotlib.pyplot as plt
+
+    titles = {"test": "Preference Prompts", "off_topic": "Off-Topic Prompts"}
+    bars = (("trait", "teacher's own animal", "#2a78d6"),
+            ("others", "sum of the 9 other animals", "#c9c9c9"))
+    traits = [t for t in TRAITS if t in set(summary.trait)]
+    x = np.arange(len(traits))
+    width = 0.36
+    cap = 0.06
+    with plt.rc_context({"font.size": 10, "pdf.fonttype": 42, "svg.fonttype": "none"}):
+        fig, axes = plt.subplots(1, 2, figsize=(12.0, 4.1), sharey=True)
+        top, bottom = 0.0, 0.0
+        for k, (ax, ps, letter) in enumerate(zip(axes, prompt_sets, "AB")):
+            d = summary[summary.prompt_set == ps]
+            for j, (q, label, color) in enumerate(bars):
+                s = d[d.quantity == q].set_index("trait").reindex(traits)
+                pos = x + (j - 0.5) * width
+                y, lo, hi = (s[c].to_numpy(float) for c in ("lift", "lo", "hi"))
+                ok = np.isfinite(y)
+                ax.bar(pos[ok], y[ok], width * 0.91, color=color, edgecolor="#555",
+                       linewidth=0.6, label=label)
+                ok &= np.isfinite(lo) & np.isfinite(hi)
+                ax.vlines(pos[ok], lo[ok], hi[ok], color="#222222", lw=1, zorder=4)
+                ax.hlines(lo[ok], pos[ok] - cap, pos[ok] + cap, color="#222222", lw=1, zorder=4)
+                ax.hlines(hi[ok], pos[ok] - cap, pos[ok] + cap, color="#222222", lw=1, zorder=4)
+                if ok.any():
+                    top, bottom = max(top, float(hi[ok].max())), min(bottom, float(lo[ok].min()))
+                if k == 1:  # B is small on the shared scale: print the values
+                    for xi, yi, hii in zip(pos[ok], y[ok], np.where(ok, hi, y)[ok]):
+                        ax.annotate(f"{yi:+.3f}", (xi, max(hii, 0.0)), xytext=(0, 3),
+                                    textcoords="offset points", ha="center", va="bottom",
+                                    fontsize=7, color="#333333")
+            ax.axhline(0.0, color="#999999", lw=0.8, zorder=1)  # student = control
+            ax.set_xticks(x, [f"{t} teacher" for t in traits], fontsize=9)
+            ax.set_xlim(-0.6, len(traits) - 0.4)
+            ax.set_title(f"{letter}   {titles.get(ps, PROMPT_SET_LABEL.get(ps, ps))}",
+                         loc="left", fontsize=12)
+            ax.set_axisbelow(True)
+            ax.grid(axis="y", color="#e5e5e5", lw=0.7)
+            ax.spines[["top", "right"]].set_visible(False)
+            ax.tick_params(axis="x", length=0, pad=7)
+        # The shared axis is labelled once, on the left panel only.
+        axes[0].set_ylabel("p(student) − p(control)")
+        axes[0].set_ylim(bottom - 0.03 * top, top * 1.08)
+        axes[0].legend(frameon=False, fontsize=8, loc="upper right")
+        fig.subplots_adjust(left=0.06, right=0.99, bottom=0.14, top=0.88, wspace=0.05)
+    if out_png is not None:
+        out = Path(out_png)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fig.canvas.draw()
+        for ext in ("png", "pdf", "svg"):  # the figure-2 export set (PNG + vector copies)
+            fig.savefig(out.with_suffix(f".{ext}"), dpi=200)
     return fig
 
 

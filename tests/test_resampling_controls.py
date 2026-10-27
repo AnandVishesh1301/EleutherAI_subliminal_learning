@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from scripts import resampling_controls as campaign
+from subliminal_learning.utils.io import file_sha256
 from subliminal_learning.numbers.resampling import first_profile
 
 
@@ -105,7 +106,7 @@ def test_run_uses_actual_pipeline_configs_and_returned_paths(
             {
                 "source": source,
                 "transform": arm,
-                "filtered_sha256": campaign._sha256(data / "filtered.jsonl"),
+                "filtered_sha256": file_sha256(data / "filtered.jsonl"),
                 "n_filtered": 10000,
                 "home": {"home_pool": campaign.HOME_POOLS[campaign.ARM_SPECS[arm].home]},
             }
@@ -179,7 +180,7 @@ def test_manifest_hash_and_source_are_truthful(tmp_path):
         tmp_path,
     )
     assert manifest["source"] == "rng" and manifest["base_model_repo"] is None
-    assert manifest["filtered_sha256"] == campaign._sha256(
+    assert manifest["filtered_sha256"] == file_sha256(
         tmp_path / "derived/filtered.jsonl"
     )
     assert manifest["synthetic_profile_uses_teacher_information"]
@@ -338,7 +339,7 @@ def test_student_tag_is_the_pool_leaf_and_synthetic_students_are_homed_with_the_
             {
                 "source": "rng",
                 "transform": arm,
-                "filtered_sha256": campaign._sha256(data / "filtered.jsonl"),
+                "filtered_sha256": file_sha256(data / "filtered.jsonl"),
                 "n_filtered": 10000,
                 "home": {"home_pool": campaign.HOME_POOLS[campaign.ARM_SPECS[arm].home]},
             }

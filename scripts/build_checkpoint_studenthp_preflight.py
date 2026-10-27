@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,6 +11,8 @@ import shlex
 import sys
 
 import yaml
+
+from subliminal_learning.utils.io import file_sha256
 
 STEPS = tuple(range(75000, 130001, 5000)) + (143000,)
 TEACHER_STEPS = (75000, 125000)
@@ -32,9 +33,8 @@ QUEUE = "ckpt-dog-studenthp5-20260922"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def sha(path):
-    with Path(path).open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
+# Alias kept: run_logs/campaigns/*/build.py call `forward.sha`.
+sha = file_sha256
 
 
 def frozen_write(path, contents):
@@ -85,12 +85,12 @@ def local_file(recorded):
 def check_files(files):
     for path, expected in files.items():
         local = local_file(path)
-        if not readable(local) or sha(local) != expected:
+        if not readable(local) or file_sha256(local) != expected:
             raise ValueError(f"frozen input changed or disappeared: {path}")
 
 
 def verified_cell(campaign_path, campaign_sha256, key):
-    if sha(campaign_path) != campaign_sha256:
+    if file_sha256(campaign_path) != campaign_sha256:
         raise ValueError("campaign identity changed")
     campaign = json.loads(Path(campaign_path).read_text())
     cells = [cell for cell in campaign["cells"] if cell["key"] == key]
@@ -132,7 +132,7 @@ def build(output_root, out=DEFAULT_OUT, seeds=(1,)):
         Path(runner._PATHS_CONFIG), Path(runner._MODEL_CONFIG),
         Path(runner._EXPERIMENT_CONFIG),
     ]
-    shared = {record_path(p): sha(p) for p in common_files}
+    shared = {record_path(p): file_sha256(p) for p in common_files}
     pools = {}
     for step in TEACHER_STEPS:
         raw = output_root / (
@@ -149,7 +149,7 @@ def build(output_root, out=DEFAULT_OUT, seeds=(1,)):
         pools[str(step)] = {
             "path": str(filtered), "n_rows": n_rows,
             "files": {
-                record_path(p): sha(p) for p in (
+                record_path(p): file_sha256(p) for p in (
                     filtered, raw / "manifest.json",
                     raw / "modes/prefix/manifest.json",
                 )
@@ -208,7 +208,7 @@ def build(output_root, out=DEFAULT_OUT, seeds=(1,)):
                         "--epochs", "20", "--student-seed", str(seed),
                     ]
                     files = dict(pools[str(teacher_step)]["files"])
-                    files.update({record_path(p): sha(p) for p in (sweep_path, train_path)})
+                    files.update({record_path(p): file_sha256(p) for p in (sweep_path, train_path)})
                     cells.append({
                         "key": key, "teacher_step": teacher_step, "student_step": student_step,
                         "student_tag": tag, "student_seed": seed, "run_dir": str(run_dir),
@@ -231,7 +231,7 @@ def build(output_root, out=DEFAULT_OUT, seeds=(1,)):
     }
     campaign_path = out / "campaign.json"
     frozen_write(campaign_path, json.dumps(campaign, indent=2) + "\n")
-    digest = sha(campaign_path)
+    digest = file_sha256(campaign_path)
     jobs = [{
         "key": cell["key"],
         "cmd": shlex.join([
