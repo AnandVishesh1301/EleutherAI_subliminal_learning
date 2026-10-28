@@ -197,6 +197,59 @@ def test_demand_splits_pinned_and_skips_unmet_deps(tmp_path):
     assert slurm.demand(_cfg(tmp_path, queues=("b",))) == (0, {})
 
 
+def test_demand_skips_a_stopped_pinned_node(tmp_path):
+    store.create_queue(tmp_path, "p", node="soar-subliminal-2")
+    store.append_jobs(tmp_path, "p", [Job("p1", "true")])
+    store.stop_path(tmp_path, "soar-subliminal-2").touch()
+    assert slurm.demand(_cfg(tmp_path)) == (0, {})
+    assert slurm.stopped_pinned_nodes(_cfg(tmp_path)) == ["soar-subliminal-2"]
+
+
+def _started(tmp_path, *ids, name="camp-pool"):
+    logs = slurm.state_dir(tmp_path, "camp") / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    for i in ids:
+        slurm.lab_log_path(tmp_path, "camp", name, i).touch()
+
+
+def test_crash_loop_needs_a_streak_of_failed_starts_and_backs_off(tmp_path):
+    now = 10_000.0
+    submits = [
+        {"job_id": str(i), "job_name": "camp-pool", "epoch": now - 300 + i} for i in range(1, 4)
+    ]
+    records = {"slurm-3.r0": {"slurm_job_id": "3", "exit_reason": "error", "cells_started": 0}}
+    loop = lambda recs, jobs=None, t=now: slurm.crash_loop(tmp_path, "camp", submits, jobs or {}, recs, t)
+    assert not loop(records)  # never started (no lab log): cancelled while pending
+    _started(tmp_path, "1", "2", "3")
+    assert loop(records)
+    assert not loop(records, t=now + slurm.CRASH_BACKOFF_S)
+    assert not loop({**records, "slurm-2.r0": {"slurm_job_id": "2", "exit_reason": "idle"}})
+    assert not loop(records, {"3": _job("3", "camp-pool", "PENDING")})
+    worked = {"slurm-3.r0": {"slurm_job_id": "3", "exit_reason": "error", "cells_started": 4}}
+    assert not loop(worked)
+    plan = slurm.plan_pass(_cfg(tmp_path), {}, {}, unpinned=50, pinned={}, paused=False, crashing=True)
+    assert (plan.pools, plan.carriers, plan.reason) == (0, (), "crash-loop")
+
+
+def test_failed_start_finds_earlier_carrier_jobs_in_the_shared_record():
+    rec = {"soar-subliminal-2": {"slurm_job_id": "9", "job_ids": ["5", "7", "9"], "exit_reason": "idle"}}
+    assert not slurm.failed_start("5", rec) and not slurm.failed_start("9", rec)
+    assert slurm.failed_start("6", rec)
+
+
+def test_supervise_once_keeps_submit_history(tmp_path):
+    store.create_queue(tmp_path, "q")
+    store.append_jobs(tmp_path, "q", [Job("j", "true")])
+
+    def fake_run(argv, **kw):
+        out = "" if argv[0] == "squeue" else "Submitted\n555\n"
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    state = slurm.supervise_once(_cfg(tmp_path), run=fake_run)
+    assert [(s["job_id"], s["job_name"]) for s in state["submits"]] == [("555", "camp-pool")]
+    assert not state["crash_loop"]
+
+
 def test_pool_command_and_env(tmp_path, monkeypatch):
     monkeypatch.setenv(store.NODE_ENV, "leaked")
     cfg = _cfg(tmp_path, queues=("q1",), mem_per_gpu="40G")
@@ -261,23 +314,29 @@ def test_prepare_pool_explicit_identity_releases_its_claims(tmp_path):
     node, limits = slurm.prepare_pool(
         tmp_path, "camp", tpl, walltime_s=7200, claim_margin_s=600, idle_exit_s=60, env=env
     )
-    assert node == "soar-subliminal-2"
+    assert node == "soar-subliminal-2" and limits.pinned_only
+    slurm.prepare_pool(
+        tmp_path, "camp", tpl, walltime_s=7200, claim_margin_s=600, idle_exit_s=60,
+        env={**env, "SLURM_JOB_ID": "78"},
+    )
+    assert slurm.pool_records(tmp_path, "camp")[node]["job_ids"] == ["77", "78"]
+    assert limits.pause_file == slurm.paused_path(tmp_path, "camp")
     assert store.job_state(tmp_path, "q", a) == store.PENDING
     assert not store.worker_pid_path(tmp_path, node).exists()
     assert limits.claim_until == pytest.approx(int(env["SLURM_JOB_END_TIME"]) - 600)
     rec = slurm.pool_records(tmp_path, "camp")[node]
-    assert rec["slurm_job_id"] == "77" and rec["gpus"] == [3, 5] and rec["released_at_start"] == 1
+    assert rec["slurm_job_id"] == "78" and rec["gpus"] == [3, 5]
 
 
 def test_prepare_pool_default_identity_keeps_other_claims(tmp_path):
     (a,) = _claimed(tmp_path, ["a"], "slurm-77.r0")
     tpl = tmp_path / "t.json"
     tpl.write_text(json.dumps({"gpus": [0], "cap_per_gpu": 1, "free_mem_mib": 1}))
-    node, _ = slurm.prepare_pool(
+    node, limits = slurm.prepare_pool(
         tmp_path, "camp", tpl, walltime_s=7200, claim_margin_s=600, idle_exit_s=60,
         env=_slurm_env(SLURM_RESTART_COUNT="1"),
     )
-    assert node == "slurm-77.r1"
+    assert node == "slurm-77.r1" and not limits.pinned_only
     assert store.job_state(tmp_path, "q", a) == store.RUNNING
 
 
@@ -345,3 +404,60 @@ def test_run_pool_slurm_claims_nothing_after_window(tmp_path):
     )
     st = store.queue_status(tmp_path, "q")
     assert st["pending"] + st["done"] == 20 and st["running"] == 0 and st["pending"] >= 18
+
+
+def test_carrier_claims_only_its_pinned_queue(tmp_path):
+    store.create_queue(tmp_path, "p", node="soar-subliminal-2")
+    store.append_jobs(tmp_path, "p", [Job("p1", "true")])
+    store.create_queue(tmp_path, "u")
+    store.append_jobs(tmp_path, "u", [Job("u1", "true")])
+    out = run_pool(
+        tmp_path, workers=1, gpu=_FakeGpu(), hostname="soar-subliminal-2", poll_s=0.01,
+        gpu_wait_s=0.01,
+        slurm=SlurmRun(claim_until=time.time() + 3600, idle_exit_s=60, pinned_only=True),
+    )
+    assert store.queue_status(tmp_path, "p")["done"] == 1
+    assert store.queue_status(tmp_path, "u")["pending"] == 1
+    assert (out.reason, out.cells_started) == ("complete", 1)
+
+
+def test_paused_pool_claims_nothing_and_exits(tmp_path):
+    store.create_queue(tmp_path, "q")
+    store.append_jobs(tmp_path, "q", [Job("j", "true")])
+    pause = slurm.paused_path(tmp_path, "camp")
+    pause.parent.mkdir(parents=True)
+    pause.touch()
+    out = run_pool(
+        tmp_path, workers=2, gpu=_FakeGpu(), hostname="slurm-1.r0", poll_s=0.01, gpu_wait_s=0.01,
+        slurm=SlurmRun(claim_until=time.time() + 3600, idle_exit_s=60, pause_file=pause),
+    )
+    assert (out.reason, out.cells_started) == ("paused", 0)
+    assert store.queue_status(tmp_path, "q")["pending"] == 1
+
+
+def test_pause_mid_run_drains_running_cells(tmp_path):
+    store.create_queue(tmp_path, "q")
+    store.append_jobs(tmp_path, "q", [Job(f"j{i}", "sleep 0.5") for i in range(10)])
+    pause = slurm.paused_path(tmp_path, "camp")
+    pause.parent.mkdir(parents=True)
+    threading.Timer(0.2, pause.touch).start()
+    out = run_pool(
+        tmp_path, workers=1, gpu=_FakeGpu(), hostname="slurm-1.r0", poll_s=0.05, gpu_wait_s=0.01,
+        slurm=SlurmRun(claim_until=time.time() + 3600, idle_exit_s=60, pause_file=pause),
+    )
+    st = store.queue_status(tmp_path, "q")
+    assert out.reason == "paused" and st["running"] == 0 and st["failed"] == 0
+    assert 1 <= st["done"] <= 3 and st["pending"] == 10 - st["done"]
+
+
+def test_halted_pool_releases_a_claim_made_just_before_pause(tmp_path):
+    pause = slurm.paused_path(tmp_path, "camp")
+    pause.parent.mkdir(parents=True)
+    pool = _Pool(
+        tmp_path, "slurm-1.r0", _FakeGpu(), MasterLog(tmp_path / "logs" / "m.log"),
+        queues_filter=None, poll_s=0.01, gpu_wait_s=0.01, slurm=True, pause_file=pause,
+    )
+    assert not pool.halted()
+    pause.touch()
+    assert pool.halted() and pool.closed and pool.close_reason == "paused"
+    assert pool._acquire_gpu(1, 1, None, None, "k") is None

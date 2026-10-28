@@ -9,7 +9,10 @@ The supervisor (``jobq slurm-supervise``, one per campaign, in tmux on the login
 submits pools while the campaign's queues hold claimable work, within its GPU share and
 the user's cap, and releases claims of this campaign's dead pools (no attempt charged).
 State lives under ``<root>/slurm/<campaign>/``: ``supervisor.json``, ``pools/<node>.json``,
-``logs/`` (lab job logs), and ``PAUSED``.
+``logs/`` (lab job logs), and ``PAUSED`` (no new pools; every pool drains and exits).
+A carrier claims only from its pinned queues; a pinned node with a stop file gets no
+carrier; after ``CRASH_STREAK`` pool jobs in a row ended without running their pool, the
+supervisor submits nothing for ``CRASH_BACKOFF_S``.
 """
 
 from __future__ import annotations
@@ -37,6 +40,9 @@ from subliminal_learning.utils.io import atomic_write_json
 LIVE_STATES = frozenset(
     {"RUNNING", "COMPLETING", "CONFIGURING", "SUSPENDED", "STAGE_OUT", "SIGNALING", "RESIZING"}
 )
+CRASH_STREAK = 3
+CRASH_BACKOFF_S = 1800.0
+SUBMIT_HISTORY = 20
 _IDENTITY_RE = re.compile(r"^slurm-(\d+(?:_\d+)?)\.r(\d+)$")
 _DURATION_RE = re.compile(r"^(?:(\d+)-)?(\d+):(\d{2}):(\d{2})$")
 POOL_SUFFIX = "-pool"
@@ -232,11 +238,19 @@ def prepare_pool(
         for q, jk in released:
             logger.warning("Released {}'s earlier claim {} {}", node, q, jk)
     end = job_end_epoch(env, start, walltime_s)
-    limits = SlurmRun(claim_until=end - claim_margin_s, idle_exit_s=idle_exit_s)
+    prior = read_json(pool_record_path(root, name, node)) or {}
+    job_ids = [*prior.get("job_ids", []), slurm_job_id(env)]
+    limits = SlurmRun(
+        claim_until=end - claim_margin_s,
+        idle_exit_s=idle_exit_s,
+        pinned_only=bool(explicit),
+        pause_file=paused_path(root, name),
+    )
     write_pool_record(
         root, name, node,
         identity=node,
         slurm_job_id=slurm_job_id(env),
+        job_ids=job_ids[-50:],
         restart=int(env.get("SLURM_RESTART_COUNT") or 0),
         host=socket.gethostname(),
         gpus=gpus,
@@ -246,6 +260,9 @@ def prepare_pool(
         claim_until_utc=_iso(limits.claim_until),
         deadline_utc=_iso(end),
         released_at_start=len(released),
+        ended_utc=None,
+        exit_reason=None,
+        cells_started=None,
     )
     return node, limits
 
@@ -374,11 +391,16 @@ def _deps_satisfied(root: Path, meta: store.QueueMeta) -> bool:
 
 
 def demand(cfg: SupervisorConfig) -> tuple[int, dict[str, int]]:
-    """Pending work: ``(unpinned pending jobs, {pinned node: pending + open claims})``."""
+    """Pending work: ``(unpinned pending jobs, {pinned node: pending + open claims})``.
+
+    A pinned node whose stop file exists is left out (its carrier would exit at once).
+    """
     unpinned = 0
     pinned: dict[str, int] = {}
     for q in visible_queues(cfg):
         meta = store.read_meta(cfg.root, q)
+        if meta.node is not None and store.stop_path(cfg.root, meta.node).exists():
+            continue
         st = store.queue_status(cfg.root, q)
         if meta.node is not None:
             if st["pending"] or st["running"]:
@@ -387,6 +409,58 @@ def demand(cfg: SupervisorConfig) -> tuple[int, dict[str, int]]:
         if st["pending"] and _deps_satisfied(cfg.root, meta):
             unpinned += st["pending"]
     return unpinned, pinned
+
+
+def stopped_pinned_nodes(cfg: SupervisorConfig) -> list[str]:
+    """Pinned nodes of the visible queues whose stop file exists (no carrier for them)."""
+    nodes = {store.read_meta(cfg.root, q).node for q in visible_queues(cfg)}
+    return sorted(n for n in nodes if n is not None and store.stop_path(cfg.root, n).exists())
+
+
+def lab_log_path(root: Path, name: str, job_name: str, job_id: str) -> Path:
+    """The job's lab log (``lab submit`` runs in the state dir; Slurm creates it at start)."""
+    return state_dir(root, name) / "logs" / f"{job_name}-{job_id}.out"
+
+
+def failed_start(job_id: str, records: Mapping[str, dict]) -> bool:
+    """Whether a started, finished pool job never ran its pool: no record names it, or
+    its pool raised before starting any cell."""
+    jid = str(job_id)
+    recs = [
+        r for r in records.values()
+        if jid == str(r.get("slurm_job_id")) or jid in map(str, r.get("job_ids", ()))
+    ]
+    if not recs:
+        return True
+    last = recs[-1]
+    return str(last.get("slurm_job_id")) == jid and last.get("exit_reason") == "error" and not last.get(
+        "cells_started"
+    )
+
+
+def crash_loop(
+    root: Path,
+    name: str,
+    submits: list[dict],
+    jobs: Mapping[str, "SqueueJob"],
+    records: Mapping[str, dict],
+    now: float,
+) -> bool:
+    """Whether the last ``CRASH_STREAK`` started-and-finished submissions all failed to
+    start their pool, the newest submitted less than ``CRASH_BACKOFF_S`` ago.
+
+    A job that never started (no lab log: cancelled while pending) is not counted.
+    """
+    finished = [
+        s for s in submits
+        if str(s["job_id"]) not in jobs
+        and now - s["epoch"] >= 60
+        and lab_log_path(root, name, s["job_name"], s["job_id"]).exists()
+    ]
+    last = finished[-CRASH_STREAK:]
+    if len(last) < CRASH_STREAK or not all(failed_start(s["job_id"], records) for s in last):
+        return False
+    return now - last[-1]["epoch"] < CRASH_BACKOFF_S
 
 
 def pool_job_name(cfg: SupervisorConfig, node: str | None = None) -> str:
@@ -463,6 +537,7 @@ def plan_pass(
     unpinned: int,
     pinned: Mapping[str, int],
     paused: bool,
+    crashing: bool = False,
 ) -> PassPlan:
     """Decide one pass from squeue, pool records and pending work (pure)."""
     own = [
@@ -474,6 +549,8 @@ def plan_pass(
     release = tuple(dead_identities(records, jobs))
     if paused:
         return PassPlan(0, (), release, own_gpus, user_gpus, "paused")
+    if crashing:
+        return PassPlan(0, (), release, own_gpus, user_gpus, "crash-loop")
     room = min(cfg.max_gpus - own_gpus, cfg.user_gpu_cap - user_gpus) // cfg.gpus_per_pool
     pending_slots = cfg.max_pending_pools - sum(j.state == "PENDING" for j in own)
     carried = {j.name[len(cfg.name) + len(PIN_SUFFIX):] for j in own if j.name != pool_job_name(cfg)}
@@ -517,7 +594,14 @@ def supervise_once(cfg: SupervisorConfig, run: Callable = subprocess.run) -> dic
         return None
     records = pool_records(cfg.root, cfg.name)
     unpinned, pinned = demand(cfg)
-    plan = plan_pass(cfg, jobs, records, unpinned, pinned, paused_path(cfg.root, cfg.name).exists())
+    prev = read_json(state_dir(cfg.root, cfg.name) / "supervisor.json") or {}
+    submits = list(prev.get("submits") or [])
+    now = time.time()
+    crashing = crash_loop(cfg.root, cfg.name, submits, jobs, records, now)
+    plan = plan_pass(
+        cfg, jobs, records, unpinned, pinned,
+        paused_path(cfg.root, cfg.name).exists(), crashing,
+    )
     queues = visible_queues(cfg)
     released = []
     for node in plan.release:
@@ -525,8 +609,13 @@ def supervise_once(cfg: SupervisorConfig, run: Callable = subprocess.run) -> dic
         write_pool_record(cfg.root, cfg.name, node, released_utc=store.now_iso())
     for q, jk in released:
         logger.warning("Released dead pool claim {} {}", q, jk)
-    submitted = [submit_pool(cfg, node, run) for node in plan.carriers]
-    submitted += [submit_pool(cfg, None, run) for _ in range(plan.pools)]
+    names = [pool_job_name(cfg, node) for node in plan.carriers]
+    names += [pool_job_name(cfg) for _ in range(plan.pools)]
+    nodes = [*plan.carriers, *([None] * plan.pools)]
+    submitted = [submit_pool(cfg, node, run) for node in nodes]
+    submits += [
+        {"job_id": s, "job_name": n, "epoch": now} for s, n in zip(submitted, names) if s
+    ]
     state = {
         "config": {k: (str(v) if isinstance(v, Path) else v) for k, v in asdict(cfg).items()},
         "host": socket.gethostname(),
@@ -534,12 +623,15 @@ def supervise_once(cfg: SupervisorConfig, run: Callable = subprocess.run) -> dic
         "updated_utc": store.now_iso(),
         "unpinned_pending": unpinned,
         "pinned": pinned,
+        "pinned_stopped": stopped_pinned_nodes(cfg),
         "own_gpus": plan.own_gpus,
         "user_gpus": plan.user_gpus,
         "held_back": plan.reason,
         "submitted": [s for s in submitted if s],
         "released_claims": len(released),
         "paused": plan.reason == "paused",
+        "crash_loop": crashing,
+        "submits": submits[-SUBMIT_HISTORY:],
     }
     store.mkdir_open(state_dir(cfg.root, cfg.name))
     atomic_write_json(state_dir(cfg.root, cfg.name) / "supervisor.json", state)
@@ -563,6 +655,14 @@ def supervise(cfg: SupervisorConfig, run: Callable = subprocess.run, max_passes:
             return
         time.sleep(cfg.interval_s)
     logger.info("{}: done marker {} present; supervisor exiting", cfg.name, cfg.done_marker)
+
+
+def campaign_pool_jobs(name: str, jobs: Mapping[str, SqueueJob]) -> list[SqueueJob]:
+    """This campaign's pool jobs in squeue (unpinned pools and carriers, by job name)."""
+    return [
+        j for j in jobs.values()
+        if j.name == f"{name}{POOL_SUFFIX}" or j.name.startswith(f"{name}{PIN_SUFFIX}")
+    ]
 
 
 def live_pool_nodes(root: Path, name: str, jobs: Mapping[str, SqueueJob]) -> list[str]:

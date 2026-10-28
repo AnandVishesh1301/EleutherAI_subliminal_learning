@@ -220,17 +220,31 @@ def work(
         q or "(all)",
         resolve_lock_prefix(lock_prefix),
     )
-    run_pool(
-        root,
-        workers=workers,
-        queues=q,
-        hostname=hostname,
-        lock_prefix=lock_prefix,
-        fail_streak_limit=fail_streak_limit or 0,
-        slurm=limits,
-    )
+    try:
+        outcome = run_pool(
+            root,
+            workers=workers,
+            queues=q,
+            hostname=hostname,
+            lock_prefix=lock_prefix,
+            fail_streak_limit=fail_streak_limit or 0,
+            slurm=limits,
+        )
+    except Exception:
+        if slurm:
+            slurm_layer.write_pool_record(
+                root, slurm_name, hostname, ended_utc=store.now_iso(), exit_reason="error"
+            )
+        raise
     if slurm:
-        slurm_layer.write_pool_record(root, slurm_name, hostname, ended_utc=store.now_iso())
+        slurm_layer.write_pool_record(
+            root,
+            slurm_name,
+            hostname,
+            ended_utc=store.now_iso(),
+            exit_reason=outcome.reason,
+            cells_started=outcome.cells_started,
+        )
 
 
 def _report_root(
@@ -499,7 +513,12 @@ def slurm_pause(
         False, "--now", help="Also cancel the pools; running cells are requeued without charging an attempt."
     ),
 ) -> None:
-    """Pause a campaign: no new pools; live pools drain (or stop now) and release their GPUs."""
+    """Pause a campaign: no new pools, waiting pool jobs cancelled, live pools drain (or stop now).
+
+    Every pool reads ``PAUSED`` (at start and each poll) and closes: running cells
+    finish, nothing new is claimed. ``--now`` also cancels the running pools, whose
+    cells go back to pending without an attempt charge.
+    """
     import subprocess
 
     configure_loguru()
@@ -510,15 +529,13 @@ def slurm_pause(
     p = slurm_layer.paused_path(root, name)
     store.mkdir_open(p.parent)
     p.touch()
-    nodes = slurm_layer.live_pool_nodes(root, name, jobs)
-    for node in nodes:
-        store.stop_path(root, node).touch()
-    logger.info("Paused {}: {} live pool(s) draining {}", name, len(nodes), nodes or "-")
-    if now and nodes:
-        records = slurm_layer.pool_records(root, name)
-        ids = sorted({str(records[n]["slurm_job_id"]) for n in nodes})
-        subprocess.run(["lab", "cancel", *ids], check=True)
-        logger.info("Cancelled pool jobs {}", ids)
+    own = slurm_layer.campaign_pool_jobs(name, jobs)
+    cancel = sorted(j.job_id for j in own if now or j.state == "PENDING")
+    draining = sorted(j.job_id for j in own if j.job_id not in cancel)
+    logger.info("Paused {}: draining pool jobs {}", name, draining or "-")
+    if cancel:
+        subprocess.run(["lab", "cancel", *cancel], check=True)
+        logger.info("Cancelled pool jobs {}", cancel)
 
 
 @app.command("slurm-resume")
@@ -526,17 +543,11 @@ def slurm_resume(
     root: Path = typer.Option(None, help=ROOT_HELP),
     name: str = typer.Option(..., help=NAME_HELP),
 ) -> None:
-    """Resume a paused campaign: clear PAUSED and its pools' stop files."""
+    """Resume a paused campaign: clear PAUSED (stop files are never touched)."""
     configure_loguru()
     root = _root(root)
     slurm_layer.paused_path(root, name).unlink(missing_ok=True)
-    cleared = []
-    for node in slurm_layer.pool_records(root, name):
-        p = store.stop_path(root, node)
-        if p.exists():
-            p.unlink()
-            cleared.append(node)
-    logger.info("Resumed {} (cleared stop files: {})", name, cleared or "-")
+    logger.info("Resumed {}; the supervisor submits pools on its next pass", name)
 
 
 @app.command("slurm-status")

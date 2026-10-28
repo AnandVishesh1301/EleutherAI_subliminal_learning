@@ -4,7 +4,8 @@ One process, ``--workers N`` threads, all sharing one :class:`GpuManager` (so th
 slot cap is global). Each thread loops over the READY queues (node filter + deps satisfied,
 ordered by priority desc then created_utc), steals its own node's stale claims, claims the
 first pending job, runs it, records the result, and moves on. A job failure never aborts the
-pool. Between jobs it honors the ``stop.<hostname>`` file.
+pool. Between jobs it honors the ``stop.<hostname>`` file (and, in Slurm mode, the campaign's
+``PAUSED`` file).
 
 A thread that returns while some queue is still incomplete is replaced by the
 supervisor (RESPAWN). Threads exit on ``all_complete()``, which is only final for a
@@ -15,7 +16,8 @@ the process never exits.
 
 Master-log verbs (``[<iso-utc>] VERB ...``): CLAIM, START, END rc=<rc>, STEAL, WAIT,
 RESPAWN, SCANERR <name> (a queue whose steal/claim scan raised; skipped for that pass),
-TRIPPED <name>, QUEUE COMPLETE <name>, and a final ALL QUEUES COMPLETE. Slurm mode
+TRIPPED <name>, QUEUE COMPLETE <name>, and a final ALL QUEUES COMPLETE (EXIT stopped when
+a stop file ended it). Slurm mode
 (``run_pool(slurm=...)``, see ``jobqueue/slurm.py``) adds CLOSE <reason>, SIGNAL <name>,
 PREEMPT <queue> <key> gpu=N, REQUEUE <queue> <key> and a final EXIT <reason>. The
 opt-in GPU-yielding framework (``jobqueue/yielding.py``) adds YIELD gpu=N foreign=K,
@@ -72,7 +74,8 @@ class MasterLog:
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
-        self._lock = threading.Lock()
+        # Reentrant: the SIGTERM handler logs from the main thread, maybe mid-log.
+        self._lock = threading.RLock()
         store.mkdir_open(self.path.parent)
 
     def log(self, verb: str, msg: str = "") -> None:
@@ -160,6 +163,8 @@ class _Pool:
         gpu_wait_s: float,
         fail_streak_limit: int = DEFAULT_FAIL_STREAK_LIMIT,
         slurm: bool = False,
+        pinned_only: bool = False,
+        pause_file: Path | None = None,
     ) -> None:
         self.root = Path(root)
         self.hostname = hostname
@@ -169,7 +174,9 @@ class _Pool:
         self.poll_s = poll_s
         self.gpu_wait_s = gpu_wait_s
         self.fail_streak_limit = fail_streak_limit
-        self._lock = threading.Lock()
+        # Reentrant: the SIGTERM handler (main thread) closes the pool, maybe while the
+        # main thread already holds this lock (idle_s, close).
+        self._lock = threading.RLock()
         self._complete_logged: set[str] = set()
         self._dep_warned: set[str] = set()
         # Live jobs by physical GPU so the yield watchdog can kill this card's jobs:
@@ -180,6 +187,9 @@ class _Pool:
         self._fail_streak: dict[str, int] = {}
         self._tripped_pending: dict[str, int] = {}
         self.slurm = slurm
+        self.pinned_only = pinned_only
+        self.pause_file = pause_file
+        self.cells_started = 0
         self._closed = threading.Event()
         self.close_reason = ""
         self._term = threading.Event()
@@ -192,6 +202,12 @@ class _Pool:
     def closed(self) -> bool:
         """Whether claiming has stopped for good (Slurm mode only)."""
         return self._closed.is_set()
+
+    def halted(self) -> bool:
+        """Whether threads must claim nothing new: stop file, ``PAUSED``, or closed."""
+        if self.pause_file is not None and self.pause_file.exists():
+            self.close("paused")
+        return store.stop_path(self.root, self.hostname).exists() or self.closed
 
     def wait_closed(self, timeout: float) -> bool:
         return self._closed.wait(timeout)
@@ -274,12 +290,17 @@ class _Pool:
     # ------------------- queue selection -------------------
 
     def _node_queues(self) -> list[str]:
-        """Queue names visible to this node (node filter + optional --queues restriction)."""
+        """Queue names visible to this node (node filter + optional --queues restriction).
+
+        A ``pinned_only`` pool (the carrier of a legacy pinned queue) sees only the queues
+        pinned to its hostname, so it never holds unpinned claims nobody would sweep.
+        """
         out = []
         for name in store.list_queues(self.root):
             if self.queues_filter is not None and name not in self.queues_filter:
                 continue
-            if store.read_meta(self.root, name).node in (None, self.hostname):
+            node = store.read_meta(self.root, name).node
+            if node == self.hostname or (node is None and not self.pinned_only):
                 out.append(name)
         return out
 
@@ -402,7 +423,7 @@ class _Pool:
         """
         misses = 0
         while True:
-            if store.stop_path(self.root, self.hostname).exists() or self.closed:
+            if self.halted():
                 return None
             slot = self.gpu.acquire(
                 mem_mib, slots=slots, cap_per_gpu=cap_per_gpu, cap_group=cap_group
@@ -597,7 +618,7 @@ class _Pool:
             if store.stop_path(self.root, self.hostname).exists():
                 self.master.log("WAIT", f"stop file present; worker {tid} exiting")
                 return
-            if self.closed:
+            if self.halted():
                 return
             ready = self.ready_queues()
             for name, _ in ready:
@@ -633,6 +654,8 @@ class _Pool:
                 self._add_busy(-1)
                 return
             self.master.log("START", f"{name} {job.key} gpu={slot.gpu}")
+            with self._lock:
+                self.cells_started += 1
             attempt = store.read_attempt(self.root, name, job.jobkey)
             try:
                 rc = self._run_job(name, meta, job, slot, attempt)
@@ -659,10 +682,27 @@ class SlurmRun:
     Attributes:
         claim_until: Epoch after which the pool claims nothing new.
         idle_exit_s: Close after this long without a job.
+        pinned_only: Claim only from queues pinned to this pool's hostname (carrier).
+        pause_file: Close (drain) once this file exists (the campaign's ``PAUSED``).
     """
 
     claim_until: float
     idle_exit_s: float
+    pinned_only: bool = False
+    pause_file: Path | None = None
+
+
+@dataclass(frozen=True)
+class PoolOutcome:
+    """How a pool ended.
+
+    Attributes:
+        reason: The close reason (Slurm mode), ``stopped`` (stop file) or ``complete``.
+        cells_started: Cells this pool started.
+    """
+
+    reason: str
+    cells_started: int
 
 
 def run_pool(
@@ -677,7 +717,7 @@ def run_pool(
     lock_prefix: str | None = None,
     fail_streak_limit: int = DEFAULT_FAIL_STREAK_LIMIT,
     slurm: SlurmRun | None = None,
-) -> None:
+) -> PoolOutcome:
     """Run the foreground worker pool until every ready queue is complete (or stopped).
 
     Args:
@@ -686,8 +726,11 @@ def run_pool(
         fail_streak_limit: Consecutive failures that trip a queue; the pool then
             skips it until a requeue grows its pending count.
         slurm: Slurm-mode limits; the pool then also closes at ``claim_until`` or
-            when idle, and SIGTERM/SIGINT preempt its cells (claims back to pending,
-            attempts not charged). None keeps the classic behaviour.
+            when idle or paused, and SIGTERM/SIGINT preempt its cells (claims back to
+            pending, attempts not charged). None keeps the classic behaviour.
+
+    Returns:
+        How the pool ended.
 
     Raises:
         FileNotFoundError: No ``gpu_policy.<hostname>.json`` under `root` (checked before
@@ -721,6 +764,8 @@ def run_pool(
         gpu_wait_s=gpu_wait_s,
         fail_streak_limit=fail_streak_limit,
         slurm=slurm is not None,
+        pinned_only=slurm is not None and slurm.pinned_only,
+        pause_file=slurm.pause_file if slurm is not None else None,
     )
     if slurm is not None:
 
@@ -755,6 +800,7 @@ def run_pool(
             target=watchdog.run, args=(stop_event,), name="jobq-yield-watchdog", daemon=True
         )
         watch_thread.start()
+    pool.halted()  # a pool that starts while PAUSED closes before any thread claims
     n_workers = max(1, workers)
     threads: dict[int, threading.Thread] = {}
     for i in range(n_workers):
@@ -769,7 +815,9 @@ def run_pool(
             if not t.is_alive():
                 del threads[i]
         if slurm is not None and not pool.closed:
-            if time.time() >= slurm.claim_until:
+            if slurm.pause_file is not None and slurm.pause_file.exists():
+                pool.close("paused")
+            elif time.time() >= slurm.claim_until:
                 pool.close("claim window over")
             elif pool.idle_s() >= slurm.idle_exit_s:
                 pool.close("idle")
@@ -792,7 +840,13 @@ def run_pool(
     if watch_thread is not None:
         watch_thread.join(timeout=5.0)
     if pool.closed:
-        master.log("EXIT", pool.close_reason)
+        reason = pool.close_reason
+        master.log("EXIT", reason)
+    elif store.stop_path(root, hostname).exists():
+        reason = "stopped"
+        master.log("EXIT", reason)
     else:
+        reason = "complete"
         master.log("ALL QUEUES COMPLETE")
     store.worker_pid_path(root, hostname).unlink(missing_ok=True)
+    return PoolOutcome(reason, pool.cells_started)
