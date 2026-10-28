@@ -497,6 +497,9 @@ class _Pool:
             )
             with self._running_lock:
                 self._running.setdefault(slot.gpu, {})[job.jobkey] = handle
+            if self._term.is_set():  # preempt_all ran before this cell was registered
+                handle.preempted = True
+                _kill_group(proc, grace_s=PREEMPT_GRACE_S, poll_s=0.1)
             try:
                 rc = proc.wait()
             finally:
@@ -649,6 +652,9 @@ class _Pool:
                 group,
                 job.key,
             )
+            if slot is not None and self.halted():  # closed while acquiring: don't start
+                slot.release()
+                slot = None
             if slot is None:  # stop requested while waiting -> let a peer take it
                 store.remove_claim(self.root, name, job.jobkey)
                 self._add_busy(-1)

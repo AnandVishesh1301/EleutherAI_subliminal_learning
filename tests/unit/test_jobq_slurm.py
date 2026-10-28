@@ -461,3 +461,17 @@ def test_halted_pool_releases_a_claim_made_just_before_pause(tmp_path):
     pause.touch()
     assert pool.halted() and pool.closed and pool.close_reason == "paused"
     assert pool._acquire_gpu(1, 1, None, None, "k") is None
+
+
+def test_cell_registered_after_preempt_is_killed_and_requeued(tmp_path):
+    store.create_queue(tmp_path, "q")
+    store.append_jobs(tmp_path, "q", [Job("slow", "sleep 30")])
+    meta = store.read_meta(tmp_path, "q")
+    job = store.claim_next(tmp_path, "q", "slurm-1.r0", os.getpid())
+    pool = _pool(tmp_path)
+    pool.preempt_all()
+    t0 = time.monotonic()
+    assert pool._run_job("q", meta, job, GpuSlot(3, 0), 0) is None
+    assert time.monotonic() - t0 < 8
+    assert store.job_state(tmp_path, "q", job) == store.PENDING
+    assert store.read_attempt(tmp_path, "q", job.jobkey) == 0
