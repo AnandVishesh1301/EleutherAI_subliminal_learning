@@ -1,9 +1,10 @@
 """Generic campaign watcher IO: node probes over ssh, queue file reads, the loop.
 
-Read-only by construction: ``pgrep``, ``tmux has-session`` / ``capture-pane``,
-``find`` / ``grep`` on job logs, ``nvidia-smi``, ``ps`` and pure file reads of the
-queue roots. It never runs ``jobq status`` / ``overview`` (they create lock files).
-Writes only ``health.log``, ``alerts.log`` and ``.watch_state.json`` in its dir.
+Read-only by construction: ``pgrep``, ``tmux has-session`` / ``list-windows`` /
+``capture-pane``, ``find`` / ``grep`` on job logs, ``nvidia-smi``, ``ps``, ``squeue``
+and pure file reads of the queue roots. It never runs ``jobq status`` / ``overview``
+(they create lock files). Slurm cards are probed locally only (no ssh). Writes only
+``health.log``, ``alerts.log`` and ``.watch_state.json`` in its dir.
 """
 
 from __future__ import annotations
@@ -24,21 +25,31 @@ from pathlib import Path
 
 from loguru import logger
 
-from subliminal_learning.fleet.ledger import CAMPAIGN_DONE, Card
+from subliminal_learning.fleet.ledger import (
+    CAMPAIGN_DONE,
+    EXECUTOR_SLURM,
+    Campaign,
+    Card,
+    Ledger,
+)
 from subliminal_learning.fleet.ledger_io import campaign_queues, read_ledger
 from subliminal_learning.fleet.nodes import resolve_node
 from subliminal_learning.fleet.watch import (
     NodeProbe,
     QueueSnapshot,
+    SlurmRootView,
+    SlurmSnapshot,
     WatchMemory,
     evaluate,
+    evaluate_slurm,
     progress_line,
     watched_hosts,
 )
-from subliminal_learning.jobqueue import store
+from subliminal_learning.jobqueue import slurm, store
 
 PROBE_TIMEOUT_S = 90
 STATE_FILE = ".watch_state.json"
+OOM_WINDOW_S = 900.0
 # Cells are the direct children of every jobq worker on the node (any pool); count
 # them per CUDA_VISIBLE_DEVICES and print the busiest GPU as "busiest=<n> <gpu>".
 _BUSIEST_GPU = (
@@ -79,14 +90,7 @@ def probe_script(card: Card, host: str) -> str:
         )
     lines.append('echo "oom15=$o"')
     if card.driver_pattern and card.driver_node == host:
-        pat = shlex.quote(_unselfmatch(card.driver_pattern))
-        lines.append(f'echo "driver=$(pgrep -fc {pat})"')
-        if card.driver_pane:
-            pane = shlex.quote(f"={card.driver_pane}")
-            lines.append(
-                f'echo "tracebacks=$(tmux capture-pane -p -J -t {pane} -S -400 '
-                '2>/dev/null | grep -c Traceback)"'
-            )
+        lines.extend(_driver_lines(card))
     if resolve_node(host).shared:
         lines.append(
             'echo "foreign=$(ps -u angela2 -o args= 2>/dev/null | grep -E '
@@ -96,13 +100,29 @@ def probe_script(card: Card, host: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def parse_probe(host: str, text: str) -> NodeProbe:
-    """``NodeProbe`` from the probe's ``key=value`` output."""
-    kv = dict(
+def _driver_lines(card: Card) -> list[str]:
+    pat = shlex.quote(_unselfmatch(card.driver_pattern or ""))
+    lines = [f'echo "driver=$(pgrep -fc {pat})"']
+    if card.driver_pane:
+        pane = shlex.quote(f"={card.driver_pane}")
+        lines.append(
+            f'echo "tracebacks=$(tmux capture-pane -p -J -t {pane} -S -400 '
+            '2>/dev/null | grep -c Traceback)"'
+        )
+    return lines
+
+
+def _probe_kv(text: str) -> dict[str, str]:
+    return dict(
         line.split("=", 1)
         for line in text.splitlines()
         if re.match(r"^[a-z0-9]+=", line)
     )
+
+
+def parse_probe(host: str, text: str) -> NodeProbe:
+    """``NodeProbe`` from the probe's ``key=value`` output."""
+    kv = _probe_kv(text)
     if kv.get("host") != host:
         tail = text.strip().splitlines()[-1:] or ["no output"]
         return NodeProbe(host, reachable=False, error=tail[0][:200])
@@ -125,6 +145,35 @@ def parse_probe(host: str, text: str) -> NodeProbe:
         tracebacks=num("tracebacks"),
         foreign_jobs=num("foreign") or 0,
     )
+
+
+def login_probe_script(card: Card, session: str) -> str:
+    """Bash for a slurm campaign's login node: supervisor window + driver."""
+    sess = shlex.quote(f"={session}")
+    lines = [
+        'echo "host=$(hostname)"',
+        f"echo \"poolswin=$(tmux list-windows -t {sess} -F '#W' 2>/dev/null "
+        '| grep -cx pools)"',
+    ]
+    if card.driver_pattern:
+        lines.extend(_driver_lines(card))
+    return "\n".join(lines) + "\n"
+
+
+def probe_login(card: Card, session: str, local_host: str) -> tuple[NodeProbe, bool]:
+    """Local driver probe and whether the ``<session>:pools`` window exists."""
+    try:
+        out = subprocess.run(
+            ["bash", "-s"],
+            input=login_probe_script(card, session),
+            capture_output=True,
+            text=True,
+            timeout=PROBE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return NodeProbe(local_host, reachable=False, error="probe timed out"), False
+    text = out.stdout + out.stderr
+    return parse_probe(local_host, text), _probe_kv(text).get("poolswin", "0") != "0"
 
 
 def probe_node(card: Card, host: str, local_host: str) -> NodeProbe:
@@ -276,6 +325,90 @@ def _open_claims_any_node(
     return out
 
 
+def slurm_root_view(root: Path, campaign: str, now_s: float) -> SlurmRootView:
+    """State files under ``<root>/slurm/<campaign>`` (pure reads)."""
+    sup = slurm.state_dir(root, campaign) / "supervisor.json"
+    state = slurm.read_json(sup) or {}
+    age = None
+    try:
+        age = now_s - datetime.fromisoformat(state["updated_utc"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        if sup.exists():
+            age = now_s - sup.stat().st_mtime
+    return SlurmRootView(
+        str(root),
+        slurm.pool_records(root, campaign),
+        age,
+        str(state.get("held_back") or ""),
+        slurm.paused_path(root, campaign).exists(),
+    )
+
+
+def recent_oom_logs(paths: list[Path], now_s: float) -> int:
+    """Logs among ``paths`` written in the last 15 min that mention OutOfMemoryError."""
+    recent = []
+    for path in paths:
+        try:
+            if now_s - path.stat().st_mtime <= OOM_WINDOW_S:
+                recent.append(str(path))
+        except OSError:
+            continue
+    if not recent:
+        return 0
+    out = subprocess.run(
+        ["grep", "-lF", "OutOfMemoryError", "--", *recent],
+        capture_output=True,
+        text=True,
+        timeout=PROBE_TIMEOUT_S,
+    )
+    return len(out.stdout.splitlines())
+
+
+def slurm_snapshot(
+    camp: Campaign, local_host: str, now_s: float
+) -> tuple[SlurmSnapshot, NodeProbe]:
+    """Login-node reads for a slurm campaign: squeue, state files, job logs, tmux."""
+    card = camp.card
+    logs: list[Path] = []
+    for root_s in card.queue_roots:
+        root = Path(root_s)
+        if root.is_dir():
+            for queue in campaign_queues(card, root):
+                logs.extend(store.queue_logs_dir(root, queue).glob("*.log"))
+    driver, window = probe_login(card, card.tmux_session or camp.name, local_host)
+    snap = SlurmSnapshot(
+        jobs=slurm.query_squeue(),
+        roots=tuple(
+            slurm_root_view(Path(r), camp.name, now_s) for r in card.queue_roots
+        ),
+        pools_window=window,
+        oom15=recent_oom_logs(logs, now_s),
+    )
+    return snap, driver
+
+
+def _node_pass(
+    camp: Campaign, ledger: Ledger, snap: QueueSnapshot, memory: WatchMemory
+) -> tuple[list[str], WatchMemory]:
+    hosts = watched_hosts(ledger, camp.name, snap)
+    if camp.card.driver_node and camp.card.driver_node not in hosts:
+        hosts = (*hosts, camp.card.driver_node)
+    local = socket.gethostname()
+    with ThreadPoolExecutor(max_workers=max(len(hosts), 1)) as pool:
+        probes = dict(
+            zip(hosts, pool.map(lambda h: probe_node(camp.card, h, local), hosts))
+        )
+    return evaluate(camp, ledger, probes, snap, memory, camp.card.disk_min_gb)
+
+
+def _slurm_pass(
+    camp: Campaign, snap: QueueSnapshot, memory: WatchMemory
+) -> tuple[list[str], WatchMemory]:
+    now = time.time()
+    view, driver = slurm_snapshot(camp, socket.gethostname(), now)
+    return evaluate_slurm(camp, view, driver, snap, memory, now)
+
+
 def _load_memory(path: Path) -> WatchMemory:
     if not path.exists():
         return WatchMemory()
@@ -286,12 +419,18 @@ def _load_memory(path: Path) -> WatchMemory:
         tracebacks=int(d.get("tracebacks", 0)),
         done_reported=bool(d.get("done_reported", False)),
         primed=bool(d.get("primed", False)),
+        paused_roots=frozenset(d.get("paused_roots", ())),
+        dead_since=dict(d.get("dead_since", {})),
     )
 
 
 def _save_memory(path: Path, memory: WatchMemory) -> None:
     d = asdict(memory)
     d["failed_keys"] = sorted(memory.failed_keys)
+    d["paused_roots"] = sorted(memory.paused_roots)
+    for key in ("paused_roots", "dead_since"):  # slurm only: ssh files stay as before
+        if not d[key]:
+            del d[key]
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(d, indent=2) + "\n")
     tmp.replace(path)
@@ -316,18 +455,11 @@ def run_pass(
     if camp is None:
         raise KeyError(f"campaign {campaign!r} is not registered in the fleet ledger")
     snap = queue_snapshot(camp.card, cache)
-    hosts = watched_hosts(ledger, campaign, snap)
-    if camp.card.driver_node and camp.card.driver_node not in hosts:
-        hosts = (*hosts, camp.card.driver_node)
-    local = socket.gethostname()
-    with ThreadPoolExecutor(max_workers=max(len(hosts), 1)) as pool:
-        probes = dict(
-            zip(hosts, pool.map(lambda h: probe_node(camp.card, h, local), hosts))
-        )
     mem_path = watch_dir / STATE_FILE
-    lines, memory = evaluate(
-        camp, ledger, probes, snap, _load_memory(mem_path), camp.card.disk_min_gb
-    )
+    if camp.card.executor == EXECUTOR_SLURM:
+        lines, memory = _slurm_pass(camp, snap, _load_memory(mem_path))
+    else:
+        lines, memory = _node_pass(camp, ledger, snap, _load_memory(mem_path))
     _save_memory(mem_path, memory)
     health = [*lines, progress_line(snap)]
     if camp.status == CAMPAIGN_DONE:
@@ -341,6 +473,7 @@ def run_pass(
         for line in health
         if line.startswith("ALERT")
         or line.startswith("INFO LEASE")
+        or line.startswith("INFO SLURM")
         or line.startswith("INFO CAMPAIGN")
         or line.startswith("INFO watcher")
         or (line.startswith("INFO progress") and n_pass % progress_every == 0)

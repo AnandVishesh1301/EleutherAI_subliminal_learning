@@ -9,7 +9,10 @@ world-writable so cross-node workers can share it, so a root under another accou
 subdir mixes both users' queues.
 
 Subcommands: ``submit`` / ``work`` / ``status`` / ``requeue`` / ``release`` / ``stop`` /
-``wait``. See ARCHITECTURE.md ("Job queue framework") for the layout and a worked example.
+``wait``, plus the Slurm layer (``jobqueue/slurm.py``): ``work --slurm`` inside a
+``lab submit`` job, ``slurm-supervise`` / ``slurm-pause`` / ``slurm-resume`` /
+``slurm-status`` on the login node. See ARCHITECTURE.md ("Job queue framework") for the
+layout and a worked example.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from subliminal_learning.config import resolve_queue_root
+from subliminal_learning.jobqueue import slurm as slurm_layer
 from subliminal_learning.jobqueue import store, yielding
 from subliminal_learning.jobqueue.gpu import (
     DEFAULT_LOCK_PREFIX,
@@ -171,15 +175,46 @@ def work(
         help="Consecutive job failures that trip a queue; the pool then skips it "
         "until a requeue grows its pending count. 0 disables the breaker.",
     ),
+    slurm: bool = typer.Option(
+        False,
+        "--slurm",
+        help="Run as a Slurm pool (inside `lab submit --gpu-ids indices`): node identity "
+        "from the job, GPUs = the allocation, closes before the time limit or when idle, "
+        "SIGTERM requeues running cells without charging an attempt.",
+    ),
+    slurm_name: str = typer.Option(None, "--slurm-name", help="With --slurm: campaign name."),
+    policy_template: Path = typer.Option(
+        None, "--policy-template", help="With --slurm: GPU policy JSON whose gpus are replaced."
+    ),
+    walltime_s: float = typer.Option(None, "--walltime-s", help="With --slurm: the job's time limit."),
+    claim_margin_s: float = typer.Option(
+        1800.0, "--claim-margin-s", help="With --slurm: stop claiming this long before the end."
+    ),
+    idle_exit_s: float = typer.Option(
+        900.0, "--idle-exit-s", help="With --slurm: exit after this long with nothing to run."
+    ),
 ) -> None:
-    """Run the foreground worker pool on THIS node (keep it in a tmux pane)."""
+    """Run the foreground worker pool on THIS node (tmux pane, or one Slurm job with --slurm)."""
     load_dotenv()
     configure_loguru()
     root = _root(root)
     q = [x.strip() for x in queues.split(",") if x.strip()] if queues else None
+    hostname, limits = None, None
+    if slurm:
+        if not (slurm_name and policy_template and walltime_s):
+            raise typer.BadParameter("--slurm needs --slurm-name, --policy-template and --walltime-s")
+        hostname, limits = slurm_layer.prepare_pool(
+            root,
+            slurm_name,
+            policy_template,
+            walltime_s=walltime_s,
+            claim_margin_s=claim_margin_s,
+            idle_exit_s=idle_exit_s,
+            queues=q,
+        )
     logger.info(
         "Starting worker pool on {} ({} threads) under {} queues={} lock_prefix={}",
-        store.this_host(),
+        hostname or store.this_host(),
         workers,
         root,
         q or "(all)",
@@ -189,9 +224,13 @@ def work(
         root,
         workers=workers,
         queues=q,
+        hostname=hostname,
         lock_prefix=lock_prefix,
         fail_streak_limit=fail_streak_limit or 0,
+        slurm=limits,
     )
+    if slurm:
+        slurm_layer.write_pool_record(root, slurm_name, hostname, ended_utc=store.now_iso())
 
 
 def _report_root(
@@ -394,6 +433,145 @@ def wait(
         )
         time.sleep(poll_s)
     logger.info("queue {!r} complete", queue)
+
+
+# --------------------------- Slurm layer (login node) ---------------------------
+
+NAME_HELP = "Campaign name (state under <root>/slurm/<name>/, Slurm jobs <name>-pool / <name>-pin.<node>)."
+
+
+@app.command("slurm-supervise")
+def slurm_supervise(
+    root: Path = typer.Option(None, help=ROOT_HELP),
+    name: str = typer.Option(..., help=NAME_HELP),
+    pin: Path = typer.Option(..., help="Code checkout whose .venv runs the pools."),
+    policy_template: Path = typer.Option(..., "--policy-template", help="GPU policy template JSON."),
+    queues: str = typer.Option(None, help="Comma list of queues (required on a shared root)."),
+    gpus_per_pool: int = typer.Option(4, "--gpus-per-pool"),
+    workers_per_gpu: int = typer.Option(1, "--workers-per-gpu", help="= the policy's cap_per_gpu."),
+    max_gpus: int = typer.Option(32, "--max-gpus", help="This campaign's GPU share."),
+    user_gpu_cap: int = typer.Option(32, "--user-gpu-cap", help="Cap on all your GPUs in squeue."),
+    lanes: str = typer.Option("burst", help="lab --lane value."),
+    preemptible: bool = typer.Option(True, "--preemptible/--no-preemptible", help="Also allow borrow."),
+    time_limit: str = typer.Option("8h", "--time", help="lab --time per pool."),
+    claim_margin_s: int = typer.Option(1800, "--claim-margin-s"),
+    idle_exit_s: int = typer.Option(900, "--idle-exit-s"),
+    max_pending_pools: int = typer.Option(2, "--max-pending-pools"),
+    mem_per_gpu: str = typer.Option(None, "--mem-per-gpu", help="e.g. 48G (default: lab's)."),
+    done_marker: Path = typer.Option(None, "--done-marker", help="Exit once this file exists."),
+    interval_s: float = typer.Option(120.0, "--interval-s"),
+) -> None:
+    """Keep this campaign's Slurm pools submitted while work is pending (login node, tmux)."""
+    load_dotenv()
+    configure_loguru()
+    cfg = slurm_layer.SupervisorConfig(
+        root=_root(root),
+        name=name,
+        pin=pin.resolve(),
+        policy_template=policy_template.resolve(),
+        queues=tuple(x.strip() for x in queues.split(",") if x.strip()) if queues else None,
+        gpus_per_pool=gpus_per_pool,
+        workers_per_gpu=workers_per_gpu,
+        max_gpus=max_gpus,
+        user_gpu_cap=user_gpu_cap,
+        lanes=lanes,
+        preemptible=preemptible,
+        time=time_limit,
+        claim_margin_s=claim_margin_s,
+        idle_exit_s=idle_exit_s,
+        max_pending_pools=max_pending_pools,
+        mem_per_gpu=mem_per_gpu,
+        done_marker=done_marker,
+        interval_s=interval_s,
+    )
+    if not (cfg.pin / ".venv" / "bin" / "python").exists():
+        raise typer.BadParameter(f"{cfg.pin}/.venv is missing: run `UV_FROZEN=1 uv sync` there first")
+    if not cfg.policy_template.exists():
+        raise typer.BadParameter(f"policy template {cfg.policy_template} does not exist")
+    slurm_layer.supervise(cfg)
+
+
+@app.command("slurm-pause")
+def slurm_pause(
+    root: Path = typer.Option(None, help=ROOT_HELP),
+    name: str = typer.Option(..., help=NAME_HELP),
+    now: bool = typer.Option(
+        False, "--now", help="Also cancel the pools; running cells are requeued without charging an attempt."
+    ),
+) -> None:
+    """Pause a campaign: no new pools; live pools drain (or stop now) and release their GPUs."""
+    import subprocess
+
+    configure_loguru()
+    root = _root(root)
+    jobs = slurm_layer.query_squeue()
+    if jobs is None:
+        raise typer.Exit(1)
+    p = slurm_layer.paused_path(root, name)
+    store.mkdir_open(p.parent)
+    p.touch()
+    nodes = slurm_layer.live_pool_nodes(root, name, jobs)
+    for node in nodes:
+        store.stop_path(root, node).touch()
+    logger.info("Paused {}: {} live pool(s) draining {}", name, len(nodes), nodes or "-")
+    if now and nodes:
+        records = slurm_layer.pool_records(root, name)
+        ids = sorted({str(records[n]["slurm_job_id"]) for n in nodes})
+        subprocess.run(["lab", "cancel", *ids], check=True)
+        logger.info("Cancelled pool jobs {}", ids)
+
+
+@app.command("slurm-resume")
+def slurm_resume(
+    root: Path = typer.Option(None, help=ROOT_HELP),
+    name: str = typer.Option(..., help=NAME_HELP),
+) -> None:
+    """Resume a paused campaign: clear PAUSED and its pools' stop files."""
+    configure_loguru()
+    root = _root(root)
+    slurm_layer.paused_path(root, name).unlink(missing_ok=True)
+    cleared = []
+    for node in slurm_layer.pool_records(root, name):
+        p = store.stop_path(root, node)
+        if p.exists():
+            p.unlink()
+            cleared.append(node)
+    logger.info("Resumed {} (cleared stop files: {})", name, cleared or "-")
+
+
+@app.command("slurm-status")
+def slurm_status(
+    root: Path = typer.Option(None, help=ROOT_HELP),
+    name: str = typer.Option(..., help=NAME_HELP),
+) -> None:
+    """Read-only: supervisor heartbeat, pools (with squeue state) and queue counts."""
+    configure_loguru()
+    root = _root(root)
+    sup = slurm_layer.read_json(slurm_layer.state_dir(root, name) / "supervisor.json") or {}
+    jobs = slurm_layer.query_squeue()
+    if jobs is None:
+        typer.echo("squeue unavailable: pool states unknown")
+        jobs = {}
+    paused = slurm_layer.paused_path(root, name).exists()
+    typer.echo(
+        f"{name}: supervisor updated {sup.get('updated_utc', 'never')} host={sup.get('host')} "
+        f"paused={paused} held_back={sup.get('held_back') or '-'} "
+        f"own_gpus={sup.get('own_gpus')} user_gpus={sup.get('user_gpus')}"
+    )
+    for node, rec in slurm_layer.pool_records(root, name).items():
+        if rec.get("ended_utc") or rec.get("released_utc"):
+            continue
+        job = jobs.get(str(rec.get("slurm_job_id")))
+        typer.echo(
+            f"  pool {node} job={rec.get('slurm_job_id')} state={job.state if job else 'gone'} "
+            f"host={rec.get('host')} gpus={rec.get('gpus')} claim_until={rec.get('claim_until_utc')}"
+        )
+    for q in store.list_queues(root):
+        st = store.queue_status(root, q)
+        typer.echo(
+            f"  {q}: pending={st['pending']} running={st['running']} "
+            f"done={st['done']} failed={st['failed']}"
+        )
 
 
 if __name__ == "__main__":

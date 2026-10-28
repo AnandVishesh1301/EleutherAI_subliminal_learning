@@ -5,14 +5,21 @@ every change appended to ``events.jsonl``). The node-side pause / preempt / resu
 commands are printed by ``commands`` and run by the ``/fleet`` skill; ``claim`` and
 ``lend`` refuse a node until the previous holder has drained there.
 
-Subcommands: ``status`` / ``register`` / ``claim`` / ``yield`` / ``drained`` / ``lend``
-/ ``pause`` / ``resume`` / ``release`` / ``finish`` / ``commands`` / ``note``.
+Subcommands: ``status`` / ``register`` / ``card`` / ``claim`` / ``yield`` / ``drained``
+/ ``lend`` / ``pause`` / ``resume`` / ``release`` / ``finish`` / ``commands`` / ``note``.
+
+Slurm campaigns (card ``executor: "slurm"``) hold no nodes: ``register`` / ``card`` /
+``status`` / ``finish`` apply and ``commands <c> --op pause|preempt|resume`` prints the
+card's ``pause_cmd`` / ``resume_cmd`` (default ``jobq slurm-pause`` / ``slurm-resume``)
+to run on the login node; ``claim`` / ``yield`` / ``drained`` / ``lend`` / ``pause`` /
+``resume`` / ``release`` refuse and name those commands.
 """
 
 from __future__ import annotations
 
 import json
 import socket
+from dataclasses import asdict
 from pathlib import Path
 
 import typer
@@ -27,6 +34,7 @@ from subliminal_learning.fleet.ledger_io import (
     now_utc,
     read_ledger,
     sentinel_mismatches,
+    slurm_details,
     update_ledger,
 )
 from subliminal_learning.fleet.nodes import resolve_node
@@ -46,6 +54,14 @@ def _apply(op: str, change, chat: str | None, **args) -> fl.Ledger:
     try:
         return update_ledger(_root(), op, change, chat=chat, args=args)
     except (fl.LeaseError, KeyError) as err:
+        typer.echo(f"refused: {err}", err=True)
+        raise typer.Exit(2) from err
+
+
+def _refuse_slurm(ledger: fl.Ledger, campaign: str) -> None:
+    try:
+        fl.refuse_slurm(ledger, campaign)
+    except fl.LeaseError as err:
         typer.echo(f"refused: {err}", err=True)
         raise typer.Exit(2) from err
 
@@ -95,16 +111,26 @@ def status(
         return
     if brief:
         typer.echo(f"Fleet ledger ({root}/ledger.json), as of {now_utc()}:")
-    typer.echo(fl.render(ledger))
+    slurm = slurm_details(ledger)
+    typer.echo(fl.render(ledger, slurm))
     for line in sentinel_mismatches(ledger):
         typer.echo(f"MISMATCH {line}")
     for line in summary_lines(root):
         typer.echo(line)
-    if brief:
+    if not brief:
+        return
+    live = [c for c in ledger.campaigns.values() if c.status != fl.CAMPAIGN_DONE]
+    if not slurm or any(c.card.executor == fl.EXECUTOR_SSH for c in live):
         typer.echo(
             "Node handoffs between campaigns and chats go through /fleet "
             "(.claude/skills/fleet/SKILL.md); never pause, kill, resume or launch on a "
             "node another campaign holds without it."
+        )
+    if slurm:
+        typer.echo(
+            "Slurm campaigns (executor=slurm) hold no nodes: pause / resume one with "
+            "its card's pause_cmd / resume_cmd on the login node "
+            "(`fleet commands <campaign> --op pause|resume` prints them)."
         )
 
 
@@ -134,13 +160,22 @@ def register(
 
 
 @app.command()
+def card(campaign: str = typer.Argument(...)) -> None:
+    """Print a campaign's operating card as JSON."""
+    camp = read_ledger(_root()).campaigns[campaign]
+    typer.echo(json.dumps(asdict(camp.card), indent=2))
+
+
+@app.command()
 def claim(
     campaign: str = typer.Argument(...),
     nodes: list[str] = typer.Argument(..., help=NODES_HELP),
     chat: str = typer.Option(None, "--chat", help=CHAT_HELP),
 ) -> None:
     """Take free nodes, or nodes another campaign paused and drained (lent)."""
-    _require_drained(read_ledger(_root()), nodes)
+    ledger = read_ledger(_root())
+    _refuse_slurm(ledger, campaign)
+    _require_drained(ledger, nodes)
     now = now_utc()
     led = _apply(
         "claim",
@@ -183,6 +218,7 @@ def drained(
 ) -> None:
     """Exit 0 iff the campaign is paused with no open claim on every node."""
     ledger = read_ledger(_root())
+    _refuse_slurm(ledger, campaign)
     card = ledger.campaigns[campaign].card
     ok = True
     for name in nodes:
@@ -204,7 +240,9 @@ def lend(
     chat: str = typer.Option(None, "--chat", help=CHAT_HELP),
 ) -> None:
     """Hand drained nodes to the campaign they were yielded for."""
-    _require_drained(read_ledger(_root()), nodes)
+    ledger = read_ledger(_root())
+    _refuse_slurm(ledger, target)
+    _require_drained(ledger, nodes)
     now = now_utc()
     led = _apply(
         "lend",
@@ -261,10 +299,10 @@ def release(
     chat: str = typer.Option(None, "--chat", help=CHAT_HELP),
 ) -> None:
     """Let go of paused, drained nodes: each returns to its newest live lender or frees."""
+    ledger = read_ledger(_root())
+    _refuse_slurm(ledger, campaign)
     hosts = tuple(resolve_node(n).hostname for n in nodes)
-    _refuse_if(
-        handback_blockers(read_ledger(_root()), campaign, hosts, require_paused=True)
-    )
+    _refuse_if(handback_blockers(ledger, campaign, hosts, require_paused=True))
     now = now_utc()
     led = _apply(
         "release",
@@ -299,15 +337,34 @@ def finish(
 @app.command()
 def commands(
     campaign: str = typer.Argument(...),
-    node: str = typer.Argument(..., help="One node."),
+    node: str = typer.Argument(None, help="One node (none for a slurm campaign)."),
     op: str = typer.Option(..., "--op", help="pause, preempt or resume."),
     sha: str = typer.Option(
         None, "--sha", help="Run from <clone>/.code_pins/<sha> (required for preempt)."
     ),
 ) -> None:
-    """Print the shell commands that pause / preempt / resume a campaign on one node."""
+    """Print the shell commands that pause / preempt / resume a campaign on one node.
+
+    A slurm campaign gets one login-node command and no NODE: the card's
+    ``pause_cmd`` / ``resume_cmd`` as is, else ``jobq slurm-pause`` /
+    ``slurm-resume`` from this checkout (or its ``.code_pins/<sha>``); never ssh.
+    """
     ledger = read_ledger(_root())
     camp = ledger.campaigns[campaign]
+    if camp.card.executor == fl.EXECUTOR_SLURM:
+        if node is not None:
+            raise typer.BadParameter("a slurm campaign has no nodes; drop NODE")
+        try:
+            step = fl.slurm_command(camp.card, campaign, op)
+        except fl.LeaseError as err:
+            typer.echo(f"refused: {err}", err=True)
+            raise typer.Exit(2) from err
+        given = camp.card.resume_cmd if op == "resume" else camp.card.pause_cmd
+        cwd = Path.cwd() / ".code_pins" / sha if sha else Path.cwd()
+        typer.echo(step if given else f"cd {cwd} && {step}")
+        return
+    if node is None:
+        raise typer.BadParameter("NODE is required for an ssh campaign")
     target = resolve_node(node)
     if op == "preempt" and not sha:
         raise typer.BadParameter("preempt needs --sha (a pin with `jobq stop --now`)")

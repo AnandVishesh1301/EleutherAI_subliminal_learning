@@ -12,6 +12,7 @@ from typing import Any
 
 from subliminal_learning.fleet.ledger import (
     CAMPAIGN_DONE,
+    EXECUTOR_SLURM,
     RUNNING,
     Card,
     Ledger,
@@ -19,7 +20,7 @@ from subliminal_learning.fleet.ledger import (
     ledger_from_dict,
     ledger_to_dict,
 )
-from subliminal_learning.jobqueue import store
+from subliminal_learning.jobqueue import slurm, store
 from subliminal_learning.utils.io import atomic_write_json
 
 LEDGER_FILE = "ledger.json"
@@ -100,6 +101,27 @@ def sentinel_mismatches(ledger: Ledger) -> list[str]:
                     and lease.state == RUNNING
                 ):
                     out.append(f"{stop} is set but the ledger says {name} runs there")
+    return out
+
+
+def slurm_details(ledger: Ledger) -> dict[str, str]:
+    """`` pools=<live> [PAUSED]`` per live slurm campaign (``pools=?`` if squeue fails)."""
+    camps = {
+        name: c
+        for name, c in ledger.campaigns.items()
+        if c.status != CAMPAIGN_DONE and c.card.executor == EXECUTOR_SLURM
+    }
+    jobs = slurm.query_squeue() if camps else None
+    out = {}
+    for name, camp in camps.items():
+        roots = [Path(r) for r in camp.card.queue_roots]
+        live = (
+            "?"
+            if jobs is None
+            else sum(len(slurm.live_pool_nodes(r, name, jobs)) for r in roots)
+        )
+        paused = any(slurm.paused_path(r, name).exists() for r in roots)
+        out[name] = f" pools={live}" + (" PAUSED" if paused else "")
     return out
 
 

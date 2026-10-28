@@ -1,9 +1,16 @@
 from __future__ import annotations
 
-import pytest
+import json
+from pathlib import Path
 
+import pytest
+from typer.testing import CliRunner
+
+import scripts.fleet as fleet_cli
 from subliminal_learning.fleet import ledger as fl
+from subliminal_learning.fleet.ledger_io import read_ledger, update_ledger
 from subliminal_learning.fleet.nodes import resolve_node
+from subliminal_learning.jobqueue import slurm
 
 NOW = "2026-10-16T00:00:00Z"
 CARD = fl.Card(queue_roots=("/mnt/ssd-1/x/queue",), queue_prefix="a-")
@@ -204,3 +211,121 @@ def test_node_commands_one_line_per_root() -> None:
         "cd /c && uv run python -m scripts.jobq stop --clear --root /q1",
         "cd /c && uv run python -m scripts.jobq stop --clear --root /q2",
     ]
+
+
+SLURM = fl.Card(queue_roots=("/q",), queue_prefix="s-", executor=fl.EXECUTOR_SLURM)
+
+
+def test_card_without_executor_loads_as_ssh_and_ssh_is_not_written() -> None:
+    led = _ledger("a")
+    data = fl.ledger_to_dict(led)
+    assert "executor" not in data["campaigns"]["a"]["card"]
+    assert fl.ledger_from_dict(data).campaigns["a"].card.executor == fl.EXECUTOR_SSH
+    led = fl.register(led, "s", SLURM, chat="c", now=NOW)
+    data = fl.ledger_to_dict(led)
+    assert data["campaigns"]["s"]["card"]["executor"] == fl.EXECUTOR_SLURM
+    assert fl.ledger_from_dict(data).campaigns["s"].card == SLURM
+
+
+def test_slurm_card_keeps_login_driver_node_and_rejects_unknown_executor() -> None:
+    data = {
+        "queue_roots": ["/q", "/r"],
+        "executor": "slurm",
+        "driver_node": "gpu-login-0",
+    }
+    card = fl.card_from_dict(data)
+    assert card.driver_node == "gpu-login-0" and card.queue_roots == ("/q", "/r")
+    with pytest.raises(fl.LeaseError):
+        fl.card_from_dict({"queue_roots": ["/q"], "executor": "k8s"})
+    with pytest.raises(KeyError):
+        fl.card_from_dict({"queue_roots": ["/q"], "driver_node": "gpu-login-0"})
+
+
+def test_slurm_campaign_refuses_leases_and_names_its_commands() -> None:
+    led = fl.register(_ledger("a"), "s", SLURM, chat="c", now=NOW)
+    led = fl.claim(led, "a", ["soar"], chat="c", now=NOW)
+    attempts = [
+        lambda: fl.claim(led, "s", ["cluster-3"], chat="c", now=NOW),
+        lambda: fl.start_yield(
+            led, "a", "s", ["soar"], mode="drain", chat="c", now=NOW
+        ),
+        lambda: fl.pause(led, "s", ["soar"], chat="c", now=NOW),
+        lambda: fl.resume(led, "s", ["soar"], chat="c", now=NOW),
+        lambda: fl.release(led, "s", ["soar"], chat="c", now=NOW),
+    ]
+    for attempt in attempts:
+        with pytest.raises(fl.LeaseError, match="jobq slurm-pause --root /q --name s"):
+            attempt()
+    done = fl.finish(led, "s", chat="c", now=NOW)
+    assert done.campaigns["s"].status == fl.CAMPAIGN_DONE
+    assert done.nodes == led.nodes
+
+
+def test_slurm_command_defaults_card_override_and_preempt_guard() -> None:
+    assert fl.slurm_command(SLURM, "s", "resume") == (
+        "uv run python -m scripts.jobq slurm-resume --root /q --name s"
+    )
+    with pytest.raises(fl.LeaseError):
+        fl.slurm_command(SLURM, "s", "preempt")
+    card = fl.Card(
+        queue_roots=("/q",), executor="slurm", pause_cmd="P", preempt_ok=True
+    )
+    assert fl.slurm_command(card, "s", "pause") == "P"
+    assert fl.slurm_command(card, "s", "preempt") == "P --now"
+    two = fl.Card(queue_roots=("/q", "/r"), executor="slurm")
+    assert fl.slurm_command(two, "s", "pause") == (
+        "uv run python -m scripts.jobq slurm-pause --root /q --name s && "
+        "uv run python -m scripts.jobq slurm-pause --root /r --name s"
+    )
+
+
+def _brief(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cards: dict[str, fl.Card]
+) -> str:
+    fleet = tmp_path / "fleet"
+    for name, card in cards.items():
+        update_ledger(
+            fleet,
+            "register",
+            lambda led, n=name, c=card: fl.register(led, n, c, chat="c", now=NOW),
+            chat="c",
+            args={},
+        )
+    monkeypatch.setattr(fleet_cli, "_root", lambda: fleet)
+    res = CliRunner().invoke(fleet_cli.app, ["status", "--brief"])
+    assert res.exit_code == 0, res.output
+    return res.output
+
+
+def test_brief_status_lists_slurm_campaign_without_fleet_skill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "q"
+    (root / "slurm" / "s" / "pools").mkdir(parents=True)
+    (root / "slurm" / "s" / "PAUSED").touch()
+    for ident, jid in (("slurm-7.r0", 7), ("slurm-8.r0", 8)):
+        rec = root / "slurm" / "s" / "pools" / f"{ident}.json"
+        rec.write_text(json.dumps({"slurm_job_id": jid}))
+    jobs = slurm.parse_squeue("7|s-pool|RUNNING|gres/gpu:4\n8|s-pool|COMPLETED|")
+    monkeypatch.setattr(slurm, "query_squeue", lambda: jobs)
+    card = fl.Card(queue_roots=(str(root),), queue_prefix="s-", executor="slurm")
+    out = _brief(tmp_path, monkeypatch, {"s": card})
+    assert "  s running executor=slurm pools=1 PAUSED chat=c plan=-\n" in out
+    assert "go through /fleet" not in out and "pause_cmd / resume_cmd" in out
+    monkeypatch.setattr(slurm, "query_squeue", lambda: None)
+    out = _brief(tmp_path, monkeypatch, {"a": CARD})
+    assert "  s running executor=slurm pools=? PAUSED chat=c plan=-\n" in out
+    assert "  a running nodes=- chat=c plan=-\n" in out and "go through /fleet" in out
+
+
+def test_brief_status_without_slurm_cards_is_legacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(slurm, "query_squeue", None)
+    out = _brief(tmp_path, monkeypatch, {"a": CARD})
+    led = read_ledger(tmp_path / "fleet")
+    assert out.split("\n", 1)[1] == (
+        fl.render(led) + "\nNode handoffs between campaigns and chats go through "
+        "/fleet (.claude/skills/fleet/SKILL.md); never pause, kill, resume or launch "
+        "on a node another campaign holds without it.\n"
+    )

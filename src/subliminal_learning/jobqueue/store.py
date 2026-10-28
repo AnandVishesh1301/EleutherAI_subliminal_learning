@@ -535,6 +535,21 @@ def open_claims(root: Path, name: str, node: str) -> list[tuple[str, dict]]:
     return out
 
 
+def claim_owners(root: Path, name: str) -> list[tuple[str, dict]]:
+    """``(jobkey, owner)`` of every open claim with a readable owner, any node."""
+    cdir = _claims_dir(root, name)
+    if not cdir.exists():
+        return []
+    out: list[tuple[str, dict]] = []
+    for entry in sorted(cdir.iterdir()):
+        if not entry.is_dir() or has_result(root, name, entry.name):
+            continue
+        owner = _read_owner(root, name, entry.name)
+        if owner is not None:
+            out.append((entry.name, owner))
+    return out
+
+
 def force_release(root: Path, name: str, key: str) -> bool:
     """Remove a claim IGNORING the node guard (CLI ``release --force`` only).
 
@@ -732,5 +747,9 @@ def stop_path(root: Path, hostname: str) -> Path:
     return Path(root) / f"stop.{hostname}"
 
 
+NODE_ENV = "SL_JOBQ_NODE"
+
+
 def this_host() -> str:
-    return socket.gethostname()
+    """This pool's node identity: ``$SL_JOBQ_NODE`` when set (Slurm pools), else hostname."""
+    return os.environ.get(NODE_ENV) or socket.gethostname()

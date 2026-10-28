@@ -1,10 +1,12 @@
 """CLI: generic read-only campaign watcher (``uv run python -m scripts.campaign_watch``).
 
-Reads the campaign's card from the fleet ledger every pass, probes its nodes, and
-appends ``health.log`` / ``alerts.log`` in its watch dir (card ``watch_dir``). Lease
-changes, drains, failures, OOMs, dead pools / drivers and CAMPAIGN_DONE become alert
-lines a chat's Monitor wakes on. Exits once ``fleet finish`` marks the campaign done.
-Run it on soar in tmux ``<campaign>-watch``.
+Reads the campaign's card from the fleet ledger every pass, probes its nodes (a slurm
+card: squeue, the supervisor's state files and tmux window, all local), and appends
+``health.log`` / ``alerts.log`` in its watch dir (card ``watch_dir``). Lease changes,
+drains, failures, OOMs, dead pools / drivers / supervisors and CAMPAIGN_DONE become
+alert lines a chat's Monitor wakes on. Exits once ``fleet finish`` marks the campaign
+done. Run it in tmux ``<campaign>-watch`` on the driver's node (the login node for a
+slurm card).
 """
 
 from __future__ import annotations

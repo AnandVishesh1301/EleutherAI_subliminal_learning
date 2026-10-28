@@ -3,24 +3,35 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 from subliminal_learning.fleet import ledger as fl
 from subliminal_learning.fleet.ledger_io import drain_report, read_ledger, update_ledger
+from subliminal_learning.fleet import watch_io
 from subliminal_learning.fleet.watch import (
     NodeProbe,
     QueueSnapshot,
+    SlurmRootView,
+    SlurmSnapshot,
     WatchMemory,
     evaluate,
+    evaluate_slurm,
 )
 from subliminal_learning.fleet.watch_io import (
     ResultCache,
     _unselfmatch,
+    login_probe_script,
     parse_probe,
     probe_script,
     queue_snapshot,
+    recent_oom_logs,
+    slurm_root_view,
 )
 from subliminal_learning.jobqueue import store
+from subliminal_learning.jobqueue.slurm import parse_squeue
 from subliminal_learning.jobqueue.model import Job
 
 NOW = "2026-10-16T00:00:00Z"
@@ -246,3 +257,238 @@ def test_handback_blockers_need_pause_and_no_open_claims(tmp_path: Path) -> None
         attempt=0,
     )
     assert handback_blockers(led, "a", (C4,), require_paused=True) == []
+
+
+T0 = 1_800_000_000.0
+SCARD = fl.Card(
+    queue_roots=("/q",), queue_prefix="s-", tmux_session="s", executor="slurm"
+)
+SCAMP = fl.Campaign("s", fl.CAMPAIGN_RUNNING, "c", SCARD, NOW)
+SQUEUE = (
+    "101|s-pool|RUNNING|gres/gpu:4\n"
+    "102|s-pool|PENDING|gres/gpu:4\n"
+    "103|s-pin.soar-subliminal-2|RUNNING|gres/gpu:2\n"
+    "200|other-pool|RUNNING|gres/gpu:8\n"
+)
+
+
+def _view(**kw) -> SlurmRootView:
+    base = {"root": "/q", "records": {"slurm-101.r0": {}}, "supervisor_age_s": 30.0}
+    return SlurmRootView(**{**base, **kw})
+
+
+def _slurm(view: SlurmRootView | None = None, **kw) -> SlurmSnapshot:
+    base = {
+        "jobs": parse_squeue(SQUEUE),
+        "roots": (view or _view(),),
+        "pools_window": True,
+    }
+    return SlurmSnapshot(**{**base, **kw})
+
+
+def _sl(slurm, snap=None, memory=WatchMemory(primed=True), now=T0, camp=SCAMP):
+    snap = snap or QueueSnapshot(counts={"pending": 3})
+    return evaluate_slurm(camp, slurm, None, snap, memory, now)
+
+
+def _alerts(lines: list[str]) -> list[str]:
+    return [x for x in lines if x.startswith("ALERT")]
+
+
+def test_slurm_healthy_pass_is_quiet_and_counts_pool_and_carrier_jobs() -> None:
+    lines, mem = _sl(_slurm())
+    assert not _alerts(lines)
+    assert lines[:2] == [
+        "SLURM jobs running=2 pending=1 gpus=6",
+        "SLURM /q/slurm/s records=1 paused=0 supervisor_age=30s held_back=-",
+    ]
+    assert mem.leases == {} and mem.paused_roots == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("kw", "alert"),
+    [
+        (
+            {"view": _view(supervisor_age_s=None)},
+            "ALERT slurm: supervisor heartbeat missing (/q/slurm/s)",
+        ),
+        (
+            {"view": _view(supervisor_age_s=900.0)},
+            "ALERT slurm: supervisor heartbeat stale (15 min, /q/slurm/s)",
+        ),
+        (
+            {"pools_window": False},
+            "ALERT slurm: tmux window s:pools missing (supervisor)",
+        ),
+        ({"oom15": 2}, "ALERT slurm: OutOfMemoryError in 2 job log(s), last 15 min"),
+    ],
+)
+def test_slurm_supervisor_and_oom_alerts(kw: dict, alert: str) -> None:
+    lines, _ = _sl(_slurm(**kw))
+    assert _alerts(lines) == [alert]
+
+
+def test_slurm_supervisor_checks_stop_once_done() -> None:
+    down = _slurm(_view(supervisor_age_s=None), pools_window=False)
+    lines, _ = _sl(down, snap=QueueSnapshot(counts={}, done=True))
+    assert not _alerts(lines)
+    assert "INFO CAMPAIGN_DONE s: done marker present; run the finish step" in lines
+
+
+def test_slurm_paused_is_info_once_never_alert() -> None:
+    paused = _slurm(_view(records={}, paused=True), jobs={})
+    lines, mem = _sl(paused)
+    assert "INFO SLURM PAUSED /q/slurm/s: no new pools, live pools drain" in lines
+    assert not _alerts(lines)
+    lines, mem = _sl(paused, memory=mem)
+    assert not [x for x in lines if x.startswith("INFO SLURM")]
+    lines, _ = _sl(_slurm(), memory=mem)
+    assert "INFO SLURM resumed /q/slurm/s: PAUSED cleared" in lines
+
+
+def test_slurm_squeue_failure_is_one_alert_and_keeps_dead_timers() -> None:
+    memory = WatchMemory(primed=True, dead_since={"slurm-9.r0": T0 - 100})
+    snap = QueueSnapshot(counts={}, running_by_host={"slurm-9.r0": 1})
+    view = _view(records={"slurm-9.r0": {}})
+    lines, mem = _sl(_slurm(view, jobs=None), snap=snap, memory=memory)
+    assert _alerts(lines) == ["ALERT slurm: squeue unavailable; pool state unknown"]
+    assert lines[0] == "SLURM jobs unknown"
+    assert mem.dead_since == {"slurm-9.r0": T0 - 100}
+
+
+def test_slurm_idle_exit_and_preempt_requeue_are_not_alerts() -> None:
+    records = {
+        "slurm-101.r0": {"ended_utc": NOW, "exit_reason": "idle"},
+        "slurm-101.r1": {},
+        "slurm-77.r0": {"ended_utc": NOW, "exit_reason": "signal"},
+    }
+    snap = QueueSnapshot(counts={}, running_by_host={"slurm-101.r1": 3})
+    lines, mem = _sl(_slurm(_view(records=records)), snap=snap)
+    assert not _alerts(lines) and mem.dead_since == {}
+
+
+def test_slurm_dead_identity_claims_alert_only_after_15_min() -> None:
+    old = datetime.fromtimestamp(T0 - 1000, timezone.utc).isoformat()
+    records = {
+        "slurm-101.r0": {},
+        "slurm-101.r1": {},
+        "slurm-99.r0": {},
+        "slurm-98.r0": {"ended_utc": old},
+        "slurm-97.r0": {"released_utc": old},
+    }
+    claims = {
+        "slurm-101.r0": 1,
+        "slurm-101.r1": 1,
+        "slurm-99.r0": 2,
+        "slurm-98.r0": 1,
+        "slurm-97.r0": 1,
+        "slurm-5.r0": 1,
+        "soar-subliminal-2": 1,
+    }
+    snap = QueueSnapshot(counts={}, running_by_host=claims)
+    slurm = _slurm(_view(records=records))
+    lines, mem = _sl(slurm, snap=snap)
+    assert _alerts(lines) == [
+        "ALERT slurm: 1 open claim(s) of dead pool(s) unreleased > 15 min "
+        "(supervisor sweep backlog): slurm-98.r0"
+    ]
+    assert set(mem.dead_since) == {"slurm-101.r0", "slurm-99.r0", "slurm-98.r0"}
+    lines, _ = _sl(slurm, snap=snap, memory=mem, now=T0 + 901)
+    assert _alerts(lines) == [
+        "ALERT slurm: 4 open claim(s) of dead pool(s) unreleased > 15 min "
+        "(supervisor sweep backlog): slurm-101.r0, slurm-98.r0, slurm-99.r0"
+    ]
+
+
+def test_slurm_tree_reads_state_files_logs_and_claims(tmp_path: Path) -> None:
+    root = tmp_path / "q"
+    sdir = root / "slurm" / "s"
+    (sdir / "pools").mkdir(parents=True)
+    (sdir / "pools" / "slurm-7.r0.json").write_text(json.dumps({"slurm_job_id": 7}))
+    view = slurm_root_view(root, "s", T0)
+    assert view.supervisor_age_s is None and not view.paused
+    assert view.records == {"slurm-7.r0": {"slurm_job_id": 7}}
+    stamp = datetime(2027, 1, 15, 8, tzinfo=timezone.utc)
+    sup = {"updated_utc": stamp.isoformat(), "held_back": "user cap"}
+    (sdir / "supervisor.json").write_text(json.dumps(sup))
+    (sdir / "PAUSED").touch()
+    view = slurm_root_view(root, "s", stamp.timestamp() + 42)
+    assert view.supervisor_age_s == pytest.approx(42)
+    assert view.paused and view.held_back == "user cap"
+
+    store.create_queue(root, "s-1")
+    store.append_jobs(root, "s-1", [Job("k", "true")])
+    store.claim_next(root, "s-1", "slurm-7.r0", 1)
+    card = fl.Card(queue_roots=(str(root),), queue_prefix="s-", executor="slurm")
+    snap = queue_snapshot(card, ResultCache())
+    assert snap.running_by_host == {"slurm-7.r0": 1}
+
+    now = time.time()
+    logs = []
+    for name, text, age in (
+        ("a.slurm-7.r0.log", "torch.OutOfMemoryError: CUDA", 60),
+        ("b.slurm-8.r0.log", "torch.OutOfMemoryError: CUDA", 3600),
+        ("c.slurm-7.r0.log", "fine", 60),
+    ):
+        path = tmp_path / name
+        path.write_text(text)
+        os.utime(path, (now - age, now - age))
+        logs.append(path)
+    assert recent_oom_logs(logs, now) == 1
+
+
+def test_slurm_run_pass_writes_logs_and_state_without_ssh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, fleet, wdir = tmp_path / "q", tmp_path / "fleet", tmp_path / "w"
+    wdir.mkdir()
+    store.create_queue(root, "s-1")
+    store.append_jobs(root, "s-1", [Job("k", "true")])
+    card = fl.Card(
+        queue_roots=(str(root),), queue_prefix="s-", tmux_session="s", executor="slurm"
+    )
+    update_ledger(
+        fleet,
+        "register",
+        lambda led: fl.register(led, "s", card, chat="c", now=NOW),
+        chat="c",
+        args={},
+    )
+    monkeypatch.setattr(watch_io.slurm, "query_squeue", lambda: None)
+    monkeypatch.setattr(watch_io, "probe_login", lambda c, s, h: (NodeProbe(h), False))
+    monkeypatch.setattr(watch_io.subprocess, "run", None)  # no ssh / bash probes
+    assert watch_io.run_pass("s", wdir, fleet, 0, 6, ResultCache())
+    alerts = (wdir / "alerts.log").read_text()
+    assert " ALERT slurm: squeue unavailable; pool state unknown\n" in alerts
+    assert " ALERT slurm: supervisor heartbeat missing (" in alerts
+    assert " ALERT slurm: tmux window s:pools missing (supervisor)\n" in alerts
+    assert "INFO progress pending=1" in (wdir / "health.log").read_text()
+    state = json.loads((wdir / ".watch_state.json").read_text())
+    assert state["primed"] and "paused_roots" not in state
+
+
+def test_ssh_watch_state_file_keeps_its_legacy_keys(tmp_path: Path) -> None:
+    path = tmp_path / ".watch_state.json"
+    watch_io._save_memory(path, WatchMemory(frozenset({"q:1"}), {"h": "x"}, 2))
+    assert list(json.loads(path.read_text())) == [
+        "failed_keys",
+        "leases",
+        "tracebacks",
+        "done_reported",
+        "primed",
+    ]
+    memory = WatchMemory(paused_roots=frozenset({"/q"}), dead_since={"slurm-1.r0": 1.0})
+    watch_io._save_memory(path, memory)
+    assert watch_io._load_memory(path) == memory
+
+
+def test_login_probe_never_uses_ssh_and_parses_window() -> None:
+    card = fl.Card(
+        queue_roots=("/q",),
+        executor="slurm",
+        driver_pattern="scripts.campaign watch",
+        driver_pane="s:driver",
+    )
+    script = login_probe_script(card, "s")
+    assert "ssh" not in script and "list-windows -t =s" in script
+    assert "scripts.campaign" not in script

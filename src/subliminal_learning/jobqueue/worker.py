@@ -15,7 +15,9 @@ the process never exits.
 
 Master-log verbs (``[<iso-utc>] VERB ...``): CLAIM, START, END rc=<rc>, STEAL, WAIT,
 RESPAWN, SCANERR <name> (a queue whose steal/claim scan raised; skipped for that pass),
-TRIPPED <name>, QUEUE COMPLETE <name>, and a final ALL QUEUES COMPLETE. The
+TRIPPED <name>, QUEUE COMPLETE <name>, and a final ALL QUEUES COMPLETE. Slurm mode
+(``run_pool(slurm=...)``, see ``jobqueue/slurm.py``) adds CLOSE <reason>, SIGNAL <name>,
+PREEMPT <queue> <key> gpu=N, REQUEUE <queue> <key> and a final EXIT <reason>. The
 opt-in GPU-yielding framework (``jobqueue/yielding.py``) adds YIELD gpu=N foreign=K,
 KILL <queue> <key> gpu=N, DRAIN <queue> <key> gpu=N pct=P (finishing) (a near-done
 job spared under drain_if_near_done), and RECLAIM gpu=N.
@@ -54,6 +56,8 @@ from subliminal_learning.jobqueue.model import Job
 from subliminal_learning.utils.io import atomic_write_text
 
 DEFAULT_FAIL_STREAK_LIMIT = 5
+# Slurm allows 10 s between SIGTERM and SIGKILL at a job's time limit.
+PREEMPT_GRACE_S = 5.0
 
 
 def _spawn_worker(pool: "_Pool", tid: int) -> threading.Thread:
@@ -95,6 +99,7 @@ class _RunHandle:
     job: Job
     gpu: int
     killed: bool = False
+    preempted: bool = False
     log_path: str = ""
     start_ts: float = 0.0
     drained: bool = False
@@ -154,6 +159,7 @@ class _Pool:
         poll_s: float,
         gpu_wait_s: float,
         fail_streak_limit: int = DEFAULT_FAIL_STREAK_LIMIT,
+        slurm: bool = False,
     ) -> None:
         self.root = Path(root)
         self.hostname = hostname
@@ -173,6 +179,61 @@ class _Pool:
         self._running: dict[int, dict[str, _RunHandle]] = {}
         self._fail_streak: dict[str, int] = {}
         self._tripped_pending: dict[str, int] = {}
+        self.slurm = slurm
+        self._closed = threading.Event()
+        self.close_reason = ""
+        self._term = threading.Event()
+        self._busy = 0
+        self._last_busy = time.monotonic()
+
+    # ------------------- Slurm mode: close / idle / preempt -------------------
+
+    @property
+    def closed(self) -> bool:
+        """Whether claiming has stopped for good (Slurm mode only)."""
+        return self._closed.is_set()
+
+    def wait_closed(self, timeout: float) -> bool:
+        return self._closed.wait(timeout)
+
+    def close(self, reason: str) -> None:
+        """Stop claiming new jobs; running ones finish (idempotent)."""
+        with self._lock:
+            if self._closed.is_set():
+                return
+            self.close_reason = reason
+            self._closed.set()
+        self.master.log("CLOSE", reason)
+
+    def _add_busy(self, delta: int) -> None:
+        with self._lock:
+            self._busy += delta
+            self._last_busy = time.monotonic()
+
+    def idle_s(self) -> float:
+        """Seconds since this pool last held a job (0 while it holds one)."""
+        with self._lock:
+            return 0.0 if self._busy else time.monotonic() - self._last_busy
+
+    def preempt_all(self, grace_s: float = PREEMPT_GRACE_S) -> None:
+        """Kill every running cell and return its claim to pending, attempt not charged."""
+        self._term.set()
+        self.close("preempted")
+        with self._running_lock:
+            handles = [
+                h for jobs in self._running.values() for h in jobs.values()
+                if h.proc.poll() is None
+            ]
+            for h in handles:
+                h.preempted = True
+        killers = []
+        for h in handles:
+            self.master.log("PREEMPT", f"{h.queue} {h.job.key} gpu={h.gpu}")
+            t = threading.Thread(target=_kill_group, args=(h.proc,), kwargs={"grace_s": grace_s, "poll_s": 0.1})
+            t.start()
+            killers.append(t)
+        for t in killers:
+            t.join()
 
     # ------------------- failure circuit breaker -------------------
 
@@ -341,7 +402,7 @@ class _Pool:
         """
         misses = 0
         while True:
-            if store.stop_path(self.root, self.hostname).exists():
+            if store.stop_path(self.root, self.hostname).exists() or self.closed:
                 return None
             slot = self.gpu.acquire(
                 mem_mib, slots=slots, cap_per_gpu=cap_per_gpu, cap_group=cap_group
@@ -423,6 +484,14 @@ class _Pool:
         if handle.killed:  # yielded the card: requeue, don't record a result
             store.remove_claim(self.root, name, job.jobkey)
             store.bump_attempt(self.root, name, job.jobkey)
+            return None
+        # Slurm signals cells and pool together; a cell that died with the pool's
+        # SIGTERM is preempted, not failed.
+        if handle.preempted or (
+            rc != 0 and self.slurm and self._term.wait(PREEMPT_GRACE_S)
+        ):
+            store.remove_claim(self.root, name, job.jobkey)
+            self.master.log("REQUEUE", f"{name} {job.key} (preempted; attempt not charged)")
             return None
         store.record_result(
             self.root,
@@ -528,6 +597,8 @@ class _Pool:
             if store.stop_path(self.root, self.hostname).exists():
                 self.master.log("WAIT", f"stop file present; worker {tid} exiting")
                 return
+            if self.closed:
+                return
             ready = self.ready_queues()
             for name, _ in ready:
                 with self._scan_guard(name):
@@ -544,9 +615,10 @@ class _Pool:
             if claim is None:
                 if self.all_complete():
                     return
-                time.sleep(self.poll_s)
+                self._closed.wait(self.poll_s)
                 continue
             name, meta, job = claim
+            self._add_busy(1)
             self.master.log("CLAIM", f"{name} {job.key}")
             cap, group = self._effective_cap(meta)
             slot = self._acquire_gpu(
@@ -558,6 +630,7 @@ class _Pool:
             )
             if slot is None:  # stop requested while waiting -> let a peer take it
                 store.remove_claim(self.root, name, job.jobkey)
+                self._add_busy(-1)
                 return
             self.master.log("START", f"{name} {job.key} gpu={slot.gpu}")
             attempt = store.read_attempt(self.root, name, job.jobkey)
@@ -574,8 +647,22 @@ class _Pool:
                 self._record_outcome(name, 1)
             finally:
                 slot.release()
+                self._add_busy(-1)
             if store.queue_complete(self.root, name):
                 self._maybe_log_complete(name)
+
+
+@dataclass(frozen=True)
+class SlurmRun:
+    """Limits of a pool running inside one Slurm job (``jobq work --slurm``).
+
+    Attributes:
+        claim_until: Epoch after which the pool claims nothing new.
+        idle_exit_s: Close after this long without a job.
+    """
+
+    claim_until: float
+    idle_exit_s: float
 
 
 def run_pool(
@@ -589,6 +676,7 @@ def run_pool(
     gpu_wait_s: float = 5.0,
     lock_prefix: str | None = None,
     fail_streak_limit: int = DEFAULT_FAIL_STREAK_LIMIT,
+    slurm: SlurmRun | None = None,
 ) -> None:
     """Run the foreground worker pool until every ready queue is complete (or stopped).
 
@@ -597,6 +685,9 @@ def run_pool(
             ``SL_JOBQ_LOCK_PREFIX``, else ``/tmp/subliminal_jobq_<user>``).
         fail_streak_limit: Consecutive failures that trip a queue; the pool then
             skips it until a requeue grows its pending count.
+        slurm: Slurm-mode limits; the pool then also closes at ``claim_until`` or
+            when idle, and SIGTERM/SIGINT preempt its cells (claims back to pending,
+            attempts not charged). None keeps the classic behaviour.
 
     Raises:
         FileNotFoundError: No ``gpu_policy.<hostname>.json`` under `root` (checked before
@@ -629,7 +720,16 @@ def run_pool(
         poll_s=poll_s,
         gpu_wait_s=gpu_wait_s,
         fail_streak_limit=fail_streak_limit,
+        slurm=slurm is not None,
     )
+    if slurm is not None:
+
+        def _on_signal(signum: int, _frame) -> None:
+            master.log("SIGNAL", signal.Signals(signum).name)
+            pool.preempt_all()
+
+        signal.signal(signal.SIGTERM, _on_signal)
+        signal.signal(signal.SIGINT, _on_signal)
     # Opt-in GPU yielding: ALWAYS start the watchdog when this node has a policy file, and
     # let poll_once no-op while yield_to_foreign is false. This makes the switch hot-ENABLE:
     # flip the flag in the policy JSON on a running pool and yielding begins within one
@@ -660,11 +760,24 @@ def run_pool(
     for i in range(n_workers):
         threads[i] = _spawn_worker(pool, i)
     while threads:
-        time.sleep(poll_s)
+        if pool.closed:
+            for t in list(threads.values()):
+                t.join(timeout=0.5)
+        else:
+            pool.wait_closed(poll_s)
         for i, t in list(threads.items()):
             if not t.is_alive():
                 del threads[i]
-        if store.stop_path(root, hostname).exists() or pool.all_complete():
+        if slurm is not None and not pool.closed:
+            if time.time() >= slurm.claim_until:
+                pool.close("claim window over")
+            elif pool.idle_s() >= slurm.idle_exit_s:
+                pool.close("idle")
+        if (
+            store.stop_path(root, hostname).exists()
+            or pool.closed
+            or pool.all_complete()
+        ):
             continue
         for i in range(n_workers):
             if i in threads:
@@ -678,5 +791,8 @@ def run_pool(
     stop_event.set()  # let the daemon watchdog exit promptly (it also dies at process end)
     if watch_thread is not None:
         watch_thread.join(timeout=5.0)
-    master.log("ALL QUEUES COMPLETE")
+    if pool.closed:
+        master.log("EXIT", pool.close_reason)
+    else:
+        master.log("ALL QUEUES COMPLETE")
     store.worker_pid_path(root, hostname).unlink(missing_ok=True)

@@ -3,13 +3,16 @@
 One pass turns what ``watch_io`` measured into ``ALERT`` / ``INFO`` lines. Leases
 decide what is expected on each node: a node the campaign lent away or paused is
 reported, never alerted on for a missing pool, and a campaign pool or cell found on
-a node another campaign holds is an alert.
+a node another campaign holds is an alert. Slurm cards (``executor="slurm"``) have no
+leases or nodes: ``evaluate_slurm`` judges the supervisor, pool records and squeue.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any
 
 from subliminal_learning.fleet.ledger import (
     CAMPAIGN_RUNNING,
@@ -21,9 +24,18 @@ from subliminal_learning.fleet.ledger import (
     Ledger,
 )
 from subliminal_learning.fleet.nodes import resolve_node
+from subliminal_learning.jobqueue.slurm import (
+    LIVE_STATES,
+    PIN_SUFFIX,
+    POOL_SUFFIX,
+    SqueueJob,
+    dead_identities,
+)
 
 STATE_STALE_S = 1200.0
 MAX_FAILED_LINES = 20
+SUPERVISOR_STALE_S = 600.0
+DEAD_CLAIM_S = 900.0
 
 
 @dataclass(frozen=True)
@@ -93,6 +105,9 @@ class WatchMemory:
         done_reported: CAMPAIGN_DONE already announced.
         primed: A pass already ran (the first pass reports existing failures as
             one count instead of one alert each).
+        paused_roots: Queue roots whose slurm ``PAUSED`` marker was set.
+        dead_since: Dead ``slurm-*`` pool identity holding claims -> epoch it is
+            known dead since.
     """
 
     failed_keys: frozenset[str] = frozenset()
@@ -100,6 +115,46 @@ class WatchMemory:
     tracebacks: int = 0
     done_reported: bool = False
     primed: bool = False
+    paused_roots: frozenset[str] = frozenset()
+    dead_since: Mapping[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SlurmRootView:
+    """One queue root's ``slurm/<campaign>`` state files.
+
+    Attributes:
+        root: Queue root.
+        records: Pool records by identity (``jobqueue.slurm.pool_records``).
+        supervisor_age_s: Age of ``supervisor.json``'s ``updated_utc`` (None = no
+            file).
+        held_back: The supervisor's last ``held_back`` reason.
+        paused: ``PAUSED`` exists.
+    """
+
+    root: str
+    records: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    supervisor_age_s: float | None = None
+    held_back: str = ""
+    paused: bool = False
+
+
+@dataclass(frozen=True)
+class SlurmSnapshot:
+    """Login-node view of a slurm campaign.
+
+    Attributes:
+        jobs: The user's squeue jobs by id (None = squeue unavailable).
+        roots: One view per queue root.
+        pools_window: tmux window ``<tmux_session>:pools`` exists.
+        oom15: Job logs (any pool identity) with ``OutOfMemoryError`` written in
+            the last 15 min.
+    """
+
+    jobs: Mapping[str, SqueueJob] | None
+    roots: tuple[SlurmRootView, ...] = ()
+    pools_window: bool = False
+    oom15: int = 0
 
 
 def watched_hosts(
@@ -206,33 +261,27 @@ def _node_lines(
     return lines
 
 
-def evaluate(
+def _campaign_lines(
     camp: Campaign,
-    ledger: Ledger,
-    probes: Mapping[str, NodeProbe],
+    driver: NodeProbe | None,
     snap: QueueSnapshot,
     memory: WatchMemory,
     disk_min_gb: Mapping[str, int],
-) -> tuple[list[str], WatchMemory]:
-    """One watcher pass: health + alert lines and the memory for the next pass."""
+) -> tuple[list[str], int]:
+    """Driver, failed-result, stale-state and disk lines plus the traceback count."""
     name, card = camp.name, camp.card
     lines: list[str] = []
-    hosts = watched_hosts(ledger, name, snap)
-    for host in hosts:
-        lines.extend(_node_lines(camp, ledger, host, probes.get(host), snap))
     live = camp.status == CAMPAIGN_RUNNING and not snap.done
     tracebacks = memory.tracebacks
-    if card.driver_node and card.driver_pattern:
-        probe = probes.get(card.driver_node)
-        if probe is not None and probe.reachable:
-            if probe.driver == 0 and live:
-                lines.append(f"ALERT driver ({card.driver_pattern}) not running")
-            if probe.tracebacks is not None:
-                if probe.tracebacks > memory.tracebacks:
-                    lines.append(
-                        f"ALERT new Traceback in the driver pane ({probe.tracebacks} total)"
-                    )
-                tracebacks = probe.tracebacks
+    if card.driver_pattern and driver is not None and driver.reachable:
+        if driver.driver == 0 and live:
+            lines.append(f"ALERT driver ({card.driver_pattern}) not running")
+        if driver.tracebacks is not None:
+            if driver.tracebacks > memory.tracebacks:
+                lines.append(
+                    f"ALERT new Traceback in the driver pane ({driver.tracebacks} total)"
+                )
+            tracebacks = driver.tracebacks
     new_failed = sorted(snap.failed_keys - memory.failed_keys)
     if not memory.primed:
         lines.append(
@@ -251,19 +300,190 @@ def evaluate(
         free = snap.disk_free_gb.get(mount)
         if free is not None and free < min_gb:
             lines.append(f"ALERT {mount} free {free}G < {min_gb}G")
+    return lines, tracebacks
+
+
+def _done_lines(name: str, snap: QueueSnapshot, memory: WatchMemory) -> list[str]:
+    if snap.done and not memory.done_reported:
+        return [f"INFO CAMPAIGN_DONE {name}: done marker present; run the finish step"]
+    return []
+
+
+def evaluate(
+    camp: Campaign,
+    ledger: Ledger,
+    probes: Mapping[str, NodeProbe],
+    snap: QueueSnapshot,
+    memory: WatchMemory,
+    disk_min_gb: Mapping[str, int],
+) -> tuple[list[str], WatchMemory]:
+    """One watcher pass: health + alert lines and the memory for the next pass."""
+    name, card = camp.name, camp.card
+    lines: list[str] = []
+    hosts = watched_hosts(ledger, name, snap)
+    for host in hosts:
+        lines.extend(_node_lines(camp, ledger, host, probes.get(host), snap))
+    driver = probes.get(card.driver_node) if card.driver_node else None
+    shared, tracebacks = _campaign_lines(camp, driver, snap, memory, disk_min_gb)
+    lines.extend(shared)
     leases = {h: lease_summary(ledger, name, h, snap) for h in hosts}
     for host in sorted(set(leases) | set(memory.leases)):
         old, new = memory.leases.get(host), leases.get(host, "not involved")
         if old is not None and old != new:
             lines.append(f"INFO LEASE {resolve_node(host).short}: {old} -> {new}")
-    done_reported = memory.done_reported
-    if snap.done and not done_reported:
-        lines.append(
-            f"INFO CAMPAIGN_DONE {name}: done marker present; run the finish step"
-        )
-        done_reported = True
+    lines.extend(_done_lines(name, snap, memory))
     memory = WatchMemory(
-        snap.failed_keys, leases, tracebacks, done_reported, primed=True
+        snap.failed_keys, leases, tracebacks, memory.done_reported or snap.done, True
+    )
+    return lines, memory
+
+
+def campaign_jobs(jobs: Mapping[str, SqueueJob], name: str) -> list[SqueueJob]:
+    """The campaign's ``<name>-pool`` and ``<name>-pin.<node>`` jobs."""
+    return [
+        j
+        for j in jobs.values()
+        if j.name == f"{name}{POOL_SUFFIX}" or j.name.startswith(f"{name}{PIN_SUFFIX}")
+    ]
+
+
+def _epoch(stamp: Any) -> float | None:
+    try:
+        return datetime.fromisoformat(str(stamp)).timestamp()
+    except ValueError:
+        return None
+
+
+def dead_claim_holders(
+    slurm: SlurmSnapshot,
+    claims_by_node: Mapping[str, int],
+    seen: Mapping[str, float],
+    now_s: float,
+) -> dict[str, float]:
+    """Dead ``slurm-*`` pool identities that still hold open claims.
+
+    Args:
+        slurm: Snapshot with known squeue jobs.
+        claims_by_node: Open claims per owner node.
+        seen: The previous pass's result.
+        now_s: Current epoch seconds.
+
+    Returns:
+        Identity -> epoch it is known dead since (its ``ended_utc``, else the
+        first pass that saw it dead).
+    """
+    out: dict[str, float] = {}
+    for view in slurm.roots:
+        for node in dead_identities(view.records, slurm.jobs or {}):
+            if claims_by_node.get(node, 0) > 0:
+                ended = _epoch(view.records[node].get("ended_utc"))
+                out[node] = min(
+                    t for t in (ended, seen.get(node), now_s) if t is not None
+                )
+    return out
+
+
+def _slurm_lines(
+    camp: Campaign,
+    slurm: SlurmSnapshot,
+    snap: QueueSnapshot,
+    memory: WatchMemory,
+    now_s: float,
+) -> tuple[list[str], dict[str, float]]:
+    """Squeue, supervisor, PAUSED, OOM and dead-claim lines plus ``dead_since``."""
+    name = camp.name
+    live = camp.status == CAMPAIGN_RUNNING and not snap.done
+    lines: list[str] = []
+    if slurm.jobs is None:
+        lines.append("SLURM jobs unknown")
+        lines.append("ALERT slurm: squeue unavailable; pool state unknown")
+    else:
+        mine = campaign_jobs(slurm.jobs, name)
+        running = [j for j in mine if j.state in LIVE_STATES]
+        lines.append(
+            f"SLURM jobs running={len(running)} "
+            f"pending={sum(j.state == 'PENDING' for j in mine)} "
+            f"gpus={sum(j.gpus for j in running)}"
+        )
+    for view in slurm.roots:
+        sdir = f"{view.root}/slurm/{name}"
+        age = view.supervisor_age_s
+        lines.append(
+            f"SLURM {sdir} records={len(view.records)} paused={int(view.paused)} "
+            f"supervisor_age={'-' if age is None else f'{age:.0f}s'} "
+            f"held_back={view.held_back or '-'}"
+        )
+        if view.paused and view.root not in memory.paused_roots:
+            lines.append(f"INFO SLURM PAUSED {sdir}: no new pools, live pools drain")
+        elif not view.paused and view.root in memory.paused_roots:
+            lines.append(f"INFO SLURM resumed {sdir}: PAUSED cleared")
+        if not live:
+            continue
+        if age is None:
+            lines.append(f"ALERT slurm: supervisor heartbeat missing ({sdir})")
+        elif age > SUPERVISOR_STALE_S:
+            lines.append(
+                f"ALERT slurm: supervisor heartbeat stale ({age / 60:.0f} min, {sdir})"
+            )
+    if live and not slurm.pools_window:
+        session = camp.card.tmux_session or name
+        lines.append(f"ALERT slurm: tmux window {session}:pools missing (supervisor)")
+    if slurm.oom15:
+        lines.append(
+            f"ALERT slurm: OutOfMemoryError in {slurm.oom15} job log(s), last 15 min"
+        )
+    if slurm.jobs is None:
+        return lines, dict(memory.dead_since)
+    dead = dead_claim_holders(slurm, snap.running_by_host, memory.dead_since, now_s)
+    late = sorted(n for n, t in dead.items() if now_s - t > DEAD_CLAIM_S)
+    if late:
+        ids = ", ".join(late[:5]) + (" ..." if len(late) > 5 else "")
+        lines.append(
+            f"ALERT slurm: {sum(snap.running_by_host[n] for n in late)} open "
+            f"claim(s) of dead pool(s) unreleased > {DEAD_CLAIM_S / 60:.0f} min "
+            f"(supervisor sweep backlog): {ids}"
+        )
+    return lines, dead
+
+
+def evaluate_slurm(
+    camp: Campaign,
+    slurm: SlurmSnapshot,
+    driver: NodeProbe | None,
+    snap: QueueSnapshot,
+    memory: WatchMemory,
+    now_s: float,
+) -> tuple[list[str], WatchMemory]:
+    """One watcher pass over a slurm campaign (no leases, all probes local).
+
+    Pool exits (idle, claim window, preemption requeue) are normal and never
+    alerted on; a dead pool only matters while its claims stay unreleased.
+
+    Args:
+        camp: The campaign (card ``executor="slurm"``).
+        slurm: Squeue + supervisor / pool state view.
+        driver: Local probe of the driver process and pane.
+        snap: Queue files view.
+        memory: Previous pass.
+        now_s: Current epoch seconds.
+
+    Returns:
+        Health lines and the memory for the next pass.
+    """
+    lines, dead = _slurm_lines(camp, slurm, snap, memory, now_s)
+    shared, tracebacks = _campaign_lines(
+        camp, driver, snap, memory, camp.card.disk_min_gb
+    )
+    lines.extend(shared)
+    lines.extend(_done_lines(camp.name, snap, memory))
+    memory = WatchMemory(
+        snap.failed_keys,
+        {},
+        tracebacks,
+        memory.done_reported or snap.done,
+        True,
+        frozenset(v.root for v in slurm.roots if v.paused),
+        dead,
     )
     return lines, memory
 

@@ -4,6 +4,8 @@ A node is ``free`` or held by one campaign in one state. ``lenders`` is the stac
 campaigns that yielded the node to its holder; releasing pops it, so the node goes
 back to the most recent lender that is not done. Every transition returns a new
 ledger; nothing here touches disk or nodes (``ledger_io`` / the ``/fleet`` skill do).
+Campaigns with card ``executor="slurm"`` run as Slurm pools (``jobq slurm-supervise``)
+and hold no node leases: the lease transitions refuse them.
 """
 
 from __future__ import annotations
@@ -26,6 +28,8 @@ CAMPAIGN_RUNNING, CAMPAIGN_PAUSED, CAMPAIGN_DONE = "running", "paused", "done"
 CAMPAIGN_STATUSES = (CAMPAIGN_RUNNING, CAMPAIGN_PAUSED, CAMPAIGN_DONE)
 MODE_DRAIN, MODE_NOW = "drain", "now"
 DEADLINES = ("none", "wall", "pause-aware")
+EXECUTOR_SSH, EXECUTOR_SLURM = "ssh", "slurm"
+EXECUTORS = (EXECUTOR_SSH, EXECUTOR_SLURM)
 LEDGER_VERSION = 1
 
 
@@ -42,7 +46,8 @@ class Card:
         queue_prefix: Prefix of the campaign's queue names ("" = every queue in the
             roots).
         tmux_session: Pool / driver tmux session name on each node.
-        driver_node: Hostname of the driver's home node.
+        driver_node: Hostname of the driver's home node (a slurm card's login
+            node is free text, not a fleet node).
         driver_pattern: ``pgrep -f`` regex of the live driver process.
         driver_pane: tmux target of the driver pane (``<session>:<window>``).
         state_file: Driver state file watched for staleness.
@@ -58,6 +63,9 @@ class Card:
         watch_dir: Generic watcher dir (``run_logs/<campaign>_watch``).
         disk_min_gb: Mount -> minimum free GB before the watcher alerts.
         notes: Free text (special tooling, hazards).
+        executor: ``ssh`` (node leases, per-node probes) or ``slurm`` (Slurm pools
+            under ``<queue_root>/slurm/<campaign>``, no leases; driver,
+            supervisor and watcher run on the login node).
     """
 
     queue_roots: tuple[str, ...]
@@ -77,6 +85,7 @@ class Card:
     watch_dir: str | None = None
     disk_min_gb: Mapping[str, int] = field(default_factory=dict)
     notes: str = ""
+    executor: str = EXECUTOR_SSH
 
 
 @dataclass(frozen=True)
@@ -138,12 +147,23 @@ def empty_ledger() -> Ledger:
     return Ledger({h: NodeLease(h) for h in hostnames()}, {})
 
 
+def card_to_dict(card: Card) -> dict[str, Any]:
+    """JSON-ready form of ``card``; the default ``ssh`` executor is omitted."""
+    data = asdict(card)
+    if card.executor == EXECUTOR_SSH:
+        del data["executor"]
+    return data
+
+
 def ledger_to_dict(ledger: Ledger) -> dict[str, Any]:
     """JSON-ready form of ``ledger``."""
     return {
         "version": LEDGER_VERSION,
         "nodes": {h: asdict(n) for h, n in ledger.nodes.items()},
-        "campaigns": {c: asdict(v) for c, v in ledger.campaigns.items()},
+        "campaigns": {
+            c: {**asdict(v), "card": card_to_dict(v.card)}
+            for c, v in ledger.campaigns.items()
+        },
     }
 
 
@@ -151,8 +171,8 @@ def card_from_dict(data: Mapping[str, Any]) -> Card:
     """Build and validate a ``Card`` from parsed JSON.
 
     Raises:
-        LeaseError: Unknown field, no queue root, relative root, bad deadline or
-            unknown driver node.
+        LeaseError: Unknown field, no queue root, relative root, bad deadline,
+            unknown driver node (ssh cards) or bad executor.
     """
     known = set(Card.__dataclass_fields__)
     extra = set(data) - known
@@ -175,7 +195,9 @@ def card_from_dict(data: Mapping[str, Any]) -> Card:
         )
     if card.deadline not in DEADLINES:
         raise LeaseError(f"deadline must be one of {DEADLINES}, got {card.deadline!r}")
-    if card.driver_node is not None:
+    if card.executor not in EXECUTORS:
+        raise LeaseError(f"executor must be one of {EXECUTORS}, got {card.executor!r}")
+    if card.driver_node is not None and card.executor == EXECUTOR_SSH:
         card = replace(card, driver_node=resolve_node(card.driver_node).hostname)
     return card
 
@@ -190,6 +212,54 @@ def ledger_from_dict(data: Mapping[str, Any]) -> Ledger:
         for name, c in (data.get("campaigns") or {}).items()
     }
     return Ledger(nodes, campaigns)
+
+
+def slurm_command(card: Card, name: str, op: str) -> str:
+    """Login-node command that pauses / preempts / resumes a slurm campaign.
+
+    The card's ``pause_cmd`` / ``resume_cmd`` when set (``preempt`` = pause_cmd
+    ``--now``), else ``uv run python -m scripts.jobq slurm-pause|slurm-resume``
+    over every queue root, to run from a checkout.
+
+    Args:
+        card: Slurm campaign card.
+        name: Campaign name (``--name`` of ``jobq slurm-supervise``).
+        op: ``pause`` (drain), ``preempt`` (scancel its pools; cells requeue)
+            or ``resume``.
+
+    Raises:
+        LeaseError: Unknown op, or ``preempt`` on a card without ``preempt_ok``.
+    """
+    if op not in ("pause", "preempt", "resume"):
+        raise LeaseError(f"op must be pause, preempt or resume, got {op!r}")
+    if op == "preempt" and not card.preempt_ok:
+        raise LeaseError("card has preempt_ok=false; drain instead")
+    given = card.resume_cmd if op == "resume" else card.pause_cmd
+    now = " --now" if op == "preempt" else ""
+    if given:
+        return given + now
+    verb = "slurm-resume" if op == "resume" else "slurm-pause"
+    return " && ".join(
+        f"uv run python -m scripts.jobq {verb} --root {r} --name {name}{now}"
+        for r in card.queue_roots
+    )
+
+
+def refuse_slurm(ledger: Ledger, *names: str) -> None:
+    """Raise for any of ``names`` that is a slurm campaign (it holds no nodes).
+
+    Raises:
+        LeaseError: Naming the campaign's pause and resume commands.
+    """
+    for name in names:
+        camp = ledger.campaigns.get(name)
+        if camp is not None and camp.card.executor == EXECUTOR_SLURM:
+            raise LeaseError(
+                f"{name} runs on Slurm and holds no nodes; pause with "
+                f"`{slurm_command(camp.card, name, 'pause')}`, resume with "
+                f"`{slurm_command(camp.card, name, 'resume')}` "
+                f"(fleet commands {name} --op pause|resume)"
+            )
 
 
 def _hosts(names: Iterable[str]) -> tuple[str, ...]:
@@ -265,6 +335,7 @@ def claim(
     A node paused by a live campaign is lent: that campaign goes on the lender stack
     and gets the node back on ``release``. Callers verify the drain first.
     """
+    refuse_slurm(ledger, campaign)
     _campaign(ledger, campaign)
     updates: dict[str, NodeLease] = {}
     for host in _hosts(nodes):
@@ -304,6 +375,7 @@ def start_yield(
         raise LeaseError(f"mode must be {MODE_DRAIN!r} or {MODE_NOW!r}")
     if source == target:
         raise LeaseError("source and target are the same campaign")
+    refuse_slurm(ledger, source, target)
     _campaign(ledger, source, live=False)
     _campaign(ledger, target)
     updates: dict[str, NodeLease] = {}
@@ -323,6 +395,7 @@ def complete_yield(
     ledger: Ledger, target: str, nodes: Iterable[str], *, chat: str | None, now: str
 ) -> Ledger:
     """Hand drained nodes to ``target``; the old holder goes on the lender stack."""
+    refuse_slurm(ledger, target)
     _campaign(ledger, target)
     updates: dict[str, NodeLease] = {}
     for host in _hosts(nodes):
@@ -349,6 +422,7 @@ def pause(
     note: str = "",
 ) -> Ledger:
     """Mark ``campaign`` paused on nodes it runs on (no new owner)."""
+    refuse_slurm(ledger, campaign)
     updates: dict[str, NodeLease] = {}
     for host in _hosts(nodes):
         lease = ledger.nodes[host]
@@ -364,6 +438,7 @@ def resume(
     ledger: Ledger, campaign: str, nodes: Iterable[str], *, chat: str | None, now: str
 ) -> Ledger:
     """Mark ``campaign`` running again where it is paused, draining or returning."""
+    refuse_slurm(ledger, campaign)
     _campaign(ledger, campaign)
     updates: dict[str, NodeLease] = {}
     for host in _hosts(nodes):
@@ -385,6 +460,7 @@ def release(
     ledger: Ledger, campaign: str, nodes: Iterable[str], *, chat: str | None, now: str
 ) -> Ledger:
     """``campaign`` lets go of nodes: each returns to its newest live lender or frees."""
+    refuse_slurm(ledger, campaign)
     updates: dict[str, NodeLease] = {}
     for host in _hosts(nodes):
         lease = ledger.nodes[host]
@@ -494,8 +570,13 @@ def node_commands(
     return [f"ssh -o BatchMode=yes {alias} '{body}'" for body in bodies]
 
 
-def render(ledger: Ledger) -> str:
-    """Human-readable node table plus live campaigns."""
+def render(ledger: Ledger, slurm_detail: Mapping[str, str] | None = None) -> str:
+    """Human-readable node table plus live campaigns.
+
+    Args:
+        ledger: The ledger.
+        slurm_detail: Extra text per slurm campaign (live pools, ``PAUSED``).
+    """
     lines = [f"{'node':<10} {'state':<10} {'holder':<16} {'detail':<34} since"]
     for node in NODES:
         n = ledger.nodes[node.hostname]
@@ -515,9 +596,13 @@ def render(ledger: Ledger) -> str:
     if live:
         lines.append("campaigns:")
         for c in sorted(live, key=lambda c: c.name):
-            nodes = ",".join(_short(h) for h in held_by(ledger, c.name)) or "-"
+            if c.card.executor == EXECUTOR_SLURM:
+                where = "executor=slurm" + (slurm_detail or {}).get(c.name, "")
+            else:
+                nodes = ",".join(_short(h) for h in held_by(ledger, c.name))
+                where = f"nodes={nodes or '-'}"
             lines.append(
-                f"  {c.name} {c.status} nodes={nodes} chat={c.chat or '-'} "
+                f"  {c.name} {c.status} {where} chat={c.chat or '-'} "
                 f"plan={c.card.plan or '-'}"
             )
     return "\n".join(lines)
