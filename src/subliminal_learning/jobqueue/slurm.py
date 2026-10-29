@@ -11,7 +11,7 @@ the user's cap, and releases claims of this campaign's dead pools (no attempt ch
 State lives under ``<root>/slurm/<campaign>/``: ``supervisor.json``, ``pools/<node>.json``,
 ``logs/`` (lab job logs), and ``PAUSED`` (no new pools; every pool drains and exits).
 A carrier claims only from its pinned queues; a pinned node with a stop file gets no
-carrier; after ``CRASH_STREAK`` pool jobs in a row ended without running their pool, the
+carrier; a pool job Slurm holds after repeated launch failures is cancelled and replaced; after ``CRASH_STREAK`` pool jobs in a row ended without running their pool, the
 supervisor submits nothing for ``CRASH_BACKOFF_S``.
 """
 
@@ -278,6 +278,7 @@ class SqueueJob:
     name: str
     state: str
     gpus: int
+    reason: str = ""
 
 
 def _gres_gpus(gres: str) -> int:
@@ -290,14 +291,15 @@ def _gres_gpus(gres: str) -> int:
 
 
 def parse_squeue(text: str) -> dict[str, SqueueJob]:
-    """Parse ``squeue -h -o '%i|%j|%T|%b'`` lines into jobs by id."""
+    """Parse ``squeue -h -o '%i|%j|%T|%b|%r'`` lines (reason optional) into jobs by id."""
     jobs = {}
     for line in text.splitlines():
         parts = line.strip().split("|")
         if len(parts) < 4:
             continue
         jid, jname, state, gres = (p.strip() for p in parts[:4])
-        jobs[jid] = SqueueJob(jid, jname, state, _gres_gpus(gres))
+        reason = parts[4].strip() if len(parts) > 4 else ""
+        jobs[jid] = SqueueJob(jid, jname, state, _gres_gpus(gres), reason)
     return jobs
 
 
@@ -306,7 +308,7 @@ def query_squeue(run: Callable = subprocess.run) -> dict[str, SqueueJob] | None:
     user = os.environ.get("USER") or ""
     try:
         out = run(
-            ["squeue", "-h", "-u", user, "-o", "%i|%j|%T|%b"],
+            ["squeue", "-h", "-u", user, "-o", "%i|%j|%T|%b|%r"],
             capture_output=True,
             text=True,
             check=True,
@@ -420,6 +422,16 @@ def stopped_pinned_nodes(cfg: SupervisorConfig) -> list[str]:
 def lab_log_path(root: Path, name: str, job_name: str, job_id: str) -> Path:
     """The job's lab log (``lab submit`` runs in the state dir; Slurm creates it at start)."""
     return state_dir(root, name) / "logs" / f"{job_name}-{job_id}.out"
+
+
+def launch_held(cfg: SupervisorConfig, jobs: Mapping[str, "SqueueJob"]) -> list[str]:
+    """This campaign's pool jobs Slurm put in REQUEUE_HOLD after repeated launch failures
+    (a preempted borrow job whose requeues failed to start). Held, they keep their GPUs
+    in the share while running nothing; the supervisor cancels them and resubmits."""
+    return sorted(
+        j.job_id for j in campaign_pool_jobs(cfg.name, jobs)
+        if j.state == "REQUEUE_HOLD" and "launch" in j.reason.lower()
+    )
 
 
 def failed_start(job_id: str, records: Mapping[str, dict]) -> bool:
@@ -592,6 +604,17 @@ def supervise_once(cfg: SupervisorConfig, run: Callable = subprocess.run) -> dic
     jobs = query_squeue(run)
     if jobs is None:
         return None
+    held = launch_held(cfg, jobs)
+    if held:
+        try:
+            out = run(["lab", "cancel", *held], capture_output=True, text=True, timeout=120)
+            if out.returncode == 0:
+                logger.warning("Cancelled launch-held pool jobs {}", held)
+                jobs = {k: v for k, v in jobs.items() if k not in held}
+            else:
+                logger.error("lab cancel {} rc={} stderr={!r}", held, out.returncode, out.stderr)
+        except (OSError, subprocess.SubprocessError):
+            logger.exception("lab cancel failed for {}", held)
     records = pool_records(cfg.root, cfg.name)
     unpinned, pinned = demand(cfg)
     prev = read_json(state_dir(cfg.root, cfg.name) / "supervisor.json") or {}
@@ -631,6 +654,7 @@ def supervise_once(cfg: SupervisorConfig, run: Callable = subprocess.run) -> dic
         "released_claims": len(released),
         "paused": plan.reason == "paused",
         "crash_loop": crashing,
+        "cancelled_held": held,
         "submits": submits[-SUBMIT_HISTORY:],
     }
     store.mkdir_open(state_dir(cfg.root, cfg.name))

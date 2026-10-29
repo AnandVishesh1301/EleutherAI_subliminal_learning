@@ -475,3 +475,27 @@ def test_cell_registered_after_preempt_is_killed_and_requeued(tmp_path):
     assert time.monotonic() - t0 < 8
     assert store.job_state(tmp_path, "q", job) == store.PENDING
     assert store.read_attempt(tmp_path, "q", job.jobkey) == 0
+
+
+def test_supervisor_cancels_launch_held_pools_and_replaces_them(tmp_path):
+    store.create_queue(tmp_path, "q")
+    store.append_jobs(tmp_path, "q", [Job(f"j{i}", "true") for i in range(8)])
+    calls = []
+    squeue = (
+        "70|camp-pool|REQUEUE_HOLD|gres/gpu:4|launch failure limit exceeded requeued held\n"
+        "71|camp-pool|REQUEUE_HOLD|gres/gpu:4|JobHeldUser\n"
+        "72|other-job|REQUEUE_HOLD|gres/gpu:4|launch failure limit exceeded requeued held\n"
+    )
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        if argv[0] == "squeue":
+            return subprocess.CompletedProcess(argv, 0, squeue, "")
+        if argv[:2] == ["lab", "cancel"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.CompletedProcess(argv, 0, "Submitted\n99\n", "")
+
+    state = slurm.supervise_once(_cfg(tmp_path), run=fake_run)
+    assert ["lab", "cancel", "70"] in calls and state["cancelled_held"] == ["70"]
+    assert state["own_gpus"] == 4  # the user-held pool still counts; the cancelled one does not
+    assert state["submitted"]
