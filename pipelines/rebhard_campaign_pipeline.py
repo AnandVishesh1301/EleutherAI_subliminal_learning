@@ -152,7 +152,13 @@ def _requeue_and_holes(cfg: driver_io.CampaignDriverConfig, state: dict) -> None
 
 
 def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
-    """One advance pass."""
+    """One advance pass.
+
+    Raises:
+        CampaignGateError: No run-set card yet and no explicit `code_sha`.
+    """
+    if read_run_set_card(cfg.run_set_root) is None and not cfg.code_sha:
+        raise CampaignGateError("the first pass needs --code-sha (a pushed pin)")
     if not cfg.dry_run:
         driver_io.ensure_campaign_code_pin(cfg)
     state = driver_io.load_state(cfg)
@@ -184,7 +190,10 @@ def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
         if not ok:
             waiting.append(msg)
         elif not cfg.dry_run:
-            out = results.build(exp, cfg.run_set_root / plan.RESULTS_DIRNAME)
+            card = read_run_set_card(cfg.run_set_root) or {}
+            out = results.build(
+                exp, cfg.run_set_root / plan.RESULTS_DIRNAME, card.get("git_sha")
+            )
             _fire(state, name, build=str(out))
             mark(name)
     finished = all(f"results_{e}" in done for e in plan.EXPERIMENTS)

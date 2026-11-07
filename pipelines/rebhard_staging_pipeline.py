@@ -105,15 +105,14 @@ def _stage_reused() -> dict[str, dict]:
         dest = cells.run_dir(cell)
         manifest = json.loads((src / "train_manifest.json").read_text())
         check_reused_manifest(cell, manifest)
-        files = {
-            "train_manifest.json": _put(
-                src / "train_manifest.json", dest / "train_manifest.json"
-            )
-        }
+        files = {}
         for path in sorted((src / "checkpoints").iterdir()):
             if path.is_file():
                 rel = f"checkpoints/{path.name}"
                 files[rel] = _put(path, dest / rel)
+        files["train_manifest.json"] = _put(
+            src / "train_manifest.json", dest / "train_manifest.json"
+        )
         out[cell.key] = {"source": str(src), "dest": str(dest), "sha256": files}
     return out
 

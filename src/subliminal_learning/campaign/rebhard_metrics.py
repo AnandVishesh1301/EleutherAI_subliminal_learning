@@ -198,7 +198,15 @@ def paired_deltas(rows: Iterable[Mapping], splits: Sequence[str]) -> list[dict]:
             )
             for s in splits
         }
-        out.append({**r, "delta": delta, "control_found": ctrl is not None})
+        control_collapsed = ctrl is not None and bool(ctrl["collapsed"])
+        out.append(
+            {
+                **r,
+                "delta": delta,
+                "control_found": ctrl is not None,
+                "control_collapsed": control_collapsed,
+            }
+        )
     return out
 
 
@@ -224,19 +232,27 @@ def rung_rows(pairs: Iterable[Mapping], splits: Sequence[str]) -> list[dict]:
     return out
 
 
-def select_rung(rungs: Iterable[Mapping], target: str, optim: str) -> Mapping | None:
-    """Largest mean validation Δ among non-collapsed rungs, ties to the smaller rate."""
+def select_rung(
+    rungs: Iterable[Mapping], target: str, optim: str, cut: float
+) -> Mapping | None:
+    """hlopt's rung: largest mean validation Δ with mean ΔCE under `cut`, ties to the smaller rate.
+
+    Returns:
+        The rung plus `at_edge` (it is the lowest or highest rate of its ladder), or None.
+    """
+    ladder = [r for r in rungs if r["target"] == target and r["optim"] == optim]
     pool = [
         r
-        for r in rungs
-        if r["target"] == target
-        and r["optim"] == optim
-        and r["collapsed_frac"] == 0
+        for r in ladder
+        if _finite(r["delta_ce_mean"])
+        and r["delta_ce_mean"] < cut
         and _finite(r[f"delta_{SPLIT_SELECT}"])
     ]
     if not pool:
         return None
-    return min(pool, key=lambda r: (-r[f"delta_{SPLIT_SELECT}"], r["lr"]))
+    best = min(pool, key=lambda r: (-r[f"delta_{SPLIT_SELECT}"], r["lr"]))
+    rates = [r["lr"] for r in ladder]
+    return {**best, "at_edge": best["lr"] in (min(rates), max(rates))}
 
 
 def e8_verdict(rung: Mapping | None, n_seeds: int) -> dict:
@@ -257,26 +273,38 @@ def e8_verdict(rung: Mapping | None, n_seeds: int) -> dict:
         "delta_validation": rung[f"delta_{SPLIT_SELECT}"],
         "delta_test": mean,
         "test_by_seed": dict(seeds),
+        "at_edge": rung["at_edge"],
+        "collapsed_frac": rung["collapsed_frac"],
     }
 
 
 def e9_verdict(units: Sequence[Mapping]) -> dict:
-    """R9: newdom N1 on one (target, rate): teacher-aware CI, floor, eligibility.
+    """R9: newdom N1 on one (target, rate).
+
+    A unit is excluded when either student collapsed. Supported needs an eligible rung, at
+    least two teachers, every contributing teacher's mean Δ positive, a teacher-aware CI
+    above 0 and Δ ≥ `MIN_DELTA`.
 
     Args:
         units: Paired rows of one (target, rate).
     """
     kept = [
-        u for u in units if not u["collapsed"] and _finite(u["delta"][SPLIT_REPORT])
+        u
+        for u in units
+        if not u["collapsed"]
+        and not u["control_collapsed"]
+        and _finite(u["delta"][SPLIT_REPORT])
     ]
     by_teacher: dict[str, list[float]] = {}
     for u in kept:
         by_teacher.setdefault(u["recipe"], []).append(float(u["delta"][SPLIT_REPORT]))
     est, lo, hi = nm.teacher_boot_ci([by_teacher[k] for k in sorted(by_teacher)])
+    n_positive = sum(float(np.mean(v)) > 0 for v in by_teacher.values())
     eligible = bool(units) and len(kept) * 2 >= len(units)
     supported = (
         eligible
         and len(by_teacher) >= 2
+        and n_positive == len(by_teacher)
         and _finite(lo)
         and lo > 0
         and _finite(est)
@@ -289,6 +317,7 @@ def e9_verdict(units: Sequence[Mapping]) -> dict:
         "n_units": len(units),
         "n_kept": len(kept),
         "n_teachers": len(by_teacher),
+        "n_positive_teachers": n_positive,
         "eligible": eligible,
         "supported": bool(supported),
     }

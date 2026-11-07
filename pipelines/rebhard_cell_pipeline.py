@@ -21,7 +21,7 @@ from subliminal_learning.campaign import rebhard_plan as plan
 from subliminal_learning.campaign.hlopt_layout import probe_path
 from subliminal_learning.config import PathsConfig
 from subliminal_learning.utils.io import atomic_write_json, file_sha256
-from subliminal_learning.utils.run_io import utc_now_iso
+from subliminal_learning.utils.run_io import checkpoint_is_complete, utc_now_iso
 
 MODEL_CONFIG = Path("configs/model/pythia.yaml")
 FILTERED_FILE = "filtered.jsonl"
@@ -69,6 +69,15 @@ def check_pool(cell: cells.Cell) -> Path:
     return pool.directory
 
 
+def _whole_save(path: Path) -> bool:
+    """Whether `trainer_state.json` exists and parses (a kill can cut its write short)."""
+    try:
+        json.loads((path / TRAINER_STATE_FILE).read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+    return True
+
+
 def set_aside_torn_checkpoints(checkpoint_dir: Path) -> list[Path]:
     """Rename `checkpoint-*` dirs a kill cut short, so resume takes the last whole one.
 
@@ -79,7 +88,7 @@ def set_aside_torn_checkpoints(checkpoint_dir: Path) -> list[Path]:
     """
     moved = []
     for path in sorted(checkpoint_dir.glob("checkpoint-*")):
-        if path.is_dir() and not (path / TRAINER_STATE_FILE).is_file():
+        if path.is_dir() and not _whole_save(path):
             stamp = utc_now_iso().replace(":", "")
             dest = path.with_name(f"torn-{path.name}-{stamp}")
             path.rename(dest)
@@ -201,7 +210,9 @@ def run_student(cell: cells.Cell, device: str) -> dict:
         leaf = _train(paths, hub_org, cell, device)
     else:
         leaf = cells.run_dir(cell)
-        if not (leaf / MANIFEST_FILE).is_file():
+        if not (leaf / MANIFEST_FILE).is_file() or not checkpoint_is_complete(
+            leaf / "checkpoints"
+        ):
             raise RuntimeError(f"{leaf}: reused control not staged")
     probe = student_probe(paths, hub_org, cell, leaf, device)
     spec = cells.spec(cell.student_base)

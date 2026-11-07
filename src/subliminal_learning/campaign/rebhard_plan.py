@@ -107,7 +107,7 @@ E6_TARGETS: tuple[str, ...] = ("blue", "purple", "maple")
 E9_TARGETS: tuple[str, ...] = ("maple", "oak", "blue", "purple")
 E6_STUDENTS: tuple[str, ...] = (SEED1, DATA1, WS1)
 E6_CONDITION: MappingProxyType[str, str] = MappingProxyType(
-    {SEED1: "DI_DS", DATA1: "SI_DS", WS1: "DI_SS"}
+    {SEED1: "DI_DS", DATA1: "SI_DS", WS1: "DI_SS + stack H vs V"}
 )
 # The three teachers newdom selected for each of these targets
 # (`20261017_newdom-hard_160m/results/pool_qc.csv`).

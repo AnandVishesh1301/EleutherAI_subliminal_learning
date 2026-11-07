@@ -276,11 +276,13 @@ def _train(resume: bool) -> TrainConfig:
 
 
 @pytest.mark.parametrize(
-    "resume,stored,kept",
-    [(True, None, True), (True, {"x": 1}, False), (False, None, False)],
+    "resume,manifest_exists,kept",
+    [(True, False, True), (True, True, False), (False, False, False)],
 )
-def test_retrain_keeps_checkpoints_only_for_a_resuming_cell(resume, stored, kept):
-    assert keeps_resume_state(_train(resume), stored) is kept
+def test_retrain_keeps_checkpoints_only_for_a_resuming_cell(
+    resume, manifest_exists, kept
+):
+    assert keeps_resume_state(_train(resume), manifest_exists) is kept
 
 
 def test_torn_checkpoints_are_set_aside_and_whole_ones_kept(tmp_path):
@@ -294,7 +296,14 @@ def test_torn_checkpoints_are_set_aside_and_whole_ones_kept(tmp_path):
     assert [p.name.startswith("torn-checkpoint-5000") for p in moved] == [True]
     assert [p.name for p in tmp_path.glob("checkpoint-*")] == ["checkpoint-2500"]
     assert (moved[0] / "model.safetensors").read_text() == "partial"
-    assert not set(moved[0].name) & RESERVED_CHARS
+    assert not set(moved[0].name) & set(RESERVED_CHARS)
+
+
+def test_a_truncated_trainer_state_counts_as_a_torn_save(tmp_path):
+    cut = tmp_path / "checkpoint-2500"
+    cut.mkdir()
+    (cut / cellpipe.TRAINER_STATE_FILE).write_text('{"global_step": 25')
+    assert len(cellpipe.set_aside_torn_checkpoints(tmp_path)) == 1
 
 
 # ---- exceedance test -------------------------------------------------------------------
@@ -433,6 +442,7 @@ def test_paired_delta_matches_control_of_the_same_setting_and_seed():
     ]
     (pair,) = metrics.paired_deltas(rows, SPLITS)
     assert pair["delta"]["test"] == pytest.approx(0.3)
+    assert pair["control_collapsed"] is False
 
 
 def test_paired_delta_without_a_control_is_nan_not_zero():
@@ -447,7 +457,10 @@ def test_paired_delta_refuses_duplicate_controls():
         metrics.paired_deltas(rows, SPLITS)
 
 
-def _rung(lr, val, test_by_seed, collapsed=0.0, optim=plan.SGD):
+CUT = 5.0
+
+
+def _rung(lr, val, test_by_seed, dce=1.0, optim=plan.SGD):
     return {
         "target": "dog",
         "optim": optim,
@@ -455,22 +468,41 @@ def _rung(lr, val, test_by_seed, collapsed=0.0, optim=plan.SGD):
         "delta_validation": val,
         "delta_test": float(np.mean(list(test_by_seed.values()))),
         "test_by_seed": test_by_seed,
-        "collapsed_frac": collapsed,
+        "delta_ce_mean": dce,
+        "collapsed_frac": 0.0,
+        "at_edge": False,
     }
 
 
-def test_select_rung_skips_collapsed_and_ties_to_the_smaller_rate():
+def test_select_rung_skips_a_collapsed_mean_and_ties_to_the_smaller_rate():
     rungs = [
-        _rung(0.02, 0.9, {1: 0.1, 2: 0.1}, collapsed=0.5),
+        _rung(0.02, 0.9, {1: 0.1, 2: 0.1}, dce=CUT),
         _rung(0.01, 0.2, {1: 0.1, 2: 0.1}),
         _rung(0.005, 0.2, {1: 0.1, 2: 0.1}),
     ]
-    assert metrics.select_rung(rungs, "dog", plan.SGD)["lr"] == 0.005
+    assert metrics.select_rung(rungs, "dog", plan.SGD, CUT)["lr"] == 0.005
+
+
+def test_select_rung_keeps_a_rung_with_one_collapsed_student_under_the_mean_cut():
+    rung = {**_rung(0.02, 0.9, {1: 0.1, 2: 0.1}, dce=4.0), "collapsed_frac": 0.5}
+    assert metrics.select_rung([rung], "dog", plan.SGD, CUT)["lr"] == 0.02
+
+
+def test_select_rung_flags_a_rung_at_the_ladder_edge():
+    rungs = [
+        _rung(0.02, 0.9, {1: 0.1, 2: 0.1}),
+        _rung(0.01, 0.2, {1: 0.1, 2: 0.1}),
+        _rung(0.005, 0.1, {1: 0.1, 2: 0.1}),
+    ]
+    assert metrics.select_rung(rungs, "dog", plan.SGD, CUT)["at_edge"]
+    assert not metrics.select_rung(
+        rungs[1:] + [_rung(0.03, 0.0, {1: 0.1})], "dog", plan.SGD, CUT
+    )["at_edge"]
 
 
 def test_select_rung_with_every_rung_collapsed_is_none():
-    rungs = [_rung(0.02, 0.9, {1: 0.1, 2: 0.1}, collapsed=1.0)]
-    assert metrics.select_rung(rungs, "dog", plan.SGD) is None
+    rungs = [_rung(0.02, 0.9, {1: 0.1, 2: 0.1}, dce=CUT + 1)]
+    assert metrics.select_rung(rungs, "dog", plan.SGD, CUT) is None
     assert metrics.e8_verdict(None, 2)["present"] is False
 
 
@@ -487,8 +519,13 @@ def test_e8_verdict_needs_every_seed_positive_and_the_floor(seeds, present):
     assert metrics.e8_verdict(_rung(0.01, 0.1, seeds), 2)["present"] is present
 
 
-def _unit(recipe, delta, collapsed=False):
-    return {"recipe": recipe, "collapsed": collapsed, "delta": {"test": delta}}
+def _unit(recipe, delta, collapsed=False, control_collapsed=False):
+    return {
+        "recipe": recipe,
+        "collapsed": collapsed,
+        "control_collapsed": control_collapsed,
+        "delta": {"test": delta},
+    }
 
 
 def test_e9_verdict_supports_a_clear_effect_across_teachers():
@@ -504,6 +541,21 @@ def test_e9_verdict_needs_two_teachers_and_a_half_kept():
     ]
     out = metrics.e9_verdict(units)
     assert not out["eligible"] and not out["supported"]
+
+
+def test_e9_verdict_needs_every_teacher_positive():
+    units = [_unit(r, 0.3) for r in "ab" for _ in range(3)]
+    units += [_unit("c", -0.01) for _ in range(3)]
+    out = metrics.e9_verdict(units)
+    assert out["n_positive_teachers"] == 2 and not out["supported"]
+
+
+def test_e9_verdict_excludes_a_unit_whose_control_collapsed():
+    units = [_unit(r, 0.2 + 0.01 * s) for r in "abc" for s in range(3)]
+    units.append(_unit("a", 9.0, control_collapsed=True))
+    out = metrics.e9_verdict(units)
+    assert (out["n_units"], out["n_kept"]) == (10, 9)
+    assert out["delta_test"] < 1
 
 
 def test_e9_verdict_below_the_floor_is_not_supported():
@@ -590,8 +642,26 @@ def test_e6_results_recover_a_planted_exceedance(fake_root):
     table = pd.read_csv(out / "exceedance.csv")
     arm = table[table["row"] == f"blue|{plan.DATA1}"].iloc[0]
     assert arm["exceeders"] == 60 and arm["n_treatment"] == 60
-    manifest = json.loads((out / results.MANIFEST).read_text())
-    assert manifest["n_rows"] == manifest["n_rows_expected"]
+    assert json.loads((out / results.MANIFEST).read_text())["n_rows"] > 0
+
+
+def test_results_refuse_a_set_with_a_missing_student(fake_root):
+    cells_e9 = cells.e9_cells()
+    for cell in cells_e9[1:]:
+        for target in cell.eval_targets:
+            _write_leaf(fake_root, cell, target, 0.1)
+    with pytest.raises(RuntimeError, match="rows"):
+        results.build(plan.E9, fake_root / "res")
+
+
+def test_results_refuse_a_student_without_a_current_probe(fake_root):
+    for cell in cells.e9_cells():
+        for target in cell.eval_targets:
+            _write_leaf(fake_root, cell, target, 0.1)
+    leaf = cells.run_dir(cells.e9_cells()[-1])
+    (leaf / "train_manifest.json").write_text('{"changed": true}')
+    with pytest.raises(RuntimeError, match="pp1"):
+        results.build(plan.E9, fake_root / "res")
 
 
 def test_e8_results_pick_the_planted_rung_and_read_a_null_optimizer(fake_root):

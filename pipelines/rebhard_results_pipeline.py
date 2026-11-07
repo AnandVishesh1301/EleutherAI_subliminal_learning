@@ -74,7 +74,6 @@ def leaf_rows(exp_cells: Iterable[cells.Cell]) -> list[dict]:
                 "kl": probe.get("kl", math.nan),
                 "collapsed": bool(probe.get("collapsed", False)),
                 "scored": bool(probe),
-                "final_train_loss": manifest.get("final_train_loss"),
                 "n_train_steps": manifest.get("n_train_steps"),
                 "run_dir": str(leaf),
             }
@@ -169,7 +168,8 @@ def e8_claims(rungs: Sequence[Mapping]) -> dict:
     """R8 per (animal, optimizer)."""
     return {
         f"{a}|{o}": metrics.e8_verdict(
-            metrics.select_rung(rungs, a, o), len(plan.E8_SEEDS)
+            metrics.select_rung(rungs, a, o, plan.collapse_dce(plan.PY410)),
+            len(plan.E8_SEEDS),
         )
         for a in plan.ANIMALS
         for o in plan.E8_RATES
@@ -197,15 +197,28 @@ def _write_csv(path: Path, rows: Sequence[Mapping]) -> None:
     atomic_write_text(path, pd.DataFrame(list(rows)).to_csv(index=False))
 
 
-def build(exp: str, results_root: Path) -> Path:
+def build(exp: str, results_root: Path, git_sha: str | None = None) -> Path:
     """Compute and write one experiment's set under a fresh build dir.
+
+    Args:
+        exp: Experiment token.
+        results_root: `<run set>/results`.
+        git_sha: Campaign pin the set records.
 
     Returns:
         The build dir.
+
+    Raises:
+        RuntimeError: A planned student is unfinished or has no current pp1 record.
     """
     exp_cells = cells.exp_cells(exp)
     rows = leaf_rows(exp_cells)
     n_expected = sum(len(c.eval_targets) for c in exp_cells)
+    unscored = sum(not r["scored"] for r in rows)
+    if len(rows) != n_expected or unscored:
+        raise RuntimeError(
+            f"{exp}: {len(rows)} of {n_expected} rows, {unscored} without a pp1 record"
+        )
     tables: dict[str, Sequence[Mapping]] = {"leaves": rows}
     claims: dict
     if exp == plan.E6:
@@ -228,8 +241,7 @@ def build(exp: str, results_root: Path) -> Path:
             "at": utc_now_iso(),
             "exp": exp,
             "n_rows": len(rows),
-            "n_rows_expected": n_expected,
-            "n_unscored": sum(not r["scored"] for r in rows),
+            "git_sha": git_sha,
             "files": sorted(p.name for p in out.iterdir()),
         },
     )
