@@ -211,13 +211,20 @@ def paired_deltas(rows: Iterable[Mapping], splits: Sequence[str]) -> list[dict]:
 
 
 def rung_rows(pairs: Iterable[Mapping], splits: Sequence[str]) -> list[dict]:
-    """Mean Δ per (target, optimizer, rate), with per-seed test Δ and collapse share."""
+    """Mean Δ per (student, target, optimizer, rate), with per-seed Δ and collapse."""
     groups: dict[tuple, list[Mapping]] = {}
     for p in pairs:
-        groups.setdefault((p["target"], p["optim"], p["lr"]), []).append(p)
+        key = (p["student_base"], p["target"], p["optim"], p["lr"])
+        groups.setdefault(key, []).append(p)
     out = []
-    for (target, optim, lr), units in sorted(groups.items()):
-        row: dict = {"target": target, "optim": optim, "lr": lr, "n": len(units)}
+    for (student, target, optim, lr), units in sorted(groups.items()):
+        row: dict = {
+            "student_base": student,
+            "target": target,
+            "optim": optim,
+            "lr": lr,
+            "n": len(units),
+        }
         for s in splits:
             vals = [u["delta"][s] for u in units if _finite(u["delta"][s])]
             row[f"delta_{s}"] = float(np.mean(vals)) if vals else math.nan
@@ -253,6 +260,53 @@ def select_rung(
     best = min(pool, key=lambda r: (-r[f"delta_{SPLIT_SELECT}"], r["lr"]))
     rates = [r["lr"] for r in ladder]
     return {**best, "at_edge": best["lr"] in (min(rates), max(rates))}
+
+
+def shared_rung(
+    rungs: Iterable[Mapping], targets: Sequence[str], optim: str, cut: float
+) -> float | None:
+    """Rate with the largest mean validation Δ over `targets`, every one under `cut`.
+
+    Ties go to the smaller rate. None when no rate is non-collapsed for every target.
+    """
+    by_lr: dict[float, list[Mapping]] = {}
+    for r in rungs:
+        if r["optim"] == optim and r["target"] in targets:
+            by_lr.setdefault(r["lr"], []).append(r)
+    scored = []
+    for lr, group in by_lr.items():
+        values = [r[f"delta_{SPLIT_SELECT}"] for r in group]
+        if (
+            len(group) == len(targets)
+            and all(
+                _finite(r["delta_ce_mean"]) and r["delta_ce_mean"] < cut for r in group
+            )
+            and all(_finite(v) for v in values)
+        ):
+            scored.append((-float(np.mean(values)), lr))
+    return min(scored)[1] if scored else None
+
+
+def nearest_rates(
+    ladder: Sequence[float], chosen: float, k: int = 3
+) -> tuple[float, ...]:
+    """`chosen` and its neighbours on `ladder`; at an edge, the `k` nearest inner rungs."""
+    rates = sorted(ladder)
+    i = rates.index(chosen)
+    start = min(max(i - k // 2, 0), len(rates) - k)
+    return tuple(rates[start : start + k])
+
+
+def e23_verdict(deltas: Sequence[float]) -> dict:
+    """R23 on one (pair, animal, rate): mean test Δ, seed-bootstrap CI above 0."""
+    est, lo, hi = nm.boot_ci(deltas)
+    return {
+        "delta_test": est,
+        "lo": lo,
+        "hi": hi,
+        "n_seeds": sum(_finite(x) for x in deltas),
+        "present": bool(_finite(lo) and lo > 0),
+    }
 
 
 def e8_verdict(rung: Mapping | None, n_seeds: int) -> dict:

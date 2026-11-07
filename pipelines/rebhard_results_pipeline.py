@@ -3,8 +3,8 @@
 Under `<run set>/results/<exp>/build-<UTC>/`, manifest last:
 
     leaves.csv             one row per (student, scored target)
-    exceedance.csv         #6: E / 60, p, null mean and 95th percentile per arm and pool
-    rungs.csv              #8, #9: mean Δ per (target, optimizer, rate)
+    exceedance.csv         #6, #7: E / 60, p, null mean and 95th percentile per arm and pool
+    rungs.csv              #8, #9, #23: mean Δ per (student, target, optimizer, rate)
     teacher_pp1.csv        #8: pp1 ΔCE of the 410M teachers
     claims.json            verdicts of `docs/PREREG_REBHARD.md`
     results_manifest.json  written last: the set is complete
@@ -87,9 +87,16 @@ def _arm(target: str, student: str) -> str:
     return f"{target}|{student}"
 
 
+def _pad(m: np.ndarray, width: int) -> np.ndarray:
+    """`m` widened with NaN treatment columns, the control kept last."""
+    gap = np.full((m.shape[0], width - m.shape[1]), np.nan)
+    return np.concatenate([m[:, :-1], gap, m[:, -1:]], axis=1)
+
+
 def _test_row(label: str, kind: str, parts: Sequence[tuple[str, np.ndarray]]) -> dict:
     """One permutation test over the arms in `parts`."""
-    values = np.concatenate([m for _, m in parts])
+    width = max(m.shape[1] for _, m in parts)
+    values = np.concatenate([_pad(m, width) for _, m in parts])
     groups = [name for name, m in parts for _ in range(m.shape[0])]
     res = metrics.exceedance_test(values, groups)
     return {
@@ -105,57 +112,110 @@ def _test_row(label: str, kind: str, parts: Sequence[tuple[str, np.ndarray]]) ->
     }
 
 
-def exceedance_tables(rows: Sequence[Mapping]) -> tuple[list[dict], dict]:
-    """#6 test rows (arms, then pools) and the verdicts R6a, R6b, R6c.
+def arm_rows(
+    rows: Sequence[Mapping], arms: Sequence[tuple[str, str, Sequence[str]]]
+) -> tuple[list[dict], dict[tuple[str, str], np.ndarray]]:
+    """Test rows of each (target, student, teachers) arm, with Holm, and their matrices.
 
     Raises:
         ValueError: A stratum has no finite control.
     """
     settings = [cells.setting_tag(s) for s in plan.FOCUS20]
-    recipes = plan.SELECTED_RECIPES
-    arms: dict[tuple[str, str], np.ndarray] = {}
+    matrices: dict[tuple[str, str], np.ndarray] = {}
     out: list[dict] = []
-    for target in plan.E6_TARGETS:
-        for student in plan.E6_STUDENTS:
-            sub = [
-                r
-                for r in rows
-                if r["target"] == target and r["student_base"] == student
-            ]
-            m = metrics.arm_matrix(sub, target, student, recipes, settings)
-            arms[(target, student)] = m
-            row = _test_row(_arm(target, student), "arm", [(_arm(target, student), m)])
-            out.append({**row, **metrics.arm_summary(sub, m, recipes)})
+    for target, student, recipes in arms:
+        sub = [
+            r for r in rows if r["target"] == target and r["student_base"] == student
+        ]
+        m = metrics.arm_matrix(sub, target, student, recipes, settings)
+        matrices[(target, student)] = m
+        row = _test_row(_arm(target, student), "arm", [(_arm(target, student), m)])
+        out.append({**row, **metrics.arm_summary(sub, m, recipes)})
     adjusted = metrics.holm({r["row"]: r["p"] for r in out})
     for r in out:
         r["p_holm"] = adjusted[r["row"]]
+    return out, matrices
 
-    def pooled(label: str, kind: str, keys: Iterable[tuple[str, str]]) -> dict:
-        return _test_row(label, kind, [(_arm(*k), arms[k]) for k in keys])
 
+def _pooled(
+    matrices: Mapping[tuple[str, str], np.ndarray],
+    label: str,
+    kind: str,
+    keys: Iterable[tuple[str, str]],
+) -> dict:
+    return _test_row(label, kind, [(_arm(*k), matrices[k]) for k in keys])
+
+
+def _verdicts(rows: Iterable[Mapping]) -> dict:
+    return {r["row"]: {"p": r["p"], "supported": r["p"] < metrics.ALPHA} for r in rows}
+
+
+def exceedance_tables(rows: Sequence[Mapping]) -> tuple[list[dict], dict]:
+    """#6 test rows (arms, then pools) and the verdicts R6a, R6b, R6c."""
+    arms = [
+        (t, s, plan.SELECTED_RECIPES) for t in plan.E6_TARGETS for s in plan.E6_STUDENTS
+    ]
+    out, matrices = arm_rows(rows, arms)
     by_target = [
-        pooled(t, "target", [k for k in arms if k[0] == t]) for t in plan.E6_TARGETS
+        _pooled(matrices, t, "target", [k for k in matrices if k[0] == t])
+        for t in plan.E6_TARGETS
     ]
     by_student = [
-        pooled(
-            f"{s} ({plan.E6_CONDITION[s]})", "student", [k for k in arms if k[1] == s]
+        _pooled(
+            matrices,
+            f"{s} ({plan.E6_CONDITION[s]})",
+            "student",
+            [k for k in matrices if k[1] == s],
         )
         for s in plan.E6_STUDENTS
     ]
-    total = pooled("all", "all", arms)
-    out += [*by_target, *by_student, total]
+    total = _pooled(matrices, "all", "all", matrices)
     claims = {
         "R6a": {"p": total["p"], "supported": total["p"] < metrics.ALPHA},
-        "R6b": {
-            r["row"]: {"p": r["p"], "supported": r["p"] < metrics.ALPHA}
-            for r in by_student
-        },
-        "R6c": {
-            r["row"]: {"p": r["p"], "supported": r["p"] < metrics.ALPHA}
-            for r in by_target
-        },
+        "R6b": _verdicts(by_student),
+        "R6c": _verdicts(by_target),
     }
-    return out, claims
+    return [*out, *by_target, *by_student, total], claims
+
+
+def e7_tables(
+    rows: Sequence[Mapping], selected: Mapping[str, Sequence[str]]
+) -> tuple[list[dict], dict]:
+    """#7 test rows (arms, then pools) and the verdict R7.
+
+    Args:
+        rows: Leaf rows.
+        selected: Target -> teachers of its 410M→160M arm.
+    """
+    arms = [
+        (t, student, recipes)
+        for t in plan.E7_TARGETS
+        for student, recipes in (
+            (plan.PY410, plan.SELECTED_RECIPES),
+            (plan.PY160, selected[t]),
+        )
+        if recipes
+    ]
+    out, matrices = arm_rows(rows, arms)
+    by_target = [
+        _pooled(matrices, t, "target", [k for k in matrices if k[0] == t])
+        for t in plan.E7_TARGETS
+        if any(k[0] == t for k in matrices)
+    ]
+    by_direction = [
+        _pooled(matrices, label, "direction", [k for k in matrices if k[1] == s])
+        for label, s in (("160m->410m", plan.PY410), ("410m->160m", plan.PY160))
+        if any(k[1] == s for k in matrices)
+    ]
+    total = _pooled(matrices, "all", "all", matrices)
+    claims = {
+        "R7": {
+            "all": {"p": total["p"], "supported": total["p"] < metrics.ALPHA},
+            "by_direction": _verdicts(by_direction),
+            "by_target": _verdicts(by_target),
+        }
+    }
+    return [*out, *by_target, *by_direction, total], claims
 
 
 def rung_table(rows: Sequence[Mapping]) -> tuple[list[dict], list[dict]]:
@@ -187,6 +247,18 @@ def e9_claims(pairs: Sequence[Mapping]) -> dict:
     }
 
 
+def e23_claims(pairs: Sequence[Mapping]) -> dict:
+    """R23 per (student base, animal, rate): one Δ per seed."""
+    groups: dict[tuple, list[float]] = {}
+    for p in pairs:
+        key = (p["student_base"], p["target"], p["lr"])
+        groups.setdefault(key, []).append(p["delta"][metrics.SPLIT_REPORT])
+    return {
+        f"into {base}|{target}|{lr:g}": metrics.e23_verdict(deltas)
+        for (base, target, lr), deltas in sorted(groups.items())
+    }
+
+
 def teacher_pp1_rows() -> list[dict]:
     """pp1 records of the 410M teachers (absent ones omitted)."""
     docs = (_read(cells.teacher_probe_path(a)) for a in plan.ANIMALS)
@@ -197,13 +269,21 @@ def _write_csv(path: Path, rows: Sequence[Mapping]) -> None:
     atomic_write_text(path, pd.DataFrame(list(rows)).to_csv(index=False))
 
 
-def build(exp: str, results_root: Path, git_sha: str | None = None) -> Path:
+def build(
+    exp: str,
+    results_root: Path,
+    git_sha: str | None = None,
+    planned: Sequence[cells.Cell] | None = None,
+    selected: Mapping[str, Sequence[str]] | None = None,
+) -> Path:
     """Compute and write one experiment's set under a fresh build dir.
 
     Args:
         exp: Experiment token.
         results_root: `<run set>/results`.
         git_sha: Campaign pin the set records.
+        planned: Cells of an experiment decided at run time (#7, #23).
+        selected: #7: target -> teachers of its 410M→160M arm.
 
     Returns:
         The build dir.
@@ -211,7 +291,7 @@ def build(exp: str, results_root: Path, git_sha: str | None = None) -> Path:
     Raises:
         RuntimeError: A planned student is unfinished or has no current pp1 record.
     """
-    exp_cells = cells.exp_cells(exp)
+    exp_cells = list(planned) if planned is not None else cells.exp_cells(exp)
     rows = leaf_rows(exp_cells)
     n_expected = sum(len(c.eval_targets) for c in exp_cells)
     unscored = sum(not r["scored"] for r in rows)
@@ -223,12 +303,18 @@ def build(exp: str, results_root: Path, git_sha: str | None = None) -> Path:
     claims: dict
     if exp == plan.E6:
         tables["exceedance"], claims = exceedance_tables(rows)
+    elif exp == plan.E7:
+        tables["exceedance"], claims = e7_tables(rows, selected or {})
     else:
         pairs, rungs = rung_table(rows)
         tables["rungs"] = rungs
-        claims = e8_claims(rungs) if exp == plan.E8 else e9_claims(pairs)
         if exp == plan.E8:
+            claims = e8_claims(rungs)
             tables["teacher_pp1"] = teacher_pp1_rows()
+        elif exp == plan.E9:
+            claims = e9_claims(pairs)
+        else:
+            claims = e23_claims(pairs)
     stamp = utc_now_iso().replace(":", "")
     out = results_root / exp / f"build-{stamp}"
     out.mkdir(parents=True, exist_ok=False)

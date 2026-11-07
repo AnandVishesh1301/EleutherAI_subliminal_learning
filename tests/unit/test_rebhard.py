@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 import scripts.run_rebhard_cell as cli
+from pipelines import rebhard_campaign_pipeline as driver
 from pipelines import rebhard_cell_pipeline as cellpipe
 from pipelines import rebhard_results_pipeline as results
 from pipelines import rebhard_staging_pipeline as staging
@@ -21,6 +22,7 @@ from pipelines.distill_student_pipeline import keeps_resume_state
 from subliminal_learning.campaign import rebhard_cells as cells
 from subliminal_learning.campaign import rebhard_metrics as metrics
 from subliminal_learning.campaign import rebhard_plan as plan
+from subliminal_learning.campaign import rebhard_teachers as rt
 from subliminal_learning.config import TrainConfig
 from subliminal_learning.jobqueue.model import RESERVED_CHARS
 
@@ -54,6 +56,7 @@ def test_pure_modules_import_no_heavy_or_io_modules():
         "import sys, importlib;"
         "[importlib.import_module(m) for m in ("
         "'subliminal_learning.campaign.rebhard_cells',"
+        "'subliminal_learning.campaign.rebhard_teachers',"
         "'subliminal_learning.campaign.rebhard_metrics')];"
         "print(','.join(m for m in sys.modules if m in ('torch','transformers','trl',"
         "'peft','datasets') or (m.startswith('subliminal_learning')"
@@ -89,10 +92,12 @@ def test_full_sgd_is_plain_sgd_and_tags_match_hlopt_leaves():
 
 
 @pytest.mark.parametrize("optim", [plan.SGD, plan.ADAMW])
-def test_only_410m_full_ft_resumes_mid_run(optim):
+def test_only_410m_students_resume_mid_run(optim):
     setting = plan.Setting(plan.FULL, optim, 1e-3)
     assert cells.train_cfgs(setting, plan.PY410, 1)[1].checkpoint_resume
     assert not cells.train_cfgs(setting, plan.PY160, 1)[1].checkpoint_resume
+    assert cells.train_cfgs(plan.FOCUS20[0], plan.PY410, 1)[1].checkpoint_resume
+    assert not cells.train_cfgs(plan.FOCUS20[0], plan.PY160, 1)[1].checkpoint_resume
 
 
 def test_experiment_sizes_match_the_brief():
@@ -104,7 +109,17 @@ def test_experiment_sizes_match_the_brief():
     assert len(e8) - len(teacher(e8)) == 2 * 5 * 2
     assert len(teacher(e9)) == 4 * 3 * 2 * 3
     assert len(e9) - len(teacher(e9)) == 2 * 3
-    assert len(cells.cells_by_key()) == len(e6) + len(e8) + len(e9)
+    assert {c.key for c in e6 + e8 + e9} <= set(cells.cells_by_key())
+
+
+def test_priority_2_sizes_match_the_brief():
+    assert len(cells.e7_controls()) == 2 * 20
+    assert len(cells.e7_up_cells()) == 3 * 60
+    assert len(cells.e7_down_cells("blue", plan.SELECTED_RECIPES)) == 60
+    down = cells.e23_down_cells()
+    assert sum(c.source == plan.TEACHER for c in down) == 2 * 3 * 3
+    assert sum(c.source == plan.BASE for c in down) == 3 * 3
+    assert len(cells.e23_up_cells(plan.E8_RATES[plan.SGD][:3])) == 27
 
 
 def test_arm_strata_hold_three_teachers_and_one_control():
@@ -165,8 +180,13 @@ def test_pool_tags_follow_each_pool_not_the_hlopt_default():
 
 def test_reuse_covers_only_matched_controls():
     reused = staging.reused_cells()
-    assert len(reused) == 2 * 20 + 6
-    assert {c.student_base for c in reused} == {plan.SEED1, plan.DATA1, plan.PY160}
+    assert len(reused) == 2 * 20 + 6 + 2 * 20
+    assert {c.student_base for c in reused} == {
+        plan.SEED1,
+        plan.DATA1,
+        plan.PY160,
+        plan.PY410,
+    }
     assert all(c.source == plan.BASE for c in reused)
     ws1 = [c for c in cells.e6_cells() if c.student_base == plan.WS1]
     assert all(cells.reused_source(c) is None for c in ws1)
@@ -578,9 +598,17 @@ def test_pool_review_is_bound_to_the_planned_shas():
     )
 
 
-def test_planned_pools_cover_every_cell():
+def test_planned_pools_cover_every_cell_on_an_existing_pool():
     pools = {p.directory for p in staging.planned_pools().values()}
-    assert {cells.pool(c).directory for c in cells.cells_by_key().values()} <= pools
+    fixed = [cells.pool(c) for c in cells.cells_by_key().values()]
+    assert {p.directory for p in fixed if p.filtered_sha256} <= pools
+
+
+def test_new_pools_carry_no_pin_and_the_n100k_tag():
+    cell = cells.e7_down_cells("blue", plan.SELECTED_RECIPES)[0]
+    assert cells.pool(cell).filtered_sha256 is None
+    assert plan.TAG_N100K in str(cells.run_dir(cell))
+    assert "teacher-pythia-410m" in str(cells.run_dir(cell))
 
 
 def _write_leaf(root: Path, cell: cells.Cell, target: str, p: float) -> None:
@@ -674,3 +702,238 @@ def test_e8_results_pick_the_planted_rung_and_read_a_null_optimizer(fake_root):
     claims = json.loads((out / "claims.json").read_text())
     assert claims["dog|sgd"]["present"] and claims["dog|sgd"]["lr"] == 0.01
     assert not claims["dog|adamw"]["present"]
+
+
+# ---- priority 2 ------------------------------------------------------------------------
+
+
+def test_e23_directions_use_their_teacher_pools():
+    down = next(c for c in cells.e23_down_cells() if c.target == plan.DOG)
+    up = next(c for c in cells.e23_up_cells((0.01,)) if c.target == plan.DOG)
+    assert cells.pool(down) == plan.ANIMAL_POOLS_410M[plan.DOG]
+    assert cells.pool(up) == plan.ANIMAL_POOLS_160M[plan.DOG]
+    assert plan.TAG_N300K in str(cells.run_dir(down))
+    assert plan.TAG_N100K in str(cells.run_dir(up))
+
+
+def test_e23_controls_use_the_teacher_bases_untuned_pool():
+    down = next(c for c in cells.e23_down_cells() if c.source == plan.BASE)
+    up = next(c for c in cells.e23_up_cells((0.01,)) if c.source == plan.BASE)
+    assert cells.pool(down) == plan.CONTROL_POOLS[plan.PY410]
+    assert cells.pool(up) == plan.CONTROL_POOLS[plan.PY160]
+    assert down.eval_targets == plan.ANIMALS
+
+
+def test_e7_controls_reuse_the_matching_direction():
+    up, down = cells.e7_controls()[0], cells.e7_controls()[-1]
+    assert "/pythia-410m/teacher-pythia-160m/" in str(cells.reused_source(up))
+    assert "/pythia-160m/teacher-pythia-410m/" in str(cells.reused_source(down))
+
+
+def test_every_leaf_of_every_priority_is_unique():
+    leaves = [cells.run_dir(c) for c in cells.cells_by_key().values()]
+    assert len(set(leaves)) == len(leaves)
+
+
+@pytest.mark.parametrize(
+    "chosen,expected",
+    [
+        (0.01, (0.005, 0.01, 0.02)),
+        (0.0025, (0.0025, 0.005, 0.01)),
+        (0.035, (0.01, 0.02, 0.035)),
+    ],
+)
+def test_nearest_rates_keep_three_rungs_at_the_edges(chosen, expected):
+    assert metrics.nearest_rates(plan.E8_RATES[plan.SGD], chosen) == expected
+
+
+def _shared(target, lr, val, dce=1.0):
+    return {
+        "target": target,
+        "optim": plan.SGD,
+        "lr": lr,
+        "delta_validation": val,
+        "delta_ce_mean": dce,
+    }
+
+
+def test_shared_rung_averages_animals_and_needs_both_under_the_cut():
+    rungs = [
+        _shared("dog", 0.01, 0.2),
+        _shared("lion", 0.01, 0.2),
+        _shared("dog", 0.02, 0.9),
+        _shared("lion", 0.02, 0.1),
+        _shared("dog", 0.035, 2.0),
+        _shared("lion", 0.035, 2.0, dce=CUT),
+    ]
+    assert metrics.shared_rung(rungs, plan.ANIMALS, plan.SGD, CUT) == 0.02
+
+
+def test_shared_rung_is_none_when_nothing_survives():
+    rungs = [_shared("dog", 0.01, 0.2, dce=CUT), _shared("lion", 0.01, 0.2)]
+    assert metrics.shared_rung(rungs, plan.ANIMALS, plan.SGD, CUT) is None
+
+
+def test_e23_verdict_needs_the_seed_interval_above_zero():
+    assert metrics.e23_verdict([0.1, 0.11, 0.12])["present"]
+    assert not metrics.e23_verdict([0.1, -0.1, 0.0])["present"]
+
+
+def test_pad_widens_treatments_and_keeps_the_control_last():
+    m = np.array([[0.4, 0.5, 0.1]])
+    out = results._pad(m, 4)
+    assert out.shape == (1, 4)
+    assert out[0, -1] == 0.1 and math.isnan(out[0, 2])
+
+
+def test_pooled_arms_with_fewer_teachers_keep_each_arms_own_control():
+    full = np.array([[0.5, 0.5, 0.5, 0.1]])
+    short = np.array([[0.05, 0.9]])
+    row = results._test_row("x", "all", [("a", full), ("b", short)])
+    assert row["exceeders"] == 3
+    assert row["n_treatment"] == 4
+
+
+def test_e7_results_cover_both_directions_with_fewer_teachers(fake_root):
+    selected = {t: list(plan.SELECTED_RECIPES) for t in plan.E7_TARGETS}
+    selected["maple"] = list(plan.SELECTED_RECIPES[:2])
+    planned = cells.e7_controls() + cells.e7_up_cells()
+    planned += [c for t in plan.E7_TARGETS for c in cells.e7_down_cells(t, selected[t])]
+    rng = np.random.default_rng(1)
+    for cell in planned:
+        for target in cell.eval_targets:
+            base = 0.02 + 0.01 * rng.random()
+            strong = cell.source == plan.TEACHER and cell.student_base == plan.PY160
+            _write_leaf(fake_root, cell, target, base + 0.3 if strong else base)
+    out = results.build(plan.E7, fake_root / "res", planned=planned, selected=selected)
+    claims = json.loads((out / "claims.json").read_text())["R7"]
+    assert claims["all"]["supported"]
+    assert claims["by_direction"]["410m->160m"]["supported"]
+    assert not claims["by_direction"]["160m->410m"]["supported"]
+
+
+def test_e23_results_keep_the_two_directions_apart(fake_root):
+    planned = cells.e23_down_cells() + cells.e23_up_cells((0.01, 0.02, 0.035))
+    for cell in planned:
+        for target in cell.eval_targets:
+            treat = cell.source == plan.TEACHER and cell.student_base == plan.PY160
+            bump = 0.01 * cell.seed
+            _write_leaf(fake_root, cell, target, 0.3 + bump if treat else 0.1)
+    out = results.build(plan.E23, fake_root / "res", planned=planned)
+    claims = json.loads((out / "claims.json").read_text())
+    assert claims["into pythia-160m|dog|0.01"]["present"]
+    assert not claims["into pythia-410m|dog|0.01"]["present"]
+
+
+def _pool_rows(n, completion=" 123"):
+    return [{"prompt": "p", "completion": completion} for _ in range(n)]
+
+
+def test_coherence_stats_read_length_and_letters():
+    rows = _pool_rows(3) + _pool_rows(1, " 1, 2, 3") + _pool_rows(1, " abc 4")
+    out = rt.coherence_stats(rows)
+    assert out["n_rows"] == 5
+    assert out["mean_numbers"] == pytest.approx(7 / 5)
+    assert out["share_one_number"] == pytest.approx(4 / 5)
+    assert out["n_distinct"] == 3
+    assert out["n_with_letters"] == 1
+
+
+def test_coherence_flags_letters_short_pools_and_a_length_off_the_references():
+    ref = {"mean_numbers": 1.0, "share_one_number": 0.99}
+    good = {
+        "n_rows": 20_000,
+        "mean_numbers": 1.2,
+        "share_one_number": 0.8,
+        "n_with_letters": 0,
+    }
+    assert rt.coherence_problems(good, [ref]) == ()
+    assert rt.coherence_problems({**good, "n_with_letters": 2}, [ref])
+    assert rt.coherence_problems({**good, "n_rows": 9_000}, [ref])
+    assert rt.coherence_problems({**good, "mean_numbers": 9.8}, [ref])
+
+
+def test_teacher_tasks_stay_on_the_plan():
+    assert len(rt.teacher_tasks()) == 3 * 10
+    with pytest.raises(ValueError):
+        rt.TeacherTask("oak", rt.RECIPES[0])
+    with pytest.raises(ValueError):
+        rt.PoolTask("blue", "ep1_lr1e-9_r1a1")
+
+
+def test_teacher_layout_sits_under_the_campaign_root(fake_root):
+    leaf = rt.teacher_leaf_dir("blue", rt.RECIPES[0])
+    assert str(leaf).startswith(str(fake_root))
+    assert rt.pool_dir("blue", rt.RECIPES[0]).name == "ex10-20"
+    assert rt.filtered_dir("blue", rt.RECIPES[0]).name == "prefix"
+
+
+def test_check_pool_binds_a_new_pool_to_its_approved_review(fake_root, monkeypatch):
+    monkeypatch.setattr(plan, "REVIEW_DIR", fake_root / "reviews")
+    cell = cells.e7_down_cells("blue", plan.SELECTED_RECIPES)[0]
+    pool = cells.pool(cell).directory
+    pool.mkdir(parents=True)
+    (pool / "filtered.jsonl").write_text('{"completion": " 1"}\n')
+    with pytest.raises(RuntimeError):
+        cellpipe.check_pool(cell)
+    path = rt.pool_review_path("blue")
+    path.parent.mkdir(parents=True)
+    from subliminal_learning.utils.io import file_sha256
+
+    sha = file_sha256(pool / "filtered.jsonl")
+    path.write_text(json.dumps({"approved": False, "pools": {cell.recipe: sha}}))
+    with pytest.raises(RuntimeError):
+        cellpipe.check_pool(cell)
+    path.write_text(json.dumps({"approved": True, "pools": {cell.recipe: sha}}))
+    assert cellpipe.check_pool(cell) == pool
+
+
+def _driver_cfg(tmp_path):
+    return driver.driver_config(
+        output_root=tmp_path / "outputs",
+        queue_root=tmp_path / "queue",
+        repo_root=tmp_path,
+        dry_run=False,
+        auto_requeue=3,
+        code_sha="abc",
+        generated_dir_override=tmp_path / "gen",
+    )
+
+
+def test_a_first_pass_without_a_pin_is_refused(tmp_path):
+    cfg = _driver_cfg(tmp_path)
+    with pytest.raises(driver.CampaignGateError):
+        driver.run(driver.replace(cfg, code_sha=None))
+
+
+def test_students_wait_for_the_review_of_their_pools(tmp_path, monkeypatch):
+    cfg = _driver_cfg(tmp_path)
+    usable = [plan.SELECTED_RECIPES[0], plan.SELECTED_RECIPES[1], rt.RECIPES[3]]
+    e7 = {
+        "gate": {"blue": {"ranked": usable}},
+        "pools": {"blue": {r: {"status": "usable"} for r in usable}},
+        "final": {"blue": True},
+        "selected": {"blue": usable},
+        "submitted": {},
+    }
+    put: list = []
+    monkeypatch.setattr(driver, "_resolve_pools", lambda *a: None)
+    monkeypatch.setattr(driver, "_put", lambda c, n, j: put.append(n) or len(j))
+    monkeypatch.setattr(driver.rtp, "write_pool_samples", lambda *a: "sheet")
+    monkeypatch.setattr(driver.rtp, "pool_review_problem", lambda *a: "not approved")
+    fired: list = []
+    waiting: list = []
+    driver._advance_target(cfg, e7, "blue", fired, waiting)
+    assert not put and "held" in waiting[0] and not e7["submitted"]
+    monkeypatch.setattr(driver.rtp, "pool_review_problem", lambda *a: None)
+    driver._advance_target(cfg, e7, "blue", fired, [])
+    assert put == [plan.queue(plan.E7_DOWN)] and e7["submitted"]["blue"]
+
+
+def test_choosing_rates_into_410m_follows_8s_rungs():
+    rungs = [
+        {**_shared(a, lr, val), "delta_ce_mean": 1.0}
+        for a in plan.ANIMALS
+        for lr, val in zip(plan.E8_RATES[plan.SGD], (0.1, 0.2, 0.3, 0.2, 0.1))
+    ]
+    assert driver.choose_e23_rates(rungs) == (0.005, 0.01, 0.02)

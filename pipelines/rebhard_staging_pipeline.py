@@ -69,12 +69,8 @@ def _stage_pp1() -> str:
 
 def reused_cells() -> list[cells.Cell]:
     """Every cell that copies a finished leaf, each student once."""
-    return [
-        c
-        for exp in plan.EXPERIMENTS
-        for c in cells.exp_cells(exp)
-        if cells.reused_source(c) is not None
-    ]
+    planned = [c for exp in plan.EXPERIMENTS for c in cells.exp_cells(exp)]
+    return [c for c in planned + cells.e7_controls() if cells.reused_source(c)]
 
 
 def check_reused_manifest(cell: cells.Cell, manifest: Mapping) -> None:
@@ -146,6 +142,8 @@ def planned_pools() -> dict[str, plan.Pool]:
         out[f"{target}|{recipe}"] = pool
     for animal, pool in plan.ANIMAL_POOLS_410M.items():
         out[f"{animal}|{plan.ANIMAL_RECIPE}|410m"] = pool
+    for animal, pool in plan.ANIMAL_POOLS_160M.items():
+        out[f"{animal}|{plan.ANIMAL_RECIPE}|160m"] = pool
     for base, pool in plan.CONTROL_POOLS.items():
         out[f"control|{base}"] = pool
     return out

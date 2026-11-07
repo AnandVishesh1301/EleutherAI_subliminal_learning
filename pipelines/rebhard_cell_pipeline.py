@@ -56,16 +56,28 @@ def _read(path: Path) -> dict | None:
     return json.loads(path.read_text()) if path.is_file() else None
 
 
+def _reviewed_sha(cell: cells.Cell) -> str | None:
+    """Filtered sha a new pool's approved review binds, or None without one."""
+    from subliminal_learning.campaign import rebhard_teachers as rt
+
+    review = _read(rt.pool_review_path(str(cell.target))) or {}
+    if review.get("approved") is not True:
+        return None
+    return (review.get("pools") or {}).get(cell.recipe)
+
+
 def check_pool(cell: cells.Cell) -> Path:
     """The cell's pool dir after its sha check.
 
     Raises:
-        RuntimeError: `filtered.jsonl` differs from the plan pin.
+        RuntimeError: `filtered.jsonl` differs from the plan pin, or from the sha a new
+            pool's approved review binds.
     """
     pool = cells.pool(cell)
+    want = pool.filtered_sha256 or _reviewed_sha(cell)
     sha = file_sha256(pool.directory / FILTERED_FILE)
-    if sha != pool.filtered_sha256:
-        raise RuntimeError(f"{pool.directory}: filtered sha {sha} differs from the pin")
+    if sha != want:
+        raise RuntimeError(f"{pool.directory}: filtered sha {sha} is not {want}")
     return pool.directory
 
 

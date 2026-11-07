@@ -8,6 +8,7 @@ command names its cell by key, and the CLI refuses a key off the plan.
 from __future__ import annotations
 
 import shlex
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
@@ -16,6 +17,7 @@ from subliminal_learning.campaign import (
     hlopt_layout,
     hlopt_plan,
     newdom_hard,
+    newdom_plan,
     ws160m_models,
 )
 from subliminal_learning.campaign import rebhard_plan as plan
@@ -58,7 +60,7 @@ def train_cfgs(
 ) -> tuple[LoRAConfig | None, TrainConfig]:
     """(LoRA or None for full FT, TrainConfig) of `setting` in the hlopt E3 recipe.
 
-    410M full fine-tuning takes over an hour per cell, so it resumes mid-run.
+    410M cells take over an hour each, so they resume mid-run.
     """
     config = hlopt_plan.Config(
         tier=plan.CAMPAIGN,
@@ -72,7 +74,7 @@ def train_cfgs(
         animals=(),
     )
     lora, train = hlopt_layout.train_cfgs(config, seed)
-    if student == plan.PY410 and setting.mode == plan.FULL:
+    if student == plan.PY410:
         train = replace(train, checkpoint_resume=True, save_steps=plan.SAVE_STEPS)
     return lora, train
 
@@ -118,7 +120,9 @@ class Cell:
         """Targets scored on this student (a control serves every target of its exp)."""
         if self.source == plan.TEACHER:
             return (str(self.target),)
-        return plan.ANIMALS if self.exp == plan.E8 else plan.TREE_COLOR_TARGETS
+        if self.exp in (plan.E8, plan.E23):
+            return plan.ANIMALS
+        return plan.TREE_COLOR_TARGETS
 
 
 def e6_cells() -> list[Cell]:
@@ -186,8 +190,76 @@ def e9_cells() -> list[Cell]:
     return cells
 
 
+def e7_controls() -> list[Cell]:
+    """#7 controls of both directions, one per `focus20` setting."""
+    seed, b = plan.E7_SEED, plan.BASE
+    return [
+        Cell(plan.E7, teacher, student, b, None, None, s, seed)
+        for teacher, student in ((plan.PY160, plan.PY410), (plan.PY410, plan.PY160))
+        for s in plan.FOCUS20
+    ]
+
+
+def e7_up_cells() -> list[Cell]:
+    """#7 160M→410M treatments on the existing 160M pools."""
+    return [
+        Cell(plan.E7, plan.PY160, plan.PY410, plan.TEACHER, t, r, s, plan.E7_SEED)
+        for t in plan.E7_TARGETS
+        for r in plan.SELECTED_RECIPES
+        for s in plan.FOCUS20
+    ]
+
+
+def e7_down_cells(target: str, recipes: Sequence[str]) -> list[Cell]:
+    """#7 410M→160M treatments of `target` on its selected new pools."""
+    return [
+        Cell(plan.E7, plan.PY410, plan.PY160, plan.TEACHER, target, r, s, plan.E7_SEED)
+        for r in recipes
+        for s in plan.FOCUS20
+    ]
+
+
+def e23_cells(teacher: str, student: str, rates: Sequence[float]) -> list[Cell]:
+    """#23 controls and treatments of one direction at `rates`."""
+    t, b = plan.TEACHER, plan.BASE
+    settings = [plan.Setting(plan.FULL, plan.SGD, lr) for lr in rates]
+    cells = [
+        Cell(plan.E23, teacher, student, b, None, None, s, seed)
+        for s in settings
+        for seed in plan.E23_SEEDS
+    ]
+    cells += [
+        Cell(plan.E23, teacher, student, t, animal, plan.ANIMAL_RECIPE, s, seed)
+        for animal in plan.ANIMALS
+        for s in settings
+        for seed in plan.E23_SEEDS
+    ]
+    return cells
+
+
+def e23_down_cells() -> list[Cell]:
+    """#23 410M→160M, at the rates around hlopt's selected ones."""
+    return e23_cells(plan.PY410, plan.PY160, plan.E23_RATES_INTO_160M)
+
+
+def e23_up_cells(rates: Sequence[float]) -> list[Cell]:
+    """#23 160M→410M, at the rates #8 selected."""
+    return e23_cells(plan.PY160, plan.PY410, rates)
+
+
 def exp_cells(exp: str) -> list[Cell]:
+    """Every cell of a fixed experiment."""
     return {plan.E6: e6_cells, plan.E8: e8_cells, plan.E9: e9_cells}[exp]()
+
+
+def _candidates() -> list[Cell]:
+    """Every cell the plan allows, including rates and teachers still undecided."""
+    cells = [c for exp in plan.EXPERIMENTS for c in exp_cells(exp)]
+    cells += e7_controls() + e7_up_cells() + e23_down_cells()
+    cells += e23_up_cells(plan.E8_RATES[plan.SGD])
+    for target in plan.E7_TARGETS:
+        cells += e7_down_cells(target, newdom_plan.HARD_RECIPES)
+    return cells
 
 
 @lru_cache(maxsize=1)
@@ -197,7 +269,7 @@ def cells_by_key() -> dict[str, Cell]:
     Raises:
         ValueError: Two cells share a key.
     """
-    cells = [c for exp in plan.EXPERIMENTS for c in exp_cells(exp)]
+    cells = _candidates()
     out = {c.key: c for c in cells}
     if len(out) != len(cells):
         raise ValueError("duplicate cell keys")
@@ -223,9 +295,17 @@ def pool(cell: Cell) -> plan.Pool:
     """The filtered pool `cell` trains on."""
     if cell.source == plan.BASE:
         return plan.CONTROL_POOLS[cell.teacher_base]
+    target, recipe = str(cell.target), str(cell.recipe)
+    if target in plan.ANIMALS:
+        pools = (
+            plan.ANIMAL_POOLS_410M
+            if cell.teacher_base == plan.PY410
+            else plan.ANIMAL_POOLS_160M
+        )
+        return pools[target]
     if cell.teacher_base == plan.PY410:
-        return plan.ANIMAL_POOLS_410M[str(cell.target)]
-    return plan.NEWDOM_POOLS[(str(cell.target), str(cell.recipe))]
+        return plan.new_pool(target, recipe)
+    return plan.NEWDOM_POOLS[(target, recipe)]
 
 
 def run_dir(cell: Cell) -> Path:
@@ -254,16 +334,20 @@ def run_dir(cell: Cell) -> Path:
 def reused_source(cell: Cell) -> Path | None:
     """Finished leaf `cell` copies instead of training, or None when it trains.
 
-    Reused: Angela's `focus20` controls on the two Hub students of #6, and hlopt's
-    full-FT SGD controls of #9. `pile-ws1` has no matched controls.
+    Reused: Angela's `focus20` controls on the two Hub students of #6 and on both
+    directions of #7, and hlopt's full-FT SGD controls of #9. `pile-ws1` has no matched
+    controls.
     """
     if cell.source != plan.BASE:
         return None
     tag = setting_tag(cell.setting)
-    tail = Path(f"teacher-{plan.PY160}") / plan.TAG_N100K / tag / f"ftseed{cell.seed}"
+    teacher = plan.HUB_REPOS[cell.teacher_base].split("/")[-1]
+    tail = Path(f"teacher-{teacher}") / plan.TAG_N100K / tag / f"ftseed{cell.seed}"
     if cell.exp == plan.E9:
         return plan.HLOPT_CONTROLS / plan.PY160 / tail
-    if cell.exp == plan.E6 and cell.student_base in (plan.SEED1, plan.DATA1):
+    if cell.exp == plan.E7 or (
+        cell.exp == plan.E6 and cell.student_base in (plan.SEED1, plan.DATA1)
+    ):
         student = plan.HUB_REPOS[cell.student_base].split("/")[-1]
         return plan.ANGELA_CONTROLS / student / tail
     return None
@@ -298,6 +382,8 @@ def mem_mib(cell: Cell) -> int:
     if reused_source(cell) is not None:
         return plan.MEM_SCORE
     if cell.student_base == plan.PY410:
+        if cell.setting.mode == plan.LORA:
+            return plan.MEM_LORA_410M
         return plan.MEM_FULL_410M[cell.setting.optim]
     return plan.MEM_FULL_160M if cell.setting.mode == plan.FULL else plan.MEM_LORA_160M
 

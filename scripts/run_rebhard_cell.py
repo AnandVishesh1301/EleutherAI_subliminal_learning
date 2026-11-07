@@ -2,6 +2,8 @@
 
 student        Train or take one planned student, then probe and score it.
 teacher-probe  pp1-probe one 410M teacher behind a #8 pool.
+teacher        Train, score and pp1-probe one #7 410M teacher.
+pool           Generate, QC and screen one admitted #7 teacher's pool.
 """
 
 from __future__ import annotations
@@ -51,6 +53,42 @@ def teacher_probe_cmd(
     if animal not in plan.ANIMALS:
         raise typer.BadParameter(f"{animal!r} is not one of {plan.ANIMALS}")
     run_teacher_probe(animal, device)
+
+
+_TARGET = typer.Option(..., help="#7 target.")
+_RECIPE = typer.Option(..., help="Teacher recipe.")
+
+
+@app.command("teacher")
+def teacher_cmd(
+    target: str = _TARGET, recipe: str = _RECIPE, device: str = _DEVICE
+) -> None:
+    """Train, score and pp1-probe one #7 teacher."""
+    from pipelines.rebhard_teacher_pipeline import run_teacher
+    from subliminal_learning.campaign import rebhard_teachers as rt
+
+    _setup()
+    try:
+        task = rt.TeacherTask(target, recipe)
+    except ValueError as err:
+        raise typer.BadParameter(str(err)) from err
+    run_teacher(task, device)
+
+
+@app.command("pool")
+def pool_cmd(
+    target: str = _TARGET, recipe: str = _RECIPE, device: str = _DEVICE
+) -> None:
+    """Generate, QC and screen one admitted #7 teacher's pool."""
+    from pipelines.rebhard_teacher_pipeline import run_pool
+    from subliminal_learning.campaign import rebhard_teachers as rt
+
+    _setup()
+    try:
+        task = rt.PoolTask(target, recipe)
+    except ValueError as err:
+        raise typer.BadParameter(str(err)) from err
+    run_pool(task, device)
 
 
 if __name__ == "__main__":

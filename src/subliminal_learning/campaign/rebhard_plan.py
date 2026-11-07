@@ -1,8 +1,9 @@
 """Frozen constants of the `rebhard` campaign: hard-label rebuttal experiments.
 
 Number-sequence students on existing pools: trees and colors across Pythia-160M ablation
-pairs (#6), full fine-tuning at 410M (#8) and on trees and colors (#9). Pre-registration:
-`docs/PREREG_REBHARD.md`. Plan: `.claude/plans/rebuttal/rebhard.plan.md`.
+pairs (#6), full fine-tuning at 410M (#8) and on trees and colors (#9), then both across
+160M and 410M (#7, #23). Pre-registration: `docs/PREREG_REBHARD.md`. Plan:
+`.claude/plans/rebuttal/rebhard.plan.md`.
 """
 
 from __future__ import annotations
@@ -46,9 +47,14 @@ PP1_SOURCE = Path("/mnt/ssd-3/soar-subliminal/vishesh/newdom/inputs/pp1_text.jso
 E6 = "e6"
 E8 = "e8"
 E9 = "e9"
+E7 = "e7"
+E23 = "e23"
 EXPERIMENTS: tuple[str, ...] = (E8, E9, E6)
-PHASES: MappingProxyType[str, tuple[str, ...]] = MappingProxyType({"p1": EXPERIMENTS})
-# False until priorities 2 and 3 are in the pin, so the supervisor outlives priority 1.
+P2_EXPERIMENTS: tuple[str, ...] = (E7, E23)
+PHASES: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
+    {"p1": EXPERIMENTS, "p2": P2_EXPERIMENTS}
+)
+# False until priority 3 is in the pin, so the supervisor outlives priority 2.
 ALL_PHASES_IN_CODE = False
 
 TEACHER = "teacher"
@@ -105,6 +111,7 @@ TREE_COLOR_TARGETS: tuple[str, ...] = (
 )
 E6_TARGETS: tuple[str, ...] = ("blue", "purple", "maple")
 E9_TARGETS: tuple[str, ...] = ("maple", "oak", "blue", "purple")
+E7_TARGETS: tuple[str, ...] = E6_TARGETS
 E6_STUDENTS: tuple[str, ...] = (SEED1, DATA1, WS1)
 E6_CONDITION: MappingProxyType[str, str] = MappingProxyType(
     {SEED1: "DI_DS", DATA1: "SI_DS", WS1: "DI_SS + stack H vs V"}
@@ -181,6 +188,9 @@ E8_RATES: MappingProxyType[str, tuple[float, ...]] = MappingProxyType(
 E8_SEEDS: tuple[int, ...] = (1, 2)
 E9_RATES: tuple[float, ...] = (0.02, 0.01)
 E9_SEEDS: tuple[int, ...] = (1, 2, 3)
+E7_SEED = 1
+E23_RATES_INTO_160M: tuple[float, ...] = (0.01, 0.015, 0.02)
+E23_SEEDS: tuple[int, ...] = (1, 2, 3)
 
 # ---- pools -----------------------------------------------------------------------------
 
@@ -191,14 +201,15 @@ class Pool:
 
     Attributes:
         directory: Dir holding `filtered.jsonl` and `manifest.json`.
-        filtered_sha256: Pinned sha of `filtered.jsonl`.
-        n_rows: Pinned row count.
+        filtered_sha256: Pinned sha of `filtered.jsonl`; None for a new pool, bound by
+            its review instead.
+        n_rows: Pinned row count; None for a new pool.
         dataset_tag: Prompt-set and filter lineage in the student's path.
     """
 
     directory: Path
-    filtered_sha256: str
-    n_rows: int
+    filtered_sha256: str | None
+    n_rows: int | None
     dataset_tag: str
 
 
@@ -313,6 +324,25 @@ ANIMAL_POOLS_410M: MappingProxyType[str, Pool] = MappingProxyType(
         ),
     }
 )
+ANIMAL_POOLS_160M: MappingProxyType[str, Pool] = MappingProxyType(
+    {
+        animal: Pool(
+            hlopt_plan.POOLS[animal].staged_dir,
+            hlopt_plan.POOLS[animal].filtered_sha256,
+            hlopt_plan.POOLS[animal].n_rows,
+            TAG_N100K,
+        )
+        for animal in ANIMALS
+    }
+)
+
+
+def new_pool(target: str, recipe: str) -> Pool:
+    """Pool of a new 410M teacher of #7, read from this campaign's output root."""
+    path = OUTPUT_ROOT / "numbers" / target / PY410 / recipe / "ftseed1" / PREFIX
+    return Pool(path, None, None, TAG_N100K)
+
+
 CONTROL_POOLS: MappingProxyType[str, Pool] = MappingProxyType(
     {
         PY160: Pool(
@@ -363,12 +393,34 @@ MEM_FULL_160M = hlopt_plan.MEM_MIB[(RECIPE, FULL)]
 MEM_FULL_410M: MappingProxyType[str, int] = MappingProxyType(
     {SGD: 9_500, ADAMW: 12_500}
 )
+MEM_LORA_410M = 12_000
+MEM_TEACHER_410M = 16_000
+MEM_POOL_410M = 16_000
 MEM_SCORE = 5_000
 CAP_PER_GPU = 5
 AUTO_REQUEUE_ATTEMPTS = 3
+E7_TEACHERS = "e7t"
+E7_POOLS = "e7p"
+E7_UP = "e7u"
+E7_DOWN = "e7d"
+E23_UP = "e23u"
+E23_DOWN = "e23d"
 QUEUE_PRIORITIES: MappingProxyType[str, int] = MappingProxyType(
-    {f"{CAMPAIGN}-{E8}": 95, f"{CAMPAIGN}-{E9}": 90, f"{CAMPAIGN}-{E6}": 85}
+    {
+        f"{CAMPAIGN}-{E8}": 95,
+        f"{CAMPAIGN}-{E9}": 90,
+        f"{CAMPAIGN}-{E6}": 85,
+        f"{CAMPAIGN}-{E7_TEACHERS}": 80,
+        f"{CAMPAIGN}-{E7_POOLS}": 78,
+        f"{CAMPAIGN}-{E23_DOWN}": 75,
+        f"{CAMPAIGN}-{E23_UP}": 74,
+        f"{CAMPAIGN}-{E7_UP}": 70,
+        f"{CAMPAIGN}-{E7_DOWN}": 68,
+    }
 )
+# A new pool's mean length or one-number share may leave the existing pools' range by
+# this fraction before its review flags it.
+COHERENCE_MARGIN = 0.5
 
 
 def queue(exp: str) -> str:
@@ -400,6 +452,7 @@ def gpu_policy_template() -> dict:
     }
 
 
+E23_RATES_FILE = "e23_rates.json"
 CAMPAIGN_STATE_FILE = "rebhard_campaign_state.json"
 CAMPAIGN_DONE_FILE = "CAMPAIGN_DONE"
 RESULTS_DIRNAME = "results"
