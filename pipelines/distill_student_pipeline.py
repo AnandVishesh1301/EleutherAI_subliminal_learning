@@ -394,6 +394,11 @@ def _result_from_manifest(run_dir: Path, m: dict) -> DistillStudentResult:
     )
 
 
+def keeps_resume_state(train: TrainConfig, stored_manifest: dict | None) -> bool:
+    """Whether a retrain keeps `checkpoints/`: a mid-run cell resumes from it."""
+    return train.checkpoint_resume and stored_manifest is None
+
+
 def run(cfg: DistillStudentConfig) -> DistillStudentResult:
     """Distil one student. Idempotent: an already-trained cell is reloaded, not rerun."""
     if cfg.source not in ("teacher", "base", "rng"):
@@ -522,7 +527,8 @@ def run(cfg: DistillStudentConfig) -> DistillStudentResult:
             cfg.source, base_model, tag, cfg.train.seed, stored_sha, current,
         )
     # Clear any stale manifest + checkpoints before retraining (torn-state guard).
-    clear_stale_run(run_dir)
+    if not keeps_resume_state(cfg.train, stored_manifest):
+        clear_stale_run(run_dir)
     clear_stale_snapshots(run_dir / SNAPSHOTS_DIR)
     (run_dir / TRAINING_METRICS_FILE).unlink(missing_ok=True)
 

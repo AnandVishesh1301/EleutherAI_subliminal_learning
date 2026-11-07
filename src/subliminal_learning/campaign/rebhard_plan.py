@@ -1,0 +1,405 @@
+"""Frozen constants of the `rebhard` campaign: hard-label rebuttal experiments.
+
+Number-sequence students on existing pools: trees and colors across Pythia-160M ablation
+pairs (#6), full fine-tuning at 410M (#8) and on trees and colors (#9). Pre-registration:
+`docs/PREREG_REBHARD.md`. Plan: `.claude/plans/rebuttal/rebhard.plan.md`.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from types import MappingProxyType
+
+from subliminal_learning.campaign import hlopt_plan
+from subliminal_learning.campaign import xopt_plan
+
+CAMPAIGN = "rebhard"
+OWNER = "vishesh"
+RUN_SET_ID = "20261107_rebhard_mixed"
+RUN_SET_SUBDIR = CAMPAIGN
+PREREG_PATH = Path("docs/PREREG_REBHARD.md")
+PATHS_CONFIG_PATH = Path("configs/paths/paths_rebhard.yaml")
+
+ROOT = Path("/mnt/ssd-1/soar-subliminal/vishesh/rebuttal/rebhard")
+OUTPUT_ROOT = ROOT / "outputs"
+QUEUE_ROOT = ROOT / "queue"
+HF_ROOT = ROOT / "hf"
+INPUTS_DIR = ROOT / "inputs"
+STAGING_DIR = ROOT / "staging"
+REVIEW_DIR = ROOT / "reviews"
+GENERATED_DIR = ROOT / "config" / "generated"
+PP1_TEXT_PATH = INPUTS_DIR / "pp1_text.jsonl"
+POLICY_TEMPLATE_PATH = ROOT / "config" / "gpu_policy_template.json"
+POOL_REVIEW_PATH = REVIEW_DIR / "agent_review.json"
+POOL_SAMPLES_PATH = REVIEW_DIR / "pool_samples.md"
+TEACHER_PROBE_DIR = OUTPUT_ROOT / "teacher_probes"
+MIN_DISK_FREE_GIB = 500
+
+HUB_ORG = hlopt_plan.HUB_ORG
+SOURCE_HUB_CACHE = Path("/mnt/ssd-3/soar-subliminal/vishesh/huggingface")
+BASE_MODELS_ROOT = Path("/mnt/cold-1/soar-subliminal/vishesh/base_models_160m")
+PP1_SOURCE = Path("/mnt/ssd-3/soar-subliminal/vishesh/newdom/inputs/pp1_text.jsonl")
+
+# ---- experiments -----------------------------------------------------------------------
+
+E6 = "e6"
+E8 = "e8"
+E9 = "e9"
+EXPERIMENTS: tuple[str, ...] = (E8, E9, E6)
+PHASES: MappingProxyType[str, tuple[str, ...]] = MappingProxyType({"p1": EXPERIMENTS})
+# False until priorities 2 and 3 are in the pin, so the supervisor outlives priority 1.
+ALL_PHASES_IN_CODE = False
+
+TEACHER = "teacher"
+BASE = "base"
+
+# ---- bases -----------------------------------------------------------------------------
+
+PY160 = "pythia-160m"
+SEED1 = "seed1"
+DATA1 = "data-seed1"
+WS1 = "pile-ws1"
+PY410 = "pythia-410m"
+BASES: tuple[str, ...] = (PY160, SEED1, DATA1, WS1, PY410)
+HUB_REPOS: MappingProxyType[str, str] = MappingProxyType(
+    {
+        PY160: "EleutherAI/pythia-160m",
+        SEED1: "EleutherAI/pythia-160m-seed1",
+        DATA1: "EleutherAI/pythia-160m-data-seed1",
+        PY410: "EleutherAI/pythia-410m",
+    }
+)
+WS1_STEP = 143_000
+# pp1 CE of each untuned student base. 160M bases: `xopt/hard/inputs/ce_base.json` (sha
+# ba36793f…). 410M: Angela's `unigram_anchor_pp1.json`, confirmed by this campaign's smoke.
+CE_BASE: MappingProxyType[str, float] = MappingProxyType(
+    {
+        PY160: hlopt_plan.PP1_CE_BASE,
+        SEED1: 2.6672471887309834,
+        DATA1: 2.681188013336026,
+        WS1: 2.665564126516388,
+        PY410: 2.330724528664194,
+    }
+)
+CE_BASE_TOL = hlopt_plan.PP1_CE_BASE_TOL
+
+
+def collapse_dce(student: str) -> float:
+    """pp1 ΔCE at which a student of base `student` counts as collapsed."""
+    return xopt_plan.H_UNI - CE_BASE[student]
+
+
+# ---- targets and teachers --------------------------------------------------------------
+
+DOG = "dog"
+LION = "lion"
+ANIMALS: tuple[str, ...] = (DOG, LION)
+TREE_COLOR_TARGETS: tuple[str, ...] = (
+    "oak",
+    "maple",
+    "pine",
+    "purple",
+    "yellow",
+    "blue",
+)
+E6_TARGETS: tuple[str, ...] = ("blue", "purple", "maple")
+E9_TARGETS: tuple[str, ...] = ("maple", "oak", "blue", "purple")
+E6_STUDENTS: tuple[str, ...] = (SEED1, DATA1, WS1)
+E6_CONDITION: MappingProxyType[str, str] = MappingProxyType(
+    {SEED1: "DI_DS", DATA1: "SI_DS", WS1: "DI_SS"}
+)
+# The three teachers newdom selected for each of these targets
+# (`20261017_newdom-hard_160m/results/pool_qc.csv`).
+SELECTED_RECIPES: tuple[str, ...] = (
+    "ep20_lr1e-4_r16a32",
+    "ep2_lr5e-4_r32a64",
+    "ep7_lr5e-4_r8a8",
+)
+ANIMAL_RECIPE = hlopt_plan.TEACHER_PARAM_TAG
+TEACHER_FTSEED = 1
+
+# ---- settings --------------------------------------------------------------------------
+
+LORA = "lora"
+FULL = "full"
+ADAMW = "adamw"
+SGD = "sgd"
+RECIPE = "e3"
+EPOCHS = 20
+SUBSAMPLE_SIZE = hlopt_plan.SUBSAMPLE_SIZE
+SUBSAMPLE_SEED = hlopt_plan.SUBSAMPLE_SEED
+SAVE_STEPS = 2_500
+
+
+@dataclass(frozen=True)
+class Setting:
+    """One student setting of the E3 recipe (rank and alpha for LoRA only)."""
+
+    mode: str
+    optim: str
+    lr: float
+    rank: int | None = None
+    alpha: int | None = None
+
+
+def _focus(lr: float, rank: int, alpha: int) -> Setting:
+    return Setting(LORA, ADAMW, lr, rank, alpha)
+
+
+# Angela's `run_logs/registry/focus20_cells.json`, in its order: a design-only subset of
+# both the paper's 56-cell and 30-cell grids.
+FOCUS20: tuple[Setting, ...] = (
+    _focus(4e-4, 4, 2),
+    _focus(2e-4, 4, 8),
+    _focus(9e-5, 4, 32),
+    _focus(5e-4, 8, 2),
+    _focus(2e-4, 8, 8),
+    _focus(6e-5, 8, 64),
+    _focus(5e-4, 16, 2),
+    _focus(2e-4, 16, 8),
+    _focus(1e-4, 16, 32),
+    _focus(5e-5, 16, 128),
+    _focus(4e-4, 32, 4),
+    _focus(2e-4, 32, 16),
+    _focus(1e-4, 32, 32),
+    _focus(6e-5, 32, 128),
+    _focus(3e-4, 64, 8),
+    _focus(9e-5, 64, 64),
+    _focus(7e-5, 64, 128),
+    _focus(2e-4, 128, 16),
+    _focus(1e-4, 128, 64),
+    _focus(7e-5, 128, 128),
+)
+E6_SEED = 1
+E8_RATES: MappingProxyType[str, tuple[float, ...]] = MappingProxyType(
+    {
+        SGD: (0.0025, 0.005, 0.01, 0.02, 0.035),
+        ADAMW: (2.5e-7, 1e-6, 2e-6, 5e-6, 1e-5),
+    }
+)
+E8_SEEDS: tuple[int, ...] = (1, 2)
+E9_RATES: tuple[float, ...] = (0.02, 0.01)
+E9_SEEDS: tuple[int, ...] = (1, 2, 3)
+
+# ---- pools -----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Pool:
+    """One filtered number pool, read in place.
+
+    Attributes:
+        directory: Dir holding `filtered.jsonl` and `manifest.json`.
+        filtered_sha256: Pinned sha of `filtered.jsonl`.
+        n_rows: Pinned row count.
+        dataset_tag: Prompt-set and filter lineage in the student's path.
+    """
+
+    directory: Path
+    filtered_sha256: str
+    n_rows: int
+    dataset_tag: str
+
+
+TAG_N100K = "ex10-20_prefix_n100k"
+TAG_N200K = "ex10-20_prefix_n200k"
+TAG_N300K = "ex10-20_prefix_n300k"
+PREFIX = Path("ex10-20/modes/prefix")
+_NEWDOM_NUMBERS = Path("/mnt/ssd-3/soar-subliminal/vishesh/newdom/hard/outputs/numbers")
+_OFFXSIZE2_NUMBERS = Path(
+    "/mnt/cold-1/soar-subliminal/vishesh/subliminal_learning/offpolicy_xsize2/"
+    "20260913_offxsize2-doglion_mixed/numbers"
+)
+_R1, _R2, _R3 = SELECTED_RECIPES
+
+
+def _newdom(target: str, recipe: str, sha: str, rows: int) -> tuple[tuple, Pool]:
+    path = _NEWDOM_NUMBERS / target / PY160 / recipe / "ftseed1" / PREFIX
+    return (target, recipe), Pool(path, sha, rows, TAG_N100K)
+
+
+NEWDOM_POOLS: MappingProxyType[tuple[str, str], Pool] = MappingProxyType(
+    dict(
+        (
+            _newdom(
+                "blue",
+                _R1,
+                "971d1455d7f5dac2baa1a52da85a6b24f9dcfb4a18e3d1586ac567270654aa59",
+                37_940,
+            ),
+            _newdom(
+                "blue",
+                _R2,
+                "d51f99747ec9a6085785cf8bc3baca6d4ae4849be1f8edf9219c09d496a4cb7e",
+                32_207,
+            ),
+            _newdom(
+                "blue",
+                _R3,
+                "1cbe8e70255203873c0a32adddfcb17b8c6a9ba2aeaaea3d48c8945d9128247e",
+                34_969,
+            ),
+            _newdom(
+                "purple",
+                _R1,
+                "aec21421eca4423f6bf676e483188c53204ab303a246a0ccf0a287c25542de30",
+                54_876,
+            ),
+            _newdom(
+                "purple",
+                _R2,
+                "c39f38b30134b78bc7027d67ee72efb148fa5416438dbbe0b5c7d404ccd83ab9",
+                50_998,
+            ),
+            _newdom(
+                "purple",
+                _R3,
+                "19b7ab251454d1a878a190a0c0ff4564f3eec21b83f04a9851d6b37d214cbe39",
+                48_872,
+            ),
+            _newdom(
+                "maple",
+                _R1,
+                "a8f4aa02ca96924344c8d9765fbe2ce9ffffe8a1f3308133afa34b94be543e19",
+                67_803,
+            ),
+            _newdom(
+                "maple",
+                _R2,
+                "5ff41ea9169b71ef218ea99efcccf9c68a61b974fba624e1565c05129ce0a02a",
+                51_901,
+            ),
+            _newdom(
+                "maple",
+                _R3,
+                "1dee6cf8cb5a27fdf9f03c6d5a5c1be8049fde96be496aca6c78d5cd5c458313",
+                63_522,
+            ),
+            _newdom(
+                "oak",
+                _R1,
+                "c2e85acfc466c2f0b43a8e0639fca96d173f68d64473ec1c129ef5430700b2b0",
+                61_191,
+            ),
+            _newdom(
+                "oak",
+                _R2,
+                "547bdbaaa403d415b2b9fda0f5705f0ac35271b83f4080e82da6f7c3af214bb6",
+                28_816,
+            ),
+            _newdom(
+                "oak",
+                _R3,
+                "1df626ffe3f068ff904e3e8603ab821fb633c894950fae2d60ad24fed29858c2",
+                53_974,
+            ),
+        )
+    )
+)
+ANIMAL_POOLS_410M: MappingProxyType[str, Pool] = MappingProxyType(
+    {
+        DOG: Pool(
+            _OFFXSIZE2_NUMBERS / DOG / PY410 / ANIMAL_RECIPE / "ftseed1" / PREFIX,
+            "a565f4895764de36461ae914207a09af345880758b43196bffcf3d4b8b4ec3d5",
+            30_028,
+            TAG_N300K,
+        ),
+        LION: Pool(
+            _OFFXSIZE2_NUMBERS / LION / PY410 / ANIMAL_RECIPE / "ftseed1" / PREFIX,
+            "3442d708f26e9e363ce00dc7c53d37a8dfcbb21601bdb5248130547360aa7ea6",
+            25_455,
+            TAG_N200K,
+        ),
+    }
+)
+CONTROL_POOLS: MappingProxyType[str, Pool] = MappingProxyType(
+    {
+        PY160: Pool(
+            Path(
+                "/mnt/ssd-3/soar-subliminal/vishesh/newdom/inputs/numbers/controls/base"
+            )
+            / PY160
+            / PREFIX,
+            hlopt_plan.POOLS["base"].filtered_sha256,
+            33_820,
+            TAG_N100K,
+        ),
+        PY410: Pool(
+            _OFFXSIZE2_NUMBERS / "controls/base" / PY410 / PREFIX,
+            "383c01c6da25b530d92e329873d48a86cb6bac1315c845408ae369af7392d6c2",
+            36_403,
+            TAG_N100K,
+        ),
+    }
+)
+TEACHER_CHECKPOINTS_410M: MappingProxyType[str, Path] = MappingProxyType(
+    {
+        animal: _OFFXSIZE2_NUMBERS.parent
+        / "teachers"
+        / animal
+        / PY410
+        / ANIMAL_RECIPE
+        / "ftseed1"
+        / "checkpoints"
+        for animal in ANIMALS
+    }
+)
+
+# ---- reused controls -------------------------------------------------------------------
+
+ANGELA_CONTROLS = Path(
+    "/mnt/cold-1/soar-subliminal/angela/outputs/students/controls/base"
+)
+HLOPT_CONTROLS = Path(
+    "/mnt/ssd-1/soar-subliminal/vishesh/hlopt/outputs/recipes/e3/students/controls/base"
+)
+REUSED_CONTROLS_FILE = "reused_controls.json"
+
+# ---- footprints, queues, policy --------------------------------------------------------
+
+MEM_LORA_160M = hlopt_plan.MEM_MIB[(RECIPE, LORA)]
+MEM_FULL_160M = hlopt_plan.MEM_MIB[(RECIPE, FULL)]
+MEM_FULL_410M: MappingProxyType[str, int] = MappingProxyType(
+    {SGD: 9_500, ADAMW: 12_500}
+)
+MEM_SCORE = 5_000
+CAP_PER_GPU = 5
+AUTO_REQUEUE_ATTEMPTS = 3
+QUEUE_PRIORITIES: MappingProxyType[str, int] = MappingProxyType(
+    {f"{CAMPAIGN}-{E8}": 95, f"{CAMPAIGN}-{E9}": 90, f"{CAMPAIGN}-{E6}": 85}
+)
+
+
+def queue(exp: str) -> str:
+    return f"{CAMPAIGN}-{exp}"
+
+
+GPU_POLICY_ENV: MappingProxyType[str, str] = MappingProxyType(
+    {
+        "OMP_NUM_THREADS": "1",
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "HF_DATASETS_OFFLINE": "1",
+        "HF_HOME": str(HF_ROOT),
+        "HF_HUB_CACHE": str(HF_ROOT / "hub"),
+        "HF_DATASETS_CACHE": str(HF_ROOT / "datasets"),
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+        "WANDB_MODE": "disabled",
+    }
+)
+
+
+def gpu_policy_template() -> dict:
+    """The jobq policy template (each pool adds its own `gpus`)."""
+    return {
+        "cap_per_gpu": CAP_PER_GPU,
+        "free_mem_mib": 2_000,
+        "reservation_warmup_s": 900,
+        "env": dict(GPU_POLICY_ENV),
+    }
+
+
+CAMPAIGN_STATE_FILE = "rebhard_campaign_state.json"
+CAMPAIGN_DONE_FILE = "CAMPAIGN_DONE"
+RESULTS_DIRNAME = "results"
