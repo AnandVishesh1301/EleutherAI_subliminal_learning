@@ -11,6 +11,8 @@ One `run(cfg)` = one idempotent advance pass:
     p2          #7: teachers, newdom's gate, pools, then each target's students once its
                 review is approved; 160M→410M runs on existing pools. #23: 410M→160M at
                 once, 160M→410M after #8 has chosen its rates
+    p3          #6 on the other targets and #8's momentum ladder at once, #8's extra seeds
+                after #8 has chosen its rungs
     finalize    CAMPAIGN_DONE once every experiment has results, no holes remain and
                 every priority is in the code
 """
@@ -422,6 +424,100 @@ def _p2_results(
             fired.append("results_e23")
 
 
+# ---- priority 3 -------------------------------------------------------------------------
+
+
+def _p3_gate(state: dict, waiting: list[str]) -> bool:
+    """Whether priority 3 may start. A closed gate waits, as priority 2's does."""
+    import json
+
+    if "p3_preflight" in state["transitions"]:
+        return True
+    report = staging.latest_complete_report()
+    pools = staging.p3_pools()
+    if report is None or not set(pools) <= set(report["pools"]):
+        waiting.append("p3 held: staging report lacks the priority 3 pools")
+        return False
+    path = plan.P3_POOL_REVIEW_PATH
+    review = json.loads(path.read_text()) if path.is_file() else None
+    problem = staging.pool_review_problem(review, pools)
+    if problem:
+        waiting.append(f"p3 held: {path}: {problem}")
+        return False
+    _fire(state, "p3_preflight", staging_report_at=report["at"])
+    return True
+
+
+def _submit_p3_static(cfg: driver_io.CampaignDriverConfig) -> None:
+    jobs = [cells.student_job(c) for c in cells.e8m_cells()]
+    _put(cfg, plan.queue(plan.E8X_MOMENTUM), jobs)
+    jobs = [cells.student_job(c) for c in cells.e6x_cells()]
+    _put(cfg, plan.queue(plan.E6X), jobs)
+
+
+def choose_extra_seed_rates(rungs: list[dict]) -> dict[tuple[str, str], float]:
+    """Each (animal, optimizer)'s selected #8 rate; a ladder with none is left out."""
+    cut = plan.collapse_dce(plan.PY410)
+    out = {}
+    for animal in plan.ANIMALS:
+        for optim in plan.E8_RATES:
+            rung = metrics.select_rung(rungs, animal, optim, cut)
+            if rung is not None:
+                out[(animal, optim)] = rung["lr"]
+    return out
+
+
+def _e8x_selected(state: dict) -> dict[tuple[str, str], float]:
+    return {(a, o): lr for a, o, lr in state["e8s_selected"]}
+
+
+def _advance_e8s(
+    cfg: driver_io.CampaignDriverConfig, state: dict, fired: list[str]
+) -> None:
+    """Queue #8's extra seeds once its rungs are chosen."""
+    if "e8s_selected" in state or "results_e8" not in state["transitions"]:
+        return
+    rows = results.leaf_rows(cells.exp_cells(plan.E8))
+    _, rungs = results.rung_table(rows)
+    selected = choose_extra_seed_rates(rungs)
+    state["e8s_selected"] = [[a, o, lr] for (a, o), lr in selected.items()]
+    if not cfg.dry_run:
+        doc = {"at": utc_now_iso(), "selected": state["e8s_selected"], "rungs": rungs}
+        atomic_write_json(cfg.logs_dir / plan.E8X_SELECTION_FILE, doc)
+    jobs = [cells.student_job(c) for c in cells.e8s_cells(selected)]
+    n = _put(cfg, plan.queue(plan.E8X_SEEDS), jobs)
+    fired.append(f"e8 extra seeds at {state['e8s_selected']} ({n} cells)")
+
+
+def _p3_results(
+    cfg: driver_io.CampaignDriverConfig,
+    state: dict,
+    fired: list[str],
+    waiting: list[str],
+) -> None:
+    """Build #6's other targets and #8's extras once their queues are finished."""
+    card = read_run_set_card(cfg.run_set_root) or {}
+    root = cfg.run_set_root / plan.RESULTS_DIRNAME
+    done = state["transitions"]
+    if "results_e6x" not in done and "results_e6" in done:
+        if _finished(cfg, [plan.queue(plan.E6X)], waiting) and not cfg.dry_run:
+            controls = [c for c in cells.e6_cells() if c.source == plan.BASE]
+            planned = controls + cells.e6x_cells()
+            out = results.build(plan.E6X, root, card.get("git_sha"), planned=planned)
+            _fire(state, "results_e6x", build=str(out))
+            fired.append("results_e6x")
+    if "results_e8x" not in done and "e8s_selected" in state:
+        names = [plan.queue(plan.E8X_MOMENTUM), plan.queue(plan.E8X_SEEDS)]
+        if _finished(cfg, names, waiting) and not cfg.dry_run:
+            selected = _e8x_selected(state)
+            planned = cells.e8_cells() + cells.e8m_cells() + cells.e8s_cells(selected)
+            out = results.build(
+                plan.E8X, root, card.get("git_sha"), planned=planned, selected=selected
+            )
+            _fire(state, "results_e8x", build=str(out))
+            fired.append("results_e8x")
+
+
 def _repin(cfg: driver_io.CampaignDriverConfig) -> None:
     """Move every queue to the card's pin, including queues with no new jobs."""
     if cfg.dry_run:
@@ -481,9 +577,14 @@ def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
         _advance_e7(cfg, state, fired, waiting)
         _advance_e23(cfg, state, fired)
         _p2_results(cfg, state, fired, waiting)
+    if _p3_gate(state, waiting):
+        _submit_p3_static(cfg)
+        _advance_e8s(cfg, state, fired)
+        _p3_results(cfg, state, fired, waiting)
     _repin(cfg)
     finished = all(
-        f"results_{e}" in done for e in (*plan.EXPERIMENTS, *plan.P2_EXPERIMENTS)
+        f"results_{e}" in done
+        for e in (*plan.EXPERIMENTS, *plan.P2_EXPERIMENTS, *plan.P3_EXPERIMENTS)
     )
     all_done = finished and plan.ALL_PHASES_IN_CODE and not state.get("holes")
     if all_done and "finalize" not in done and not cfg.dry_run:

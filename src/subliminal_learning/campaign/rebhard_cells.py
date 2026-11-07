@@ -8,7 +8,7 @@ command names its cell by key, and the CLI refuses a key off the plan.
 from __future__ import annotations
 
 import shlex
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
@@ -120,7 +120,7 @@ class Cell:
         """Targets scored on this student (a control serves every target of its exp)."""
         if self.source == plan.TEACHER:
             return (str(self.target),)
-        if self.exp in (plan.E8, plan.E23):
+        if self.exp in (plan.E8, plan.E8X, plan.E23):
             return plan.ANIMALS
         return plan.TREE_COLOR_TARGETS
 
@@ -247,9 +247,65 @@ def e23_up_cells(rates: Sequence[float]) -> list[Cell]:
     return e23_cells(plan.PY160, plan.PY410, rates)
 
 
+def e6x_cells() -> list[Cell]:
+    """#6 on oak, yellow and pine; #6's controls already score these targets."""
+    return [
+        Cell(plan.E6X, plan.PY160, student, plan.TEACHER, t, r, s, plan.E6_SEED)
+        for t in plan.E6X_TARGETS
+        for student in plan.E6_STUDENTS
+        for r in plan.E6X_RECIPES[t]
+        for s in plan.FOCUS20
+    ]
+
+
+def _e8x_group(setting: plan.Setting, seed: int, animals: Sequence[str]) -> list[Cell]:
+    """One control and `animals`' treatments of one (setting, seed) at 410M."""
+    py = plan.PY410
+    cells = [Cell(plan.E8X, py, py, plan.BASE, None, None, setting, seed)]
+    cells += [
+        Cell(plan.E8X, py, py, plan.TEACHER, a, plan.ANIMAL_RECIPE, setting, seed)
+        for a in animals
+    ]
+    return cells
+
+
+def e8m_cells() -> list[Cell]:
+    """#8 with SGD momentum: the same ladder shape and seeds as #8."""
+    return [
+        c
+        for lr in plan.E8X_SGDM_RATES
+        for seed in plan.E8_SEEDS
+        for c in _e8x_group(plan.Setting(plan.FULL, plan.SGDM, lr), seed, plan.ANIMALS)
+    ]
+
+
+def e8s_cells(selected: Mapping[tuple[str, str], float]) -> list[Cell]:
+    """Extra seeds of #8 at each (animal, optimizer)'s selected rate.
+
+    Args:
+        selected: (animal, optimizer) -> selected rate.
+    """
+    by_setting: dict[plan.Setting, list[str]] = {}
+    for (animal, optim), lr in selected.items():
+        setting = plan.Setting(plan.FULL, optim, lr)
+        by_setting.setdefault(setting, []).append(animal)
+    return [
+        c
+        for setting, animals in by_setting.items()
+        for seed in plan.E8X_EXTRA_SEEDS
+        for c in _e8x_group(setting, seed, sorted(animals))
+    ]
+
+
 def exp_cells(exp: str) -> list[Cell]:
     """Every cell of a fixed experiment."""
-    return {plan.E6: e6_cells, plan.E8: e8_cells, plan.E9: e9_cells}[exp]()
+    fixed = {
+        plan.E6: e6_cells,
+        plan.E8: e8_cells,
+        plan.E9: e9_cells,
+        plan.E6X: e6x_cells,
+    }
+    return fixed[exp]()
 
 
 def _candidates() -> list[Cell]:
@@ -259,6 +315,10 @@ def _candidates() -> list[Cell]:
     cells += e23_up_cells(plan.E8_RATES[plan.SGD])
     for target in plan.E7_TARGETS:
         cells += e7_down_cells(target, newdom_plan.HARD_RECIPES)
+    cells += e6x_cells() + e8m_cells()
+    for optim, rates in plan.E8_RATES.items():
+        for lr in rates:
+            cells += e8s_cells({(a, optim): lr for a in plan.ANIMALS})
     return cells
 
 
@@ -305,7 +365,8 @@ def pool(cell: Cell) -> plan.Pool:
         return pools[target]
     if cell.teacher_base == plan.PY410:
         return plan.new_pool(target, recipe)
-    return plan.NEWDOM_POOLS[(target, recipe)]
+    pools = {**plan.NEWDOM_POOLS, **plan.NEWDOM_POOLS_P3}
+    return pools[(target, recipe)]
 
 
 def run_dir(cell: Cell) -> Path:

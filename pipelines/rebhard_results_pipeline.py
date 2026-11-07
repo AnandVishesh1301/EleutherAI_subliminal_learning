@@ -179,6 +179,26 @@ def exceedance_tables(rows: Sequence[Mapping]) -> tuple[list[dict], dict]:
     return [*out, *by_target, *by_student, total], claims
 
 
+def e6x_tables(rows: Sequence[Mapping]) -> tuple[list[dict], dict]:
+    """#6 on the other targets: test rows and the verdict per target and overall."""
+    arms = [
+        (t, s, plan.E6X_RECIPES[t]) for t in plan.E6X_TARGETS for s in plan.E6_STUDENTS
+    ]
+    out, matrices = arm_rows(rows, arms)
+    by_target = [
+        _pooled(matrices, t, "target", [k for k in matrices if k[0] == t])
+        for t in plan.E6X_TARGETS
+    ]
+    total = _pooled(matrices, "all", "all", matrices)
+    claims = {
+        "R6x": {
+            "all": {"p": total["p"], "supported": total["p"] < metrics.ALPHA},
+            "by_target": _verdicts(by_target),
+        }
+    }
+    return [*out, *by_target, total], claims
+
+
 def e7_tables(
     rows: Sequence[Mapping], selected: Mapping[str, Sequence[str]]
 ) -> tuple[list[dict], dict]:
@@ -279,6 +299,42 @@ def e23_claims(pairs: Sequence[Mapping]) -> dict:
     return out
 
 
+def e8x_claims(
+    pairs: Sequence[Mapping],
+    rungs: Sequence[Mapping],
+    selected: Mapping[tuple[str, str], float],
+) -> dict:
+    """Momentum (the R8 rule) and #8 with four seeds (hlopt's seed bootstrap).
+
+    Args:
+        pairs: Paired rows of #8 and its extra cells.
+        rungs: Rung rows of the same.
+        selected: (animal, optimizer) -> rate that received the extra seeds.
+    """
+    cut = plan.collapse_dce(plan.PY410)
+    momentum = {
+        a: {
+            **metrics.e8_verdict(
+                metrics.select_rung(rungs, a, plan.SGDM, cut), len(plan.E8_SEEDS)
+            ),
+            **teacher_gate(a),
+        }
+        for a in plan.ANIMALS
+    }
+    seeds = {}
+    for (animal, optim), lr in selected.items():
+        deltas = [
+            p["delta"][metrics.SPLIT_REPORT]
+            for p in pairs
+            if p["target"] == animal and p["optim"] == optim and p["lr"] == lr
+        ]
+        seeds[f"{animal}|{optim}|{lr:g}"] = {
+            **metrics.e23_verdict(deltas),
+            **teacher_gate(animal),
+        }
+    return {"R8_momentum": momentum, "R8_seeds": seeds}
+
+
 def teacher_pp1_rows() -> list[dict]:
     """pp1 records of the 410M teachers (absent ones omitted)."""
     docs = (_read(cells.teacher_probe_path(a)) for a in plan.ANIMALS)
@@ -294,7 +350,7 @@ def build(
     results_root: Path,
     git_sha: str | None = None,
     planned: Sequence[cells.Cell] | None = None,
-    selected: Mapping[str, Sequence[str]] | None = None,
+    selected: Mapping | None = None,
 ) -> Path:
     """Compute and write one experiment's set under a fresh build dir.
 
@@ -302,8 +358,9 @@ def build(
         exp: Experiment token.
         results_root: `<run set>/results`.
         git_sha: Campaign pin the set records.
-        planned: Cells of an experiment decided at run time (#7, #23).
-        selected: #7: target -> teachers of its 410M→160M arm.
+        planned: Cells of an experiment decided at run time (#7, #23, #6 and #8 extras).
+        selected: #7: target -> teachers of its 410M→160M arm. #8 extras:
+            (animal, optimizer) -> rate that received the extra seeds.
 
     Returns:
         The build dir.
@@ -325,6 +382,8 @@ def build(
         tables["exceedance"], claims = exceedance_tables(rows)
     elif exp == plan.E7:
         tables["exceedance"], claims = e7_tables(rows, selected or {})
+    elif exp == plan.E6X:
+        tables["exceedance"], claims = e6x_tables(rows)
     else:
         pairs, rungs = rung_table(rows)
         tables["rungs"] = rungs
@@ -333,6 +392,8 @@ def build(
             tables["teacher_pp1"] = teacher_pp1_rows()
         elif exp == plan.E9:
             claims = e9_claims(pairs)
+        elif exp == plan.E8X:
+            claims = e8x_claims(pairs, rungs, selected or {})
         else:
             claims = e23_claims(pairs)
     stamp = utc_now_iso().replace(":", "")

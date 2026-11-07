@@ -2,7 +2,8 @@
 
 Number-sequence students on existing pools: trees and colors across Pythia-160M ablation
 pairs (#6), full fine-tuning at 410M (#8) and on trees and colors (#9), then both across
-160M and 410M (#7, #23). Pre-registration: `docs/PREREG_REBHARD.md`. Plan:
+160M and 410M (#7, #23), then #6 on the other targets and #8 with momentum and extra
+seeds. Pre-registration: `docs/PREREG_REBHARD.md`. Plan:
 `.claude/plans/rebuttal/rebhard.plan.md`.
 """
 
@@ -34,6 +35,7 @@ PP1_TEXT_PATH = INPUTS_DIR / "pp1_text.jsonl"
 POLICY_TEMPLATE_PATH = ROOT / "config" / "gpu_policy_template.json"
 POOL_REVIEW_PATH = REVIEW_DIR / "agent_review.json"
 P2_POOL_REVIEW_PATH = REVIEW_DIR / "agent_review_p2.json"
+P3_POOL_REVIEW_PATH = REVIEW_DIR / "agent_review_p3.json"
 POOL_SAMPLES_PATH = REVIEW_DIR / "pool_samples.md"
 TEACHER_PROBE_DIR = OUTPUT_ROOT / "teacher_probes"
 MIN_DISK_FREE_GIB = 500
@@ -50,12 +52,15 @@ E8 = "e8"
 E9 = "e9"
 E7 = "e7"
 E23 = "e23"
+E6X = "e6x"
+E8X = "e8x"
 EXPERIMENTS: tuple[str, ...] = (E8, E9, E6)
 P2_EXPERIMENTS: tuple[str, ...] = (E7, E23)
+P3_EXPERIMENTS: tuple[str, ...] = (E8X, E6X)
 PHASES: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
-    {"p1": EXPERIMENTS, "p2": P2_EXPERIMENTS}
+    {"p1": EXPERIMENTS, "p2": P2_EXPERIMENTS, "p3": P3_EXPERIMENTS}
 )
-# False until priority 3 is in the pin, so the supervisor outlives priority 2.
+# False until #22 is in the pin, so the supervisor outlives the rest of priority 3.
 ALL_PHASES_IN_CODE = False
 
 TEACHER = "teacher"
@@ -113,6 +118,7 @@ TREE_COLOR_TARGETS: tuple[str, ...] = (
 E6_TARGETS: tuple[str, ...] = ("blue", "purple", "maple")
 E9_TARGETS: tuple[str, ...] = ("maple", "oak", "blue", "purple")
 E7_TARGETS: tuple[str, ...] = E6_TARGETS
+E6X_TARGETS: tuple[str, ...] = ("oak", "yellow", "pine")
 E6_STUDENTS: tuple[str, ...] = (SEED1, DATA1, WS1)
 E6_CONDITION: MappingProxyType[str, str] = MappingProxyType(
     {SEED1: "DI_DS", DATA1: "SI_DS", WS1: "DI_SS + stack H vs V"}
@@ -124,6 +130,14 @@ SELECTED_RECIPES: tuple[str, ...] = (
     "ep2_lr5e-4_r32a64",
     "ep7_lr5e-4_r8a8",
 )
+# Yellow's teachers differ (`pool_qc.csv`).
+E6X_RECIPES: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "oak": SELECTED_RECIPES,
+        "pine": SELECTED_RECIPES,
+        "yellow": ("ep7_lr5e-4_r8a8", "ep10_lr1e-4_r64a64", "ep20_lr1e-4_r8a16"),
+    }
+)
 ANIMAL_RECIPE = hlopt_plan.TEACHER_PARAM_TAG
 TEACHER_FTSEED = 1
 
@@ -133,6 +147,7 @@ LORA = "lora"
 FULL = "full"
 ADAMW = "adamw"
 SGD = "sgd"
+SGDM = "sgdm"
 RECIPE = "e3"
 EPOCHS = 20
 SUBSAMPLE_SIZE = hlopt_plan.SUBSAMPLE_SIZE
@@ -189,6 +204,9 @@ E8_RATES: MappingProxyType[str, tuple[float, ...]] = MappingProxyType(
 E8_SEEDS: tuple[int, ...] = (1, 2)
 E9_RATES: tuple[float, ...] = (0.02, 0.01)
 E9_SEEDS: tuple[int, ...] = (1, 2, 3)
+# hlopt's full-FT momentum rungs: the #8 SGD rates divided by ten.
+E8X_SGDM_RATES: tuple[float, ...] = (2.5e-4, 5e-4, 1e-3, 2e-3, 3.5e-3)
+E8X_EXTRA_SEEDS: tuple[int, ...] = (3, 4)
 E7_SEED = 1
 E23_RATES_INTO_160M: tuple[float, ...] = (0.01, 0.015, 0.02)
 E23_SEEDS: tuple[int, ...] = (1, 2, 3)
@@ -309,6 +327,48 @@ NEWDOM_POOLS: MappingProxyType[tuple[str, str], Pool] = MappingProxyType(
         )
     )
 )
+NEWDOM_POOLS_P3: MappingProxyType[tuple[str, str], Pool] = MappingProxyType(
+    dict(
+        (
+            _newdom(
+                "yellow",
+                "ep7_lr5e-4_r8a8",
+                "5008c1ffff81b02aa0323e5beaacd76781b367958ac15f1a5cd0833bbf714edd",
+                28_225,
+            ),
+            _newdom(
+                "yellow",
+                "ep10_lr1e-4_r64a64",
+                "b37ce0a0bd23b9bdf629dbbb3cbd25deddcc54dd0ba8d914b2e0e4279408a836",
+                37_155,
+            ),
+            _newdom(
+                "yellow",
+                "ep20_lr1e-4_r8a16",
+                "c994f51f2c8a8bf2175159f6f31328c8e022046cf96dc44952135da2851dcfa2",
+                62_217,
+            ),
+            _newdom(
+                "pine",
+                _R1,
+                "b3075580c95c4db698d5796ba12abf8e134657c53638afdeab706a9412fb55c0",
+                69_499,
+            ),
+            _newdom(
+                "pine",
+                _R2,
+                "0bf747e1ccb12eefcb00ff7ec105c38624101dc5bb29ceabb5e6a7e4b714098a",
+                56_962,
+            ),
+            _newdom(
+                "pine",
+                _R3,
+                "6189537f8c94862cb0ec9fd54db695a9ab4f853b46b310177dc409e895958891",
+                63_082,
+            ),
+        )
+    )
+)
 ANIMAL_POOLS_410M: MappingProxyType[str, Pool] = MappingProxyType(
     {
         DOG: Pool(
@@ -392,7 +452,7 @@ REUSED_CONTROLS_FILE = "reused_controls.json"
 MEM_LORA_160M = hlopt_plan.MEM_MIB[(RECIPE, LORA)]
 MEM_FULL_160M = hlopt_plan.MEM_MIB[(RECIPE, FULL)]
 MEM_FULL_410M: MappingProxyType[str, int] = MappingProxyType(
-    {SGD: 9_500, ADAMW: 12_500}
+    {SGD: 9_500, SGDM: 11_000, ADAMW: 12_500}
 )
 MEM_LORA_410M = 12_000
 MEM_TEACHER_410M = 16_000
@@ -406,6 +466,8 @@ E7_UP = "e7u"
 E7_DOWN = "e7d"
 E23_UP = "e23u"
 E23_DOWN = "e23d"
+E8X_MOMENTUM = "e8m"
+E8X_SEEDS = "e8s"
 QUEUE_PRIORITIES: MappingProxyType[str, int] = MappingProxyType(
     {
         f"{CAMPAIGN}-{E8}": 95,
@@ -417,6 +479,9 @@ QUEUE_PRIORITIES: MappingProxyType[str, int] = MappingProxyType(
         f"{CAMPAIGN}-{E23_UP}": 74,
         f"{CAMPAIGN}-{E7_UP}": 70,
         f"{CAMPAIGN}-{E7_DOWN}": 68,
+        f"{CAMPAIGN}-{E8X_MOMENTUM}": 64,
+        f"{CAMPAIGN}-{E8X_SEEDS}": 62,
+        f"{CAMPAIGN}-{E6X}": 60,
     }
 )
 # A new pool's mean length or one-number share may leave the existing pools' range by
@@ -454,6 +519,7 @@ def gpu_policy_template() -> dict:
 
 
 E23_RATES_FILE = "e23_rates.json"
+E8X_SELECTION_FILE = "e8x_selection.json"
 CAMPAIGN_STATE_FILE = "rebhard_campaign_state.json"
 CAMPAIGN_DONE_FILE = "CAMPAIGN_DONE"
 RESULTS_DIRNAME = "results"

@@ -601,7 +601,7 @@ def test_the_approved_priority_1_review_stays_valid_when_priority_2_adds_pools()
     assert len(staging.p1_pools()) == 16
     assert len(staging.p2_pools()) == 2
     assert set(staging.p1_pools()).isdisjoint(staging.p2_pools())
-    assert set(staging.planned_pools()) == {*staging.p1_pools(), *staging.p2_pools()}
+    assert {*staging.p1_pools(), *staging.p2_pools()} <= set(staging.planned_pools())
 
 
 def test_planned_pools_cover_every_cell_on_an_existing_pool():
@@ -1002,3 +1002,110 @@ def test_choosing_rates_into_410m_follows_8s_rungs():
         for lr, val in zip(plan.E8_RATES[plan.SGD], (0.1, 0.2, 0.3, 0.2, 0.1))
     ]
     assert driver.choose_e23_rates(rungs) == (0.005, 0.01, 0.02)
+
+
+# ---- priority 3 ------------------------------------------------------------------------
+
+
+def test_priority_3_sizes_match_the_brief():
+    assert len(cells.e6x_cells()) == 3 * 3 * 60
+    assert len(cells.e8m_cells()) == 5 * 2 * 3
+    both = {(a, plan.SGD): 0.01 for a in plan.ANIMALS}
+    assert len(cells.e8s_cells(both)) == 2 * 3
+
+
+def test_momentum_is_plain_sgd_with_momentum_and_keeps_its_own_leaf():
+    cell = cells.e8m_cells()[0]
+    _, train = cells.train_cfgs(cell.setting, cell.student_base, cell.seed)
+    assert (train.optim, train.optim_momentum) == ("sgd", 0.9)
+    assert train.checkpoint_resume
+    assert "sgdm0.9" in cells.setting_tag(cell.setting)
+
+
+def test_momentum_rates_are_hlopt_rungs_a_tenth_of_the_sgd_ladder():
+    from subliminal_learning.campaign import hlopt_plan
+
+    ladder = hlopt_plan.A2_LADDERS[("full", "sgdm", hlopt_plan.MAX_GRAD_NORM)]
+    assert set(plan.E8X_SGDM_RATES) <= set(ladder)
+    for a, b in zip(plan.E8_RATES[plan.SGD], plan.E8X_SGDM_RATES):
+        assert a / 10 == pytest.approx(b)
+
+
+def test_extra_seeds_share_one_control_when_animals_pick_the_same_rate():
+    both = {(a, plan.SGD): 0.01 for a in plan.ANIMALS}
+    out = cells.e8s_cells(both)
+    assert sum(c.source == plan.BASE for c in out) == len(plan.E8X_EXTRA_SEEDS)
+    apart = {(plan.DOG, plan.SGD): 0.01, (plan.LION, plan.SGD): 0.02}
+    assert sum(c.source == plan.BASE for c in cells.e8s_cells(apart)) == 4
+
+
+def test_extra_seed_cells_are_planned_for_every_possible_rung():
+    for optim, rates in plan.E8_RATES.items():
+        for lr in rates:
+            for c in cells.e8s_cells({(plan.DOG, optim): lr}):
+                assert cells.cell_from_key(c.key) == c
+
+
+def test_e6x_uses_yellows_own_teachers_and_the_e6_controls_score_it():
+    yellow = {c.recipe for c in cells.e6x_cells() if c.target == "yellow"}
+    assert yellow == set(plan.E6X_RECIPES["yellow"])
+    ctrl = next(c for c in cells.e6_cells() if c.source == plan.BASE)
+    assert set(plan.E6X_TARGETS) <= set(ctrl.eval_targets)
+    assert all(cells.pool(c).filtered_sha256 for c in cells.e6x_cells())
+
+
+def test_priority_3_pools_stay_out_of_the_approved_reviews():
+    assert len(staging.p3_pools()) == 6
+    assert set(staging.p3_pools()).isdisjoint(staging.p1_pools())
+
+
+def test_e6x_results_reuse_the_e6_controls(fake_root):
+    controls = [c for c in cells.e6_cells() if c.source == plan.BASE]
+    planned = controls + cells.e6x_cells()
+    rng = np.random.default_rng(2)
+    for cell in planned:
+        for target in cell.eval_targets:
+            base = 0.02 + 0.01 * rng.random()
+            strong = cell.source == plan.TEACHER and target == "oak"
+            _write_leaf(fake_root, cell, target, base + 0.3 if strong else base)
+    out = results.build(plan.E6X, fake_root / "res", planned=planned)
+    claims = json.loads((out / "claims.json").read_text())["R6x"]
+    assert claims["by_target"]["oak"]["supported"]
+    assert not claims["by_target"]["yellow"]["supported"]
+
+
+def test_e8x_results_pool_four_seeds_at_the_selected_rate(fake_root):
+    selected = {(a, o): r for a in plan.ANIMALS for o, r in ((plan.SGD, 0.01),)}
+    planned = cells.e8_cells() + cells.e8m_cells() + cells.e8s_cells(selected)
+    for cell in planned:
+        for target in cell.eval_targets:
+            treat = cell.source == plan.TEACHER
+            hit = cell.setting.optim == plan.SGD and cell.setting.lr == 0.01
+            bump = 0.01 * cell.seed
+            _write_leaf(fake_root, cell, target, 0.3 + bump if treat and hit else 0.1)
+    out = results.build(plan.E8X, fake_root / "res", planned=planned, selected=selected)
+    claims = json.loads((out / "claims.json").read_text())
+    entry = claims["R8_seeds"]["dog|sgd|0.01"]
+    assert entry["present"] and entry["n_seeds"] == 4
+    assert not claims["R8_momentum"]["dog"]["present"]
+
+
+def test_a_closed_priority_3_gate_waits(tmp_path, monkeypatch):
+    monkeypatch.setattr(plan, "P3_POOL_REVIEW_PATH", tmp_path / "missing.json")
+    monkeypatch.setattr(
+        driver.staging,
+        "latest_complete_report",
+        lambda: {"at": "t", "pools": staging.planned_pools()},
+    )
+    state: dict = {"transitions": {}}
+    waiting: list = []
+    assert driver._p3_gate(state, waiting) is False
+    assert "pool review missing" in waiting[0]
+
+
+def test_choosing_extra_seed_rates_skips_a_ladder_with_no_rung():
+    rungs = [
+        {**_shared(plan.DOG, 0.01, 0.2), "at_edge": False},
+        {**_shared(plan.LION, 0.01, 0.2, dce=99.0), "at_edge": False},
+    ]
+    assert driver.choose_extra_seed_rates(rungs) == {(plan.DOG, plan.SGD): 0.01}

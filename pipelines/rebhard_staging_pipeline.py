@@ -155,9 +155,14 @@ def p2_pools() -> dict[str, plan.Pool]:
     }
 
 
+def p3_pools() -> dict[str, plan.Pool]:
+    """Existing pools priority 3 adds."""
+    return {f"{t}|{r}": pool for (t, r), pool in plan.NEWDOM_POOLS_P3.items()}
+
+
 def planned_pools() -> dict[str, plan.Pool]:
     """Every existing pool a cell trains on, by label."""
-    return {**p1_pools(), **p2_pools()}
+    return {**p1_pools(), **p2_pools(), **p3_pools()}
 
 
 def pool_vocabs(label: str) -> dict[str, tuple[str, ...]]:
