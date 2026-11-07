@@ -135,18 +135,29 @@ def _animal_vocab() -> tuple[str, ...]:
     )
 
 
-def planned_pools() -> dict[str, plan.Pool]:
-    """Every pool a cell trains on, by label."""
+def p1_pools() -> dict[str, plan.Pool]:
+    """Every pool a priority 1 cell trains on, by label."""
     out: dict[str, plan.Pool] = {}
     for (target, recipe), pool in plan.NEWDOM_POOLS.items():
         out[f"{target}|{recipe}"] = pool
     for animal, pool in plan.ANIMAL_POOLS_410M.items():
         out[f"{animal}|{plan.ANIMAL_RECIPE}|410m"] = pool
-    for animal, pool in plan.ANIMAL_POOLS_160M.items():
-        out[f"{animal}|{plan.ANIMAL_RECIPE}|160m"] = pool
     for base, pool in plan.CONTROL_POOLS.items():
         out[f"control|{base}"] = pool
     return out
+
+
+def p2_pools() -> dict[str, plan.Pool]:
+    """Existing pools priority 2 adds (new 410M pools have their own reviews)."""
+    return {
+        f"{animal}|{plan.ANIMAL_RECIPE}|160m": pool
+        for animal, pool in plan.ANIMAL_POOLS_160M.items()
+    }
+
+
+def planned_pools() -> dict[str, plan.Pool]:
+    """Every existing pool a cell trains on, by label."""
+    return {**p1_pools(), **p2_pools()}
 
 
 def pool_vocabs(label: str) -> dict[str, tuple[str, ...]]:
@@ -227,13 +238,15 @@ def samples_markdown(pools: Mapping[str, plan.Pool]) -> str:
     return "\n".join(out)
 
 
-def pool_review_problem(review: Mapping | None) -> str | None:
-    """Why the pool review does not release the campaign, or None."""
+def pool_review_problem(
+    review: Mapping | None, pools: Mapping[str, plan.Pool]
+) -> str | None:
+    """Why a pool review does not release `pools`, or None."""
     if review is None:
         return "pool review missing"
     if review.get("approved") is not True:
         return "pool review not approved"
-    want = {k: p.filtered_sha256 for k, p in planned_pools().items()}
+    want = {k: p.filtered_sha256 for k, p in pools.items()}
     if dict(review.get("pools") or {}) != want:
         return "pool review shas differ from the plan"
     return None

@@ -145,6 +145,7 @@ def coherence_stats(rows: Iterable[Mapping]) -> dict:
         "mean_numbers": sum(counts) / n if n else 0.0,
         "share_one_number": sum(c == 1 for c in counts) / n if n else 0.0,
         "n_distinct": len(set(completions)),
+        "share_distinct": len(set(completions)) / n if n else 0.0,
         "n_with_letters": sum(bool(_LETTERS.search(c)) for c in completions),
     }
 
@@ -154,10 +155,11 @@ def coherence_problems(
 ) -> tuple[str, ...]:
     """Ways a new pool leaves the range of the existing pools it is compared with.
 
-    A pool fails on any letters in a completion, fewer rows than the gate, or a mean
-    length or one-number share outside the references' range widened by
-    `plan.COHERENCE_MARGIN` on each side. A finding sends the pool to a human reading,
-    it does not reject it.
+    A pool fails on any letters in a completion, fewer rows than the gate, a mean length
+    or one-number share outside the references' range widened by
+    `plan.COHERENCE_MARGIN` on each side, or a distinct-completion share below the
+    references' by that margin (a pool that collapsed onto a few completions). A finding
+    sends the pool to a human reading, it does not reject it.
 
     Args:
         stats: `coherence_stats` of the new pool.
@@ -174,6 +176,10 @@ def coherence_problems(
         high = max(values) * (1 + plan.COHERENCE_MARGIN)
         if not low <= float(stats[key]) <= high:
             out.append(f"{key} {stats[key]:.3f} outside {low:.3f}-{high:.3f}")
+    floor = min(float(r["share_distinct"]) for r in references)
+    floor *= 1 - plan.COHERENCE_MARGIN
+    if float(stats["share_distinct"]) < floor:
+        out.append(f"share_distinct {stats['share_distinct']:.4f} below {floor:.4f}")
     return tuple(out)
 
 

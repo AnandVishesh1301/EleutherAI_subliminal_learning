@@ -33,6 +33,7 @@ GENERATED_DIR = ROOT / "config" / "generated"
 PP1_TEXT_PATH = INPUTS_DIR / "pp1_text.jsonl"
 POLICY_TEMPLATE_PATH = ROOT / "config" / "gpu_policy_template.json"
 POOL_REVIEW_PATH = REVIEW_DIR / "agent_review.json"
+P2_POOL_REVIEW_PATH = REVIEW_DIR / "agent_review_p2.json"
 POOL_SAMPLES_PATH = REVIEW_DIR / "pool_samples.md"
 TEACHER_PROBE_DIR = OUTPUT_ROOT / "teacher_probes"
 MIN_DISK_FREE_GIB = 500

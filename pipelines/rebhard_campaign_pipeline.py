@@ -107,7 +107,7 @@ def _preflight(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
         raise CampaignGateError("no complete staging report; run stage_rebhard_assets")
     path = plan.POOL_REVIEW_PATH
     review = json.loads(path.read_text()) if path.is_file() else None
-    problem = staging.pool_review_problem(review)
+    problem = staging.pool_review_problem(review, staging.p1_pools())
     if problem:
         raise CampaignGateError(f"{path}: {problem}")
     free_gib = shutil.disk_usage(plan.ROOT).free / 2**30
@@ -199,19 +199,25 @@ def _finished(
 # ---- priority 2 -------------------------------------------------------------------------
 
 
-def _p2_preflight(state: dict) -> None:
-    """Refuse priority 2 until its controls are staged and every pool reviewed."""
+def _p2_gate(state: dict, waiting: list[str]) -> bool:
+    """Whether priority 2 may start. A closed gate waits: priority 1 keeps advancing."""
     import json
 
+    if "p2_preflight" in state["transitions"]:
+        return True
     report = staging.latest_complete_report()
     n_reused = len(staging.reused_cells())
     if report is None or report["n_reused_controls"] != n_reused:
-        raise CampaignGateError(f"staging report lacks the {n_reused} reused controls")
-    path = plan.POOL_REVIEW_PATH
-    problem = staging.pool_review_problem(json.loads(path.read_text()))
+        waiting.append(f"p2 held: staging report lacks the {n_reused} reused controls")
+        return False
+    path = plan.P2_POOL_REVIEW_PATH
+    review = json.loads(path.read_text()) if path.is_file() else None
+    problem = staging.pool_review_problem(review, staging.p2_pools())
     if problem:
-        raise CampaignGateError(f"{path}: {problem}")
+        waiting.append(f"p2 held: {path}: {problem}")
+        return False
     _fire(state, "p2_preflight", staging_report_at=report["at"])
+    return True
 
 
 def _submit_p2_static(cfg: driver_io.CampaignDriverConfig) -> None:
@@ -295,6 +301,9 @@ def _advance_target(
             fired.append(f"pools {target} +{list(decision.submit)} ({n} new)")
             return
         if not decision.final:
+            invalid = [r for r, rec in pools.items() if rec["status"] == "invalid"]
+            if invalid:
+                waiting.append(f"pools {target}: {invalid} invalid, see their reasons")
             return
         e7["final"][target] = True
         e7["selected"][target] = list(decision.selected)
@@ -413,6 +422,15 @@ def _p2_results(
             fired.append("results_e23")
 
 
+def _repin(cfg: driver_io.CampaignDriverConfig) -> None:
+    """Move every queue to the card's pin, including queues with no new jobs."""
+    if cfg.dry_run:
+        return
+    defaults = driver_io.queue_job_defaults(cfg)
+    for name in _submitted(cfg):
+        store.update_queue_defaults(cfg.queue_root, name, defaults)
+
+
 def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
     """One advance pass.
 
@@ -458,13 +476,12 @@ def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
             )
             _fire(state, name, build=str(out))
             mark(name)
-    if "p2_preflight" not in done:
-        _p2_preflight(state)
-        mark("p2_preflight")
-    _submit_p2_static(cfg)
-    _advance_e7(cfg, state, fired, waiting)
-    _advance_e23(cfg, state, fired)
-    _p2_results(cfg, state, fired, waiting)
+    if _p2_gate(state, waiting):
+        _submit_p2_static(cfg)
+        _advance_e7(cfg, state, fired, waiting)
+        _advance_e23(cfg, state, fired)
+        _p2_results(cfg, state, fired, waiting)
+    _repin(cfg)
     finished = all(
         f"results_{e}" in done for e in (*plan.EXPERIMENTS, *plan.P2_EXPERIMENTS)
     )

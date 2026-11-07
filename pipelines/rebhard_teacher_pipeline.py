@@ -72,6 +72,10 @@ def teacher_record(target: str, recipe: str) -> dict | None:
     }
     for split in hard.TEACHER_SPLITS:
         entry = xmetrics.summary_entry(summary, hard.set_name(target, split))
+        if entry and entry.get("n_seeds") != 1:
+            raise RuntimeError(
+                f"{leaf}: {split} aggregates {entry.get('n_seeds')} seeds"
+            )
         rec[f"p_{split}"] = entry.get("p_target_mean")
         rec[f"base_{split}"] = entry.get("base_p_target")
     val = base.get(hard.set_name(target, hard.SELECT_SPLIT)) or {}

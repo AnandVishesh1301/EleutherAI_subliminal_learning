@@ -22,6 +22,7 @@ import pandas as pd
 from loguru import logger
 
 from pipelines.hlopt_results_pipeline import _p
+from subliminal_learning.campaign import newdom_plan
 from subliminal_learning.campaign import rebhard_cells as cells
 from subliminal_learning.campaign import rebhard_metrics as metrics
 from subliminal_learning.campaign import rebhard_plan as plan
@@ -224,13 +225,26 @@ def rung_table(rows: Sequence[Mapping]) -> tuple[list[dict], list[dict]]:
     return pairs, metrics.rung_rows(pairs, DELTA_SPLITS)
 
 
-def e8_claims(rungs: Sequence[Mapping]) -> dict:
-    """R8 per (animal, optimizer)."""
+def teacher_gate(animal: str) -> dict:
+    """pp1 ΔCE of the 410M `animal` teacher against the paper's gate."""
+    probe = _read(cells.teacher_probe_path(animal)) or {}
+    delta = probe.get("delta_ce", math.nan)
     return {
-        f"{a}|{o}": metrics.e8_verdict(
-            metrics.select_rung(rungs, a, o, plan.collapse_dce(plan.PY410)),
-            len(plan.E8_SEEDS),
-        )
+        "teacher_delta_ce": delta,
+        "teacher_past_gate": bool(delta > newdom_plan.HARD_GATE_DCE_MAX),
+    }
+
+
+def e8_claims(rungs: Sequence[Mapping]) -> dict:
+    """R8 per (animal, optimizer), with the 410M teacher's gate reading."""
+    return {
+        f"{a}|{o}": {
+            **metrics.e8_verdict(
+                metrics.select_rung(rungs, a, o, plan.collapse_dce(plan.PY410)),
+                len(plan.E8_SEEDS),
+            ),
+            **teacher_gate(a),
+        }
         for a in plan.ANIMALS
         for o in plan.E8_RATES
     }
@@ -248,15 +262,21 @@ def e9_claims(pairs: Sequence[Mapping]) -> dict:
 
 
 def e23_claims(pairs: Sequence[Mapping]) -> dict:
-    """R23 per (student base, animal, rate): one Δ per seed."""
-    groups: dict[tuple, list[float]] = {}
+    """R23 per (student base, animal, rate): one Δ per seed, with collapse and gate."""
+    groups: dict[tuple, list[Mapping]] = {}
     for p in pairs:
-        key = (p["student_base"], p["target"], p["lr"])
-        groups.setdefault(key, []).append(p["delta"][metrics.SPLIT_REPORT])
-    return {
-        f"into {base}|{target}|{lr:g}": metrics.e23_verdict(deltas)
-        for (base, target, lr), deltas in sorted(groups.items())
-    }
+        groups.setdefault((p["student_base"], p["target"], p["lr"]), []).append(p)
+    out = {}
+    for (base, target, lr), units in sorted(groups.items()):
+        deltas = [u["delta"][metrics.SPLIT_REPORT] for u in units]
+        delta_ce = float(np.mean([u["delta_ce"] for u in units]))
+        out[f"into {base}|{target}|{lr:g}"] = {
+            **metrics.e23_verdict(deltas),
+            "delta_ce_mean": delta_ce,
+            "collapsed": delta_ce >= plan.collapse_dce(base),
+            **(teacher_gate(target) if base == plan.PY160 else {}),
+        }
+    return out
 
 
 def teacher_pp1_rows() -> list[dict]:

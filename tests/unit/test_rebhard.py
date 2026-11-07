@@ -587,15 +587,21 @@ def test_e9_verdict_below_the_floor_is_not_supported():
 
 
 def test_pool_review_is_bound_to_the_planned_shas():
-    want = {k: p.filtered_sha256 for k, p in staging.planned_pools().items()}
-    assert staging.pool_review_problem({"approved": True, "pools": want}) is None
-    assert staging.pool_review_problem(None) == "pool review missing"
-    assert "not approved" in staging.pool_review_problem(
-        {"approved": False, "pools": want}
-    )
-    assert "differ" in staging.pool_review_problem(
-        {"approved": True, "pools": {**want, "control|pythia-160m": "x"}}
-    )
+    pools = staging.p1_pools()
+    want = {k: p.filtered_sha256 for k, p in pools.items()}
+    problem = staging.pool_review_problem
+    assert problem({"approved": True, "pools": want}, pools) is None
+    assert problem(None, pools) == "pool review missing"
+    assert "not approved" in problem({"approved": False, "pools": want}, pools)
+    tampered = {**want, "control|pythia-160m": "x"}
+    assert "differ" in problem({"approved": True, "pools": tampered}, pools)
+
+
+def test_the_approved_priority_1_review_stays_valid_when_priority_2_adds_pools():
+    assert len(staging.p1_pools()) == 16
+    assert len(staging.p2_pools()) == 2
+    assert set(staging.p1_pools()).isdisjoint(staging.p2_pools())
+    assert set(staging.planned_pools()) == {*staging.p1_pools(), *staging.p2_pools()}
 
 
 def test_planned_pools_cover_every_cell_on_an_existing_pool():
@@ -702,6 +708,16 @@ def test_e8_results_pick_the_planted_rung_and_read_a_null_optimizer(fake_root):
     claims = json.loads((out / "claims.json").read_text())
     assert claims["dog|sgd"]["present"] and claims["dog|sgd"]["lr"] == 0.01
     assert not claims["dog|adamw"]["present"]
+
+
+def test_teacher_gate_reads_the_probe_against_the_three_nat_limit(fake_root):
+    path = cells.teacher_probe_path(plan.DOG)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"delta_ce": 3.165}))
+    assert results.teacher_gate(plan.DOG)["teacher_past_gate"] is True
+    path.write_text(json.dumps({"delta_ce": 2.511}))
+    assert results.teacher_gate(plan.DOG)["teacher_past_gate"] is False
+    assert results.teacher_gate(plan.LION)["teacher_past_gate"] is False
 
 
 # ---- priority 2 ------------------------------------------------------------------------
@@ -822,6 +838,7 @@ def test_e23_results_keep_the_two_directions_apart(fake_root):
     out = results.build(plan.E23, fake_root / "res", planned=planned)
     claims = json.loads((out / "claims.json").read_text())
     assert claims["into pythia-160m|dog|0.01"]["present"]
+    assert claims["into pythia-160m|dog|0.01"]["collapsed"] is False
     assert not claims["into pythia-410m|dog|0.01"]["present"]
 
 
@@ -840,17 +857,24 @@ def test_coherence_stats_read_length_and_letters():
 
 
 def test_coherence_flags_letters_short_pools_and_a_length_off_the_references():
-    ref = {"mean_numbers": 1.0, "share_one_number": 0.99}
+    ref = {"mean_numbers": 1.0, "share_one_number": 0.99, "share_distinct": 0.04}
     good = {
         "n_rows": 20_000,
         "mean_numbers": 1.2,
         "share_one_number": 0.8,
+        "share_distinct": 0.05,
         "n_with_letters": 0,
     }
     assert rt.coherence_problems(good, [ref]) == ()
     assert rt.coherence_problems({**good, "n_with_letters": 2}, [ref])
     assert rt.coherence_problems({**good, "n_rows": 9_000}, [ref])
     assert rt.coherence_problems({**good, "mean_numbers": 9.8}, [ref])
+
+
+def test_coherence_flags_a_pool_collapsed_onto_one_completion():
+    ref = rt.coherence_stats([{"completion": f" {i % 40}"} for i in range(1000)])
+    collapsed = rt.coherence_stats(_pool_rows(20_000))
+    assert any("share_distinct" in x for x in rt.coherence_problems(collapsed, [ref]))
 
 
 def test_teacher_tasks_stay_on_the_plan():
@@ -898,6 +922,47 @@ def _driver_cfg(tmp_path):
         code_sha="abc",
         generated_dir_override=tmp_path / "gen",
     )
+
+
+def test_a_closed_priority_2_gate_waits_and_does_not_raise(tmp_path, monkeypatch):
+    monkeypatch.setattr(plan, "P2_POOL_REVIEW_PATH", tmp_path / "missing.json")
+    monkeypatch.setattr(
+        driver.staging,
+        "latest_complete_report",
+        lambda: {"at": "t", "n_reused_controls": len(staging.reused_cells())},
+    )
+    state: dict = {"transitions": {}}
+    waiting: list = []
+    assert driver._p2_gate(state, waiting) is False
+    assert "pool review missing" in waiting[0]
+    assert "p2_preflight" not in state["transitions"]
+
+
+def test_the_priority_2_gate_opens_on_its_own_review(tmp_path, monkeypatch):
+    path = tmp_path / "review.json"
+    want = {k: p.filtered_sha256 for k, p in staging.p2_pools().items()}
+    path.write_text(json.dumps({"approved": True, "pools": want}))
+    monkeypatch.setattr(plan, "P2_POOL_REVIEW_PATH", path)
+    monkeypatch.setattr(
+        driver.staging,
+        "latest_complete_report",
+        lambda: {"at": "t", "n_reused_controls": len(staging.reused_cells())},
+    )
+    state: dict = {"transitions": {}}
+    assert driver._p2_gate(state, []) is True
+    assert "p2_preflight" in state["transitions"]
+
+
+def test_every_queue_follows_the_pin_even_without_new_jobs(tmp_path, monkeypatch):
+    cfg = _driver_cfg(tmp_path)
+    moved: list = []
+    monkeypatch.setattr(driver.driver_io, "queue_job_defaults", lambda c: {"cwd": "p"})
+    monkeypatch.setattr(driver, "_submitted", lambda c: ["a", "b"])
+    monkeypatch.setattr(
+        driver.store, "update_queue_defaults", lambda r, n, d: moved.append((n, d))
+    )
+    driver._repin(cfg)
+    assert moved == [("a", {"cwd": "p"}), ("b", {"cwd": "p"})]
 
 
 def test_a_first_pass_without_a_pin_is_refused(tmp_path):
