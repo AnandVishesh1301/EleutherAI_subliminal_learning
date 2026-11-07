@@ -59,7 +59,9 @@ def _read(path: Path) -> dict | None:
 def register_base(base: str) -> None:
     """Register what loading `base` needs: `hf_olmo`'s classes for DataDecide."""
     if base == plan.DD:
-        import hf_olmo  # noqa: F401
+        from subliminal_learning.models.olmo_io import register_hf_olmo
+
+        register_hf_olmo()
 
 
 def _reviewed_sha(cell: cells.Cell) -> str | None:

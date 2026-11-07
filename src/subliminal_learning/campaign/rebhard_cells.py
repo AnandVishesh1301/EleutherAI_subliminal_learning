@@ -489,11 +489,11 @@ def teacher_probe_path(animal: str) -> Path:
 
 
 def mem_mib(cell: Cell) -> int:
-    """Reservation of `cell`: a reused control only scores."""
-    if reused_source(cell) is not None:
-        return plan.MEM_SCORE
+    """Reservation of `cell`: a reused control only scores, unless it holds two 1Bs."""
     if cell.student_base == plan.DD:
         return plan.MEM_LORA_1B
+    if reused_source(cell) is not None:
+        return plan.MEM_SCORE
     if cell.student_base == plan.PY410:
         if cell.setting.mode == plan.LORA:
             return plan.MEM_LORA_410M

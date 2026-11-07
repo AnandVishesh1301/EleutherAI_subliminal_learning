@@ -1253,3 +1253,11 @@ def test_e22_results_use_each_directions_own_settings(fake_root):
 def test_every_candidate_leaf_is_unique_after_e22():
     leaves = [cells.run_dir(c) for c in cells.cells_by_key().values()]
     assert len(set(leaves)) == len(leaves)
+
+
+def test_reused_olmo_controls_reserve_room_for_two_1b_models():
+    reused_olmo = cells.e22_controls()[0]
+    reused_160m = cells.e22_controls()[-1]
+    assert cells.reused_source(reused_olmo) is not None
+    assert cells.mem_mib(reused_olmo) == plan.MEM_LORA_1B
+    assert cells.mem_mib(reused_160m) == plan.MEM_SCORE
