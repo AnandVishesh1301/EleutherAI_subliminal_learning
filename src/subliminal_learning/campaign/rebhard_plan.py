@@ -26,7 +26,7 @@ PATHS_CONFIG_PATH = Path("configs/paths/paths_rebhard.yaml")
 
 ROOT = Path("/mnt/ssd-1/soar-subliminal/vishesh/rebuttal/rebhard")
 OUTPUT_ROOT = ROOT / "outputs"
-QUEUE_ROOT = ROOT / "queue"
+QUEUE_ROOT = ROOT / "queue2"
 HF_ROOT = ROOT / "hf"
 INPUTS_DIR = ROOT / "inputs"
 STAGING_DIR = ROOT / "staging"

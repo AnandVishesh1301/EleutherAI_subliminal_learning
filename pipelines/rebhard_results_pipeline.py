@@ -84,6 +84,16 @@ def leaf_rows(exp_cells: Iterable[cells.Cell]) -> list[dict]:
     return rows
 
 
+def finished(cell: cells.Cell) -> bool:
+    """Whether `cell`'s leaf holds a current pp1 record and every scored set."""
+    rows = leaf_rows([cell])
+    return len(rows) == len(cell.eval_targets) and all(
+        r["scored"]
+        and not any(math.isnan(r[f"p_{s}"]) for s in cells.splits(r["target"]))
+        for r in rows
+    )
+
+
 def _arm(target: str, student: str) -> str:
     return f"{target}|{student}"
 

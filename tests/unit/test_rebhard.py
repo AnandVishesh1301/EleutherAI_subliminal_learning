@@ -972,6 +972,44 @@ def test_a_first_pass_without_a_pin_is_refused(tmp_path):
         driver.run(driver.replace(cfg, code_sha=None))
 
 
+def test_finished_needs_a_current_probe_and_every_scored_set(fake_root):
+    cell = cells.e9_cells()[0]
+    assert not results.finished(cell)
+    for target in cell.eval_targets:
+        _write_leaf(fake_root, cell, target, 0.1)
+    assert results.finished(cell)
+    leaf = cells.run_dir(cell)
+    target = cell.eval_targets[0]
+    pref = leaf if cell.source == plan.TEACHER else leaf / "eval" / target
+    sets = json.loads((pref / "preference_eval.json").read_text())["sets"]
+    sets.pop(cells.set_name(target, cells.splits(target)[-1]))
+    (pref / "preference_eval.json").write_text(json.dumps({"sets": sets}))
+    assert not results.finished(cell)
+    _write_leaf(fake_root, cell, target, 0.1)
+    (leaf / "train_manifest.json").write_text('{"changed": true}')
+    assert not results.finished(cell)
+
+
+def test_a_new_queue_root_holds_only_unfinished_cells(fake_root, monkeypatch):
+    cfg = _driver_cfg(fake_root)
+    monkeypatch.setattr(driver.driver_io, "queue_job_defaults", lambda c: {"cwd": "p"})
+    e9 = cells.e9_cells()
+    for cell in e9[1:]:
+        for target in cell.eval_targets:
+            _write_leaf(fake_root, cell, target, 0.1)
+    driver._submit_unfinished(cfg)
+    name = plan.queue(plan.E9)
+    assert [j.key for j in driver.store.load_jobs(cfg.queue_root, name)] == [e9[0].key]
+    assert driver._fixed_finished(cfg, plan.E9)[0] is False
+    for target in e9[0].eval_targets:
+        _write_leaf(fake_root, e9[0], target, 0.1)
+    fresh = driver.replace(cfg, queue_root=fake_root / "queue_fresh")
+    driver._submit_unfinished(fresh)
+    assert not driver.store.queue_exists(fresh.queue_root, name)
+    assert driver._fixed_finished(fresh, plan.E9)[0] is True
+    assert driver._fixed_finished(fresh, plan.E6)[0] is False
+
+
 def test_students_wait_for_the_review_of_their_pools(tmp_path, monkeypatch):
     cfg = _driver_cfg(tmp_path)
     usable = [plan.SELECTED_RECIPES[0], plan.SELECTED_RECIPES[1], rt.E7_ARM.recipes[3]]

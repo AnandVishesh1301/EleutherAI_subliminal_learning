@@ -5,6 +5,8 @@ One `run(cfg)` = one idempotent advance pass:
     preflight   prereg, staging report, approved pool review, disk
     register    run-set card pinned to the campaign code pin
     submit      one unpinned queue per experiment (any pool drains it)
+    submit_unfinished  the same, holding only cells not finished on disk (a new
+                queue root)
     (every pass) queues follow the pin; failures under the cap are requeued, the rest
                 recorded as holes
     results_e*  an experiment's tables and claims once its queues are finished
@@ -144,12 +146,27 @@ def _register(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
     _fire(state, "register", git_sha=pin.sha)
 
 
-def _submit_all(cfg: driver_io.CampaignDriverConfig) -> None:
-    """Create each fixed queue, or move an existing one to the card's pin."""
+def _submit_unfinished(cfg: driver_io.CampaignDriverConfig) -> None:
+    """Queue each fixed experiment's jobs whose outputs are not on disk yet."""
     for exp in plan.EXPERIMENTS:
-        driver_io.submit_queue(
-            cfg, plan.queue(exp), cells.queue_jobs(exp), unpinned=True
-        )
+        todo = [c for c in cells.exp_cells(exp) if not results.finished(c)]
+        jobs = [cells.student_job(c) for c in todo]
+        if exp == plan.E8:
+            jobs += [
+                cells.teacher_probe_job(a)
+                for a in plan.ANIMALS
+                if not cells.teacher_probe_path(a).is_file()
+            ]
+        _put(cfg, plan.queue(exp), jobs)
+
+
+def _fixed_finished(cfg: driver_io.CampaignDriverConfig, exp: str) -> tuple[bool, str]:
+    """A fixed experiment's queue finished, or no queue since every cell was done."""
+    name = plan.queue(exp)
+    if store.queue_exists(cfg.queue_root, name):
+        return driver_io.queue_finished(cfg, name)
+    todo = sum(not results.finished(c) for c in cells.exp_cells(exp))
+    return todo == 0, f"{name}: not submitted, {todo} cell(s) unfinished"
 
 
 def _submitted(cfg: driver_io.CampaignDriverConfig) -> list[str]:
@@ -632,17 +649,20 @@ def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
     if "register" not in done:
         _register(cfg, state)
         mark("register")
-    _submit_all(cfg)
     if "submit" not in done:
         _fire(state, "submit", n_cells=len(cells.cells_by_key()))
         mark("submit")
+    if "submit_unfinished" not in done:
+        _submit_unfinished(cfg)
+        _fire(state, "submit_unfinished", queue_root=str(cfg.queue_root))
+        mark("submit_unfinished")
     if not cfg.dry_run:
         _requeue_and_holes(cfg, state)
     for exp in plan.EXPERIMENTS:
         name = f"results_{exp}"
         if name in done:
             continue
-        ok, msg = driver_io.queue_finished(cfg, plan.queue(exp))
+        ok, msg = _fixed_finished(cfg, exp)
         if not ok:
             waiting.append(msg)
         elif not cfg.dry_run:
