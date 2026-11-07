@@ -49,6 +49,13 @@ def test_quarantine_flags_perplexity_and_filter_drop() -> None:
     assert out["quarantined"].tolist()[:3] == [True, True, False]
 
 
+def test_quarantine_flags_a_leaf_missing_its_metrics() -> None:
+    rows = _arm(plan.NONE, 0.5, 0.1)
+    rows[0]["ppl_ratio"] = float("nan")
+    rows[1]["filter_drop"] = float("nan")
+    assert _frame(rows)["quarantined"].tolist()[:3] == [True, True, False]
+
+
 def test_delta_draws_center_on_the_mean_difference() -> None:
     rng = np.random.default_rng(0)
     draws = m.delta_draws([1.0, 1.0], [0.25, 0.25], rng, n_draws=50)
@@ -111,7 +118,7 @@ def test_e10_claims_read_a_specific_animal_drop() -> None:
     assert claims["R2"]["S"]["label"] == "specific"
     assert claims["R2"]["S"]["difference"] == pytest.approx(0.39)
     assert claims["R3"]["retention"] == pytest.approx(0.25 / 0.45)
-    assert claims["R3"]["label"] == "partial"
+    assert claims["R3"]["label"] == "reduced"
 
 
 def test_e10_claims_void_without_baseline_transfer() -> None:
@@ -159,6 +166,77 @@ def test_e11_claims_consistent_when_transfer_holds_at_every_k() -> None:
     assert claims["L1"]["k_star"] == 5
     assert claims["L2"]["label"] == "token_mediated"
     assert claims["L3"] == "consistent"
+
+
+def _removal_rows(treat: float, n: int = 3) -> list[dict]:
+    return [
+        _leaf(plan.ANIMAL, plan.TREATMENT, treat, s, animal="lion") for s in range(n)
+    ] + [_leaf(plan.ANIMAL, plan.PLACEBO, 0.1, 0, animal="lion")]
+
+
+def test_e11_l3_partial_when_removal_changes_nothing() -> None:
+    ks = {m.FULL_K: 0.2, 10: 0.4}
+    rows = _ladder_rows(ks) + _removal_rows(0.5)
+    claims = m.e11_claims(m.cells(_frame(rows)), "lion", tuple(ks))
+    assert claims["L2"]["label"] == "not_token_mediated"
+    assert claims["L3"] == "partial"
+
+
+def test_e11_l3_partial_when_a_small_k_fails() -> None:
+    ks = {m.FULL_K: 0.2, 10: 0.4, 5: 0.0}
+    rows = _ladder_rows(ks) + _removal_rows(0.15)
+    claims = m.e11_claims(m.cells(_frame(rows)), "lion", tuple(ks))
+    assert claims["L3"] == "partial"
+
+
+def test_e11_l3_not_consistent_without_k10_transfer() -> None:
+    ks = {m.FULL_K: 0.2, 10: 0.0}
+    rows = _ladder_rows(ks) + _removal_rows(0.15)
+    claims = m.e11_claims(m.cells(_frame(rows)), "lion", tuple(ks))
+    assert claims["L2"] == {"label": "void"}
+    assert claims["L3"] == "not_consistent"
+
+
+def test_e11_l3_void_removal_is_never_consistent() -> None:
+    ks = {m.FULL_K: 0.2, 10: 0.4}
+    rows = _ladder_rows(ks) + _removal_rows(0.15)
+    for row in rows:
+        if row["arm"] == plan.ANIMAL:
+            row["ppl_ratio"] = 9.0
+    claims = m.e11_claims(m.cells(_frame(rows)), "lion", tuple(ks))
+    assert claims["L2"]["label"] == "void"
+    assert claims["L3"] == "partial"
+
+
+def test_e10_extra_reads_both_arms_on_rotated_leaves() -> None:
+    rotated = [(0, 0), (1, 1), (2, 2)]
+
+    def rows(arm: str, treat: float, kept=None) -> list[dict]:
+        out = _arm(arm, treat, 0.05)
+        return [r for r in out if kept is None or (r["ftseed"], r["gseed"]) in kept]
+
+    frame = _frame(
+        rows(plan.NONE, 0.5) + rows(plan.BOOST, 0.3) + rows(plan.RANDB, 0.4, rotated)
+    )
+    out = m.e10_extra(m.cells(frame), "P3", plan.RANDB, plan.BOOST)
+    assert out["status"] == "ok"
+    assert out["gap"]["difference"] == pytest.approx(-0.1)
+    assert out["retention"] == pytest.approx(0.35 / 0.45)
+
+
+def test_e10_extra_pending_without_the_arm() -> None:
+    table = m.cells(_frame(_arm(plan.NONE, 0.5, 0.05)))
+    assert m.e10_extra(table, "P3", plan.RANDB, plan.BOOST) == {"status": "pending"}
+
+
+def test_n_design_comes_from_the_plan_not_the_leaves_present() -> None:
+    rows = _arm(plan.NONE, 0.5, 0.05)
+    frame = _frame([r for r in rows if r["kind"] == plan.PLACEBO or r["ftseed"] == 0])
+    table = m.cells(frame)
+    row = table[(plan.E10, "bear", "P3", 10, plan.NONE, m.ALL_DESIGN)].row
+    assert row["n_treatment"] == 3
+    assert m.n_design_of((plan.E10, "bear", "P3", 10, plan.NONE), m.ALL_DESIGN) == 9
+    assert row["status"] == "void_capability"
 
 
 def test_e11_claims_pending_until_the_ladder_is_complete() -> None:

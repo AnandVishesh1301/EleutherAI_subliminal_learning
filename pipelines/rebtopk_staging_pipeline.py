@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from functools import partial
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from subliminal_learning.gkd.trainer_io import load_gkd_teacher
 from subliminal_learning.gkd.vocab_mask_list_io import ids_sha256, load_vocab_mask_list
 from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.teachers.model_specs import parse_base_models
+from subliminal_learning.utils import code_pin_io
 from subliminal_learning.utils.io import atomic_write_json
 from subliminal_learning.utils.run_io import utc_now_iso
 
@@ -43,6 +45,15 @@ def _sha(path: Path) -> str:
 
 
 def _paths() -> dict[str, str]:
+    """Paths YAML, after refusing to run outside a pin or online.
+
+    Raises:
+        RuntimeError: cwd is not a code pin, or `HF_HUB_OFFLINE` is unset.
+    """
+    if Path.cwd().parent.name != code_pin_io.CODE_PINS_DIRNAME:
+        raise RuntimeError(f"run from the campaign pin, not {Path.cwd()}")
+    if os.environ.get("HF_HUB_OFFLINE") != "1":
+        raise RuntimeError("set HF_HUB_OFFLINE=1: the HF link is a shared cache")
     return yaml.safe_load(Path(plan.PATHS_CONFIG).read_text())
 
 
@@ -80,11 +91,29 @@ def _check_pool(dataset_root: Path) -> dict:
     return {"action": action, "prompts_sha256": sha}
 
 
+def _teacher_gate(source: Path) -> dict:
+    """`test`·`prob` p(target) of a teacher cell and its base, as stored on disk."""
+    doc = json.loads((source / "preference_summary.json").read_text())
+    row = next(
+        s
+        for s in doc["summaries"]
+        if (s["prompt_set"], s["scoring"])
+        == (plan.PRIMARY_PROMPT_SET, plan.PRIMARY_SCORING)
+    )
+    return {
+        "p_target_mean": row["p_target_mean"],
+        "base_p_target": row["base_p_target"],
+    }
+
+
 def _check_teachers(output_root: Path) -> list[dict]:
     rows: list[dict] = []
     reference: dict | None = None
     for link, source in plan.teacher_links(output_root):
         action = _link(link, source)
+        animal, base_dir, param_tag = link.parts[-3:]
+        owner = animal if param_tag == plan.TEACHER_TAG else plan.BEAR
+        gate = _teacher_gate(source)
         for tfs in plan.TEACHER_FTSEEDS:
             manifest = json.loads((source / f"ftseed{tfs}" / _MANIFEST).read_text())
             hp = dict(manifest["hyperparameters"])
@@ -92,6 +121,9 @@ def _check_teachers(output_root: Path) -> list[dict]:
             reference = reference or hp
             if hp != reference:
                 raise ValueError(f"{source}: teacher recipe differs: {hp}")
+            repo = plan.HUB_BASE_REPO_BY_MODEL_DIR[base_dir]
+            if (manifest["animal"], manifest["base_model_repo"]) != (owner, repo):
+                raise ValueError(f"{source}: teacher is not {owner} on {repo}")
             rows.append(
                 {
                     "link": str(link),
@@ -102,6 +134,7 @@ def _check_teachers(output_root: Path) -> list[dict]:
                     "base_model_repo": manifest["base_model_repo"],
                     "adapter_sha256": _sha(source / f"ftseed{tfs}" / _ADAPTER),
                     "manifest_sha256": _sha(source / f"ftseed{tfs}" / _MANIFEST),
+                    **gate,
                 }
             )
     return rows
@@ -149,6 +182,7 @@ def stage() -> dict:
     report = {
         "at": utc_now_iso(),
         "passed": True,
+        "code_sha": Path.cwd().name,
         "hf": hf,
         "pool": _check_pool(Path(paths["dataset_cache_root"])),
         "teachers": _check_teachers(output_root),
@@ -175,6 +209,7 @@ def placebo_gate(device: str = "cpu") -> dict:
     output_root = Path(paths["output_root"])
     hf_root = Path(paths["hf_cache_root"])
     spec = parse_base_models(B160)[0]
+    _check_hf(hf_root)
     tokenizer = load_tokenizer(spec, hf_root, plan.HUB_ORG)
     doc = json.loads(prompt_set_path(plan.PRIMARY_PROMPT_SET).read_text())
     prompts = tuple(doc)
@@ -203,6 +238,7 @@ def placebo_gate(device: str = "cpu") -> dict:
         del teacher
     report = {
         "at": utc_now_iso(),
+        "code_sha": Path.cwd().name,
         "passed": all(abs(r["delta"]) <= plan.PLACEBO_V1_MAX_DELTA for r in rows),
         "max_abs_delta": plan.PLACEBO_V1_MAX_DELTA,
         "rows": rows,

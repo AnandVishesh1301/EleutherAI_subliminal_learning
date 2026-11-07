@@ -133,10 +133,12 @@ def _doc(
 
 
 def _write(doc: dict, out_dir: Path) -> None:
-    atomic_write_text(
-        out_dir / f"{doc['name']}.json",
-        json.dumps(doc, indent=1, ensure_ascii=False) + "\n",
-    )
+    """Write a list once; committed lists are never replaced with other content."""
+    path = out_dir / f"{doc['name']}.json"
+    text = json.dumps(doc, indent=1, ensure_ascii=False) + "\n"
+    if path.exists() and path.read_text() != text:
+        raise FileExistsError(f"{path} differs from this build")
+    atomic_write_text(path, text)
     logger.info(
         "{}: {} ids sha {} base share {:.5f} teacher share {:.5f}",
         doc["name"],

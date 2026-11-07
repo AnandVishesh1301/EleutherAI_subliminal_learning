@@ -19,15 +19,22 @@ from subliminal_learning.campaign import rebtopk_plan as plan
 
 FULL_K = 0
 _CELL_KEYS: tuple[str, ...] = ("experiment", "animal", "pair", "k", "arm")
-FIG3_DESIGN, ALL_DESIGN = "fig3_tfs0", "all"
+FIG3_DESIGN, ROTATED_DESIGN, ALL_DESIGN = "fig3_tfs0", "rotated", "all"
 
 
 def quarantine(leaves: pd.DataFrame) -> pd.DataFrame:
-    """`leaves` with ``quarantined`` set by the perplexity and filter-drop rules."""
+    """`leaves` with ``quarantined`` set by the perplexity and filter-drop rules.
+
+    A leaf missing either value is quarantined.
+    """
     out = leaves.copy()
-    bad_ppl = out["ppl_ratio"] > plan.QUARANTINE_PPL_RATIO_MAX
-    bad_drop = out["filter_drop"] > plan.QUARANTINE_FILTER_DROP_MAX
-    out["quarantined"] = bad_ppl | bad_drop
+    ppl, drop = out["ppl_ratio"], out["filter_drop"]
+    missing = ppl.isna() | drop.isna()
+    out["quarantined"] = (
+        missing
+        | (ppl > plan.QUARANTINE_PPL_RATIO_MAX)
+        | (drop > plan.QUARANTINE_FILTER_DROP_MAX)
+    )
     return out
 
 
@@ -98,6 +105,25 @@ def _rng(key: tuple) -> np.random.Generator:
     return np.random.default_rng(seed)
 
 
+def n_design_of(key: tuple, design: str) -> int:
+    """Planned treatment leaves of one cell under `design`."""
+    experiment, animal, pair, k, arm = key
+    planned = [
+        (u.ftseed, g)
+        for u in plan.units()
+        if u.kind == plan.TREATMENT
+        and (u.experiment, u.animal, u.pair.name, u.setting.arm)
+        == (experiment, animal, pair, arm)
+        and (FULL_K if u.setting.k is None else u.setting.k) == k
+        for g in u.gseeds
+    ]
+    if design == FIG3_DESIGN:
+        planned = [(t, g) for t, g in planned if t == 0]
+    elif design == ROTATED_DESIGN:
+        planned = [(t, g) for t, g in planned if t == g]
+    return len(planned)
+
+
 def _cell(key: tuple, design: str, frame: pd.DataFrame) -> Cell:
     treat = frame.loc[frame["kind"] == plan.TREATMENT]
     placebo = frame.loc[frame["kind"] == plan.PLACEBO]
@@ -135,7 +161,7 @@ def _cell(key: tuple, design: str, frame: pd.DataFrame) -> Cell:
     delta_fc = float(live_t["fc_share"].mean() - live_c["fc_share"].mean())
     low_p, high_p = percentile_ci(draws_p)
     low_fc, high_fc = percentile_ci(draws_fc)
-    n_design = len(treat)
+    n_design = n_design_of(key, design)
     met = t0(len(live_t), n_design, delta_p, low_p, low_fc)
     row.update(
         delta_p=delta_p,
@@ -154,7 +180,8 @@ def cells(leaves: pd.DataFrame) -> dict[tuple, Cell]:
     """``{(*cell key, design): Cell}`` over every cell present.
 
     E10 also gets the `FIG3_DESIGN` subset (teacher seed 0 in both arms), the shape of
-    the paper's P3 cell.
+    the paper's P3 cell, and the `ROTATED_DESIGN` subset (ftseed = gseed), the shape of
+    the priority-3 arms.
     """
     out: dict[tuple, Cell] = {}
     for key, frame in leaves.groupby(list(_CELL_KEYS), sort=True):
@@ -162,6 +189,8 @@ def cells(leaves: pd.DataFrame) -> dict[tuple, Cell]:
         if key[0] == plan.E10:
             subset = frame.loc[frame["ftseed"] == 0]
             out[(*key, FIG3_DESIGN)] = _cell(key, FIG3_DESIGN, subset)
+            rotated = frame.loc[frame["ftseed"] == frame["gseed"]]
+            out[(*key, ROTATED_DESIGN)] = _cell(key, ROTATED_DESIGN, rotated)
     return out
 
 
@@ -256,19 +285,31 @@ def e10_claims(table: dict[tuple, Cell], pair: str, design: str = ALL_DESIGN) ->
         },
         "R3": {
             **boost,
-            "label": token_label(boost["low"], boost["high"]),
+            "label": random_label(boost["low"], boost["high"]),
             "B": boost_gap,
         },
     }
 
 
-def e10_extra(table: dict[tuple, Cell], pair: str, arm: str) -> dict:
-    """Retention of a priority-3 arm against ``none`` (`pending` until it exists)."""
-    cell = table.get(_e10_key(pair, arm, ALL_DESIGN))
-    none = table.get(_e10_key(pair, plan.NONE, ALL_DESIGN))
-    if cell is None or none is None:
+def e10_extra(table: dict[tuple, Cell], pair: str, arm: str, partner: str) -> dict:
+    """Retention of a priority-3 arm and its gap to `partner`, on rotated leaves.
+
+    Every arm is read on the same (ftseed = gseed) leaves, so the contrast with the
+    9 + 9 priority-1 arms matches on design. ``difference`` is Δ(`partner`) − Δ(`arm`).
+    """
+    cell = table.get(_e10_key(pair, arm, ROTATED_DESIGN))
+    none = table.get(_e10_key(pair, plan.NONE, ROTATED_DESIGN))
+    other = table.get(_e10_key(pair, partner, ROTATED_DESIGN))
+    if cell is None or none is None or other is None:
         return {"status": "pending"}
-    return {"status": "ok", "delta_p": cell.row["delta_p"], **_retention(cell, none)}
+    return {
+        "status": "ok",
+        "delta_p": cell.row["delta_p"],
+        "partner": partner,
+        "partner_delta_p": other.row["delta_p"],
+        **_retention(cell, none),
+        "gap": _difference(other, cell),
+    }
 
 
 def _ladder(table: dict[tuple, Cell], animal: str) -> list[Cell]:
@@ -329,7 +370,7 @@ def e11_claims(
             "label": token_label(ret["low"], ret["high"]),
         }
     )
-    if all(t0_at.values()) and l2["label"] != "not_token_mediated":
+    if all(t0_at.values()) and l2["label"] in ("token_mediated", "partial"):
         l3 = "consistent"
     elif t0_at[plan.K_E10] and t0_at[FULL_K]:
         l3 = "partial"

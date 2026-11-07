@@ -13,11 +13,16 @@ from pathlib import Path
 
 from loguru import logger
 
-from pipelines.rebtopk_results_pipeline import build_results
+from pipelines.rebtopk_results_pipeline import (
+    FINAL_SNAPSHOT,
+    P1_SNAPSHOT,
+    build_results,
+)
 from subliminal_learning.campaign import driver_io
 from subliminal_learning.campaign import rebtopk_jobs as jobs
 from subliminal_learning.campaign import rebtopk_plan as plan
 from subliminal_learning.jobqueue import store
+from subliminal_learning.utils import code_pin_io
 from subliminal_learning.utils.io import atomic_write_json, atomic_write_text
 from subliminal_learning.utils.run_io import utc_now_iso
 
@@ -54,17 +59,25 @@ def _logs(cfg: driver_io.CampaignDriverConfig) -> Path:
 
 
 def _check_preflight(cfg: driver_io.CampaignDriverConfig) -> None:
+    """Refuse a first submit without passing reports from this pin."""
+    sha = code_pin_io.resolve_commit_sha(cfg.repo_root, cfg.code_sha)
     for name in (plan.STAGING_REPORT, plan.PLACEBO_GATE_REPORT):
         path = _logs(cfg) / name
         if not path.is_file():
             raise CampaignGateError(f"{path} missing: run stage_rebtopk_assets")
-        if json.loads(path.read_text()).get("passed") is not True:
+        doc = json.loads(path.read_text())
+        if doc.get("passed") is not True:
             raise CampaignGateError(f"{path} did not pass")
+        if doc.get("code_sha") != sha:
+            raise CampaignGateError(f"{path} is from {doc.get('code_sha')}, not {sha}")
 
 
 def submit(cfg: driver_io.CampaignDriverConfig) -> list[str]:
     """Write every YAML and submit every queue (idempotent). Returns queue names."""
-    if not cfg.dry_run:
+    first_submit = not any(
+        store.queue_exists(cfg.queue_root, n) for n in plan.queue_priorities()
+    )
+    if first_submit and not cfg.dry_run:
         _check_preflight(cfg)
     driver_io.ensure_campaign_code_pin(cfg)
     config_dir = cfg.generated_dir
@@ -73,12 +86,15 @@ def submit(cfg: driver_io.CampaignDriverConfig) -> list[str]:
         driver_io.write_generated_configs(cfg, docs)
     by_queue = jobs.queue_jobs(config_dir)
     for name, queue_jobs in by_queue.items():
-        depends = (
-            [name.removesuffix("-evals") + "-train"]
-            if name.endswith("-evals")
-            else None
+        evals = name.endswith("-evals")
+        driver_io.submit_queue(
+            cfg,
+            name,
+            queue_jobs,
+            depends_on=[name.removesuffix("-evals") + "-train"] if evals else None,
+            strict_deps=evals,
+            unpinned=True,
         )
-        driver_io.submit_queue(cfg, name, queue_jobs, depends_on=depends, unpinned=True)
     return list(by_queue)
 
 
@@ -110,14 +126,29 @@ def _complete(cfg: driver_io.CampaignDriverConfig, names: tuple[str, ...]) -> bo
     )
 
 
-def _mark(cfg: driver_io.CampaignDriverConfig, filename: str) -> None:
-    """Build results, then write the marker once."""
+def _mark(
+    cfg: driver_io.CampaignDriverConfig,
+    filename: str,
+    snapshot: str,
+    required: tuple[int, ...],
+) -> str | None:
+    """Build a complete snapshot, then write the marker once.
+
+    Returns:
+        The error text when results could not be built (no marker is written and the
+        next pass retries, so requeueing keeps running), else ``None``.
+    """
     marker = _logs(cfg) / filename
     if marker.exists():
-        return
-    build_results(cfg.output_root)
+        return None
+    try:
+        build_results(cfg.output_root, snapshot=snapshot, required=required)
+    except Exception as err:
+        logger.exception("results build for {} failed", filename)
+        return f"{filename}: {err}"
     atomic_write_text(marker, utc_now_iso() + "\n")
     logger.info("{} written", filename)
+    return None
 
 
 def advance(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
@@ -135,10 +166,12 @@ def advance(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
     done = p1_done and _complete(cfg, plan.priority_queues(3))
     logs = _logs(cfg)
     logs.mkdir(parents=True, exist_ok=True)
+    errors: list[str | None] = []
     if p1_done:
-        _mark(cfg, plan.P1_DONE_FILE)
+        errors.append(_mark(cfg, plan.P1_DONE_FILE, P1_SNAPSHOT, (1,)))
     if done:
-        _mark(cfg, plan.CAMPAIGN_DONE_FILE)
+        errors.append(_mark(cfg, plan.CAMPAIGN_DONE_FILE, FINAL_SNAPSHOT, (1, 3)))
+    finished = (logs / plan.CAMPAIGN_DONE_FILE).exists()
     atomic_write_json(
         logs / plan.CAMPAIGN_STATE_FILE,
         {
@@ -154,10 +187,11 @@ def advance(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
             "requeued": requeued,
             "stuck": stuck,
             "p1_done": p1_done,
-            "done": done,
+            "done": finished,
+            "results_errors": [e for e in errors if e],
         },
     )
-    return AdvanceResult(tuple(requeued), tuple(stuck), p1_done, done)
+    return AdvanceResult(tuple(requeued), tuple(stuck), p1_done, finished)
 
 
 def status(cfg: driver_io.CampaignDriverConfig) -> dict:

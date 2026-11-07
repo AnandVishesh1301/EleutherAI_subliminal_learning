@@ -29,14 +29,19 @@ from subliminal_learning.evaluation.gkd_results_io import (
     load_gkd_training_logs,
 )
 from subliminal_learning.gkd.layout import GKD_STUDENTS_SUBDIR
-from subliminal_learning.gkd.vocab_mask_list_io import VOCAB_MASK_LISTS_DIR, ids_sha256
+from subliminal_learning.gkd.vocab_mask_list_io import ids_sha256
 from subliminal_learning.training.run_set import run_set_subdir
 from subliminal_learning.utils.io import atomic_write_json, atomic_write_text
-from subliminal_learning.utils.run_io import utc_now_iso
+from subliminal_learning.utils.run_io import read_run_set_card, utc_now_iso
 
 _ConfigKey = tuple[str, str, str, str, str]
+LATEST_SNAPSHOT, P1_SNAPSHOT, FINAL_SNAPSHOT = "latest", "p1", "final"
 _K_LADDER_P1 = tuple(metrics.FULL_K if k is None else k for k in plan.K_LADDER)
 _K_LADDER_ALL = (*_K_LADDER_P1, *plan.K_LADDER_P3)
+
+
+class ResultsIncompleteError(RuntimeError):
+    """A priority's planned leaves are not all trained and evaluated."""
 
 
 def _subdir() -> str:
@@ -137,6 +142,8 @@ def assemble_leaves(output_root: Path) -> pd.DataFrame:
             _per_seed_items(fc_map.get(key, {}).get("per_seed_target_share"))
         )
         for gseed, p_target in seeds:
+            if gseed not in unit.gseeds:
+                raise ValueError(f"gseed {gseed} is not planned for {unit.slug}")
             rows.append(
                 _leaf_row(
                     unit,
@@ -151,50 +158,77 @@ def assemble_leaves(output_root: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _planned_mask_sha(unit: plan.Unit) -> str | None:
+    if unit.setting.arm == plan.NONE:
+        return None
+    if unit.setting.arm == plan.ANIMAL:
+        return plan.ANIMAL_IDS_SHA256
+    return plan.TOKEN_LIST_SHA256[unit.setting.slug]
+
+
 def check_mask_identity(output_root: Path) -> list[str]:
-    """Leaves whose manifest ids disagree with the planned list, as messages."""
+    """Trained leaves whose manifest ids differ from the plan's sha, as messages."""
     bad: list[str] = []
     for unit in plan.units():
-        if unit.setting.slug is None:
+        want = _planned_mask_sha(unit)
+        if want is None:
             continue
-        doc = json.loads(
-            (VOCAB_MASK_LISTS_DIR / f"{unit.setting.slug}.json").read_text()
-        )
         for gseed in unit.gseeds:
             path = jobs.leaf_dir(output_root, unit, gseed) / "train_manifest.json"
             if not path.is_file():
                 continue
             ids = json.loads(path.read_text()).get("vocab_mask_ids", [])
-            if ids_sha256(ids) != doc["ids_sha256"]:
-                bad.append(f"{path}: mask ids differ from {unit.setting.slug}")
+            if ids_sha256(ids) != want:
+                bad.append(f"{path}: mask ids differ from {unit.setting.name}")
     return bad
 
 
-def coverage(output_root: Path) -> dict:
-    """Planned against finished leaves per priority."""
+def coverage(output_root: Path, leaves: pd.DataFrame) -> dict:
+    """Planned, trained and evaluated leaves per priority."""
+    seen = (
+        set()
+        if leaves.empty
+        else {
+            (r["animal"], r["pair"], r["gkd_tag"], r["teacher_tag"], int(r["gseed"]))
+            for r in leaves.to_dict("records")
+        }
+    )
     out: dict = {}
     for priority in (1, 3):
-        rows = [u for u in plan.units() if u.priority == priority]
-        planned = [(u, g) for u in rows for g in u.gseeds]
-        missing = [
+        planned = [
+            (u, g) for u in plan.units() if u.priority == priority for g in u.gseeds
+        ]
+        untrained = [
             f"{u.slug}|g{g}"
             for u, g in planned
             if not (jobs.leaf_dir(output_root, u, g) / "train_manifest.json").is_file()
         ]
+        unscored = [
+            f"{u.slug}|g{g}"
+            for u, g in planned
+            if (u.animal, u.pair.name, u.gkd_tag, u.teacher_tag, g) not in seen
+        ]
         out[f"p{priority}"] = {
             "planned": len(planned),
-            "trained": len(planned) - len(missing),
-            "missing": missing[:50],
+            "trained": len(planned) - len(untrained),
+            "evaluated": len(planned) - len(unscored),
+            "untrained": untrained[:50],
+            "unevaluated": unscored[:50],
         }
     return out
 
 
-def _claims(frame: pd.DataFrame) -> dict:
+def _claims(frame: pd.DataFrame, output_root: Path) -> dict:
     p1 = frame.loc[frame["priority"] == 1]
     table = metrics.cells(p1)
     every = metrics.cells(frame)
     return {
         "generated_at": utc_now_iso(),
+        "code_sha": (read_run_set_card(plan.run_set_root(output_root)) or {}).get(
+            "git_sha"
+        ),
+        "token_lists": dict(plan.TOKEN_LIST_SHA256),
+        "animal_ids_sha256": plan.ANIMAL_IDS_SHA256,
         "screen": plan.SCREEN,
         "e10": {
             pair: {
@@ -212,8 +246,8 @@ def _claims(frame: pd.DataFrame) -> dict:
         "priority3": {
             "e10": {
                 pair: {
-                    arm: metrics.e10_extra(every, pair, arm)
-                    for arm in (plan.RAND2, plan.RANDB)
+                    plan.RAND2: metrics.e10_extra(every, pair, plan.RAND2, plan.RAND),
+                    plan.RANDB: metrics.e10_extra(every, pair, plan.RANDB, plan.BOOST),
                 }
                 for pair in ("P3", "P4")
             },
@@ -230,25 +264,44 @@ def _write_csv(frame: pd.DataFrame, path: Path) -> Path:
     return path
 
 
-def build_results(output_root: Path, *, dry_run: bool = False) -> dict[str, Path]:
-    """Write every result file (atomic); returns ``{name: path}``.
+def build_results(
+    output_root: Path,
+    *,
+    snapshot: str = LATEST_SNAPSHOT,
+    required: tuple[int, ...] = (),
+    dry_run: bool = False,
+) -> dict[str, Path]:
+    """Write every result file under ``results/{snapshot}/``; returns ``{name: path}``.
+
+    Args:
+        output_root: Campaign output root.
+        snapshot: Result subdirectory, so a priority's tables are never replaced by a
+            later build.
+        required: Priorities every planned leaf of which must be trained and evaluated.
+        dry_run: Compute everything, write nothing.
 
     Raises:
-        ValueError: A trained leaf's mask ids differ from its planned list.
+        ValueError: A trained leaf's mask ids differ from the plan.
+        ResultsIncompleteError: A `required` priority has unevaluated leaves.
     """
     mismatched = check_mask_identity(output_root)
     if mismatched:
         raise ValueError(f"mask identity failed: {mismatched[:3]}")
     leaves = assemble_leaves(output_root)
+    covered = coverage(output_root, leaves)
+    for priority in required:
+        row = covered[f"p{priority}"]
+        if not row["planned"] == row["trained"] == row["evaluated"]:
+            raise ResultsIncompleteError(f"priority {priority}: {row}")
     if leaves.empty:
         logger.info("no evaluated leaves yet")
         return {}
     leaves = metrics.quarantine(leaves)
     frame = metrics.cell_frame(metrics.cells(leaves))
-    claims = _claims(leaves)
+    claims = _claims(leaves, output_root)
     if dry_run:
         return {}
-    out = results_dir(output_root)
+    out = results_dir(output_root) / snapshot
     out.mkdir(parents=True, exist_ok=True)
     e10 = frame.loc[frame["experiment"] == plan.E10]
     e11 = frame.loc[frame["experiment"] == plan.E11]
@@ -258,7 +311,7 @@ def build_results(output_root: Path, *, dry_run: bool = False) -> dict[str, Path
         "e11_curve": _write_csv(e11, out / "e11_curve.csv"),
         "base_check": _write_csv(metrics.base_check(leaves), out / "base_check.csv"),
     }
-    atomic_write_json(out / "coverage.json", coverage(output_root))
+    atomic_write_json(out / "coverage.json", covered)
     atomic_write_json(out / "claims.json", _jsonable(claims))
     written["coverage"] = out / "coverage.json"
     written["claims"] = out / "claims.json"

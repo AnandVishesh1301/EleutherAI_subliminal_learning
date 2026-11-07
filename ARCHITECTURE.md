@@ -3079,6 +3079,27 @@ root `reversal/queue2`; run sets `20261016_rev2-{hard,soft}_160m`; every cell un
   rows `inputs/sft_rows/pile_rev1_judged/` (`numbers: []`). 2026-10-16: 651 / 20,000 flagged (3.3%;
   PubMed 8.0%), 0 parse failures, 19,349 kept; audit `reversal/audit/filtration_audit/20261016_rev2_pool_judge`.
 
+### Rebuttal top-K controls (`rebtopk`)
+
+Run set `20261107_rebtopk-animals_160m`, prereg `docs/PREREG_REBTOPK.md`, plan
+`.claude/plans/rebuttal/rebtopk.plan.md`. Same recipe as `opdlim` (on-policy, forward KL,
+unnormalised top-K, LoRA r8 α16, lr 4e-4, 1 epoch) under the `strict_v2` screen, with
+placebo students as controls:
+
+- **#10:** bear at K=10 on P3 and P4 with four column-removal arms: none, the 43 animal
+  tokens, 43 random frequency-matched tokens, the 43 non-animal tokens the teacher boosts
+  most.
+- **#11:** lion and eagle on P3 down the K ladder, plus animal removal at K=10.
+
+`GkdConfig.vocab_mask_list` (off by default) names a committed list in
+`data/gkd_vocab_mask_lists/`, adds `_vmaskl{slug}` to the tag and records the ids in the
+manifest; `gkd/vocab_mask_list_io.py` checks each list's sha and token text on load.
+`campaign/rebtopk_{plan,jobs,metrics,token_lists}.py`,
+`pipelines/rebtopk_{campaign,results,staging,lists}_pipeline.py` and
+`scripts/{run,stage,build}_rebtopk*.py` hold the rest. Queues are unpinned in the campaign's
+own root; the driver builds `results/p1/` and `results/final/` and writes `P1_DONE` and
+`CAMPAIGN_DONE` only when every planned leaf is trained and evaluated.
+
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 
 Long-form SSOT (prompts, HPs, on-disk corpora, what teachers trained on):

@@ -84,6 +84,12 @@ TREATMENT_SOURCES: MappingProxyType[tuple[str, str], Path] = MappingProxyType(
     }
 )
 PLACEBO_V1_MAX_DELTA = 0.005
+HUB_BASE_REPO_BY_MODEL_DIR: MappingProxyType[str, str] = MappingProxyType(
+    {
+        opdlim.B160: "EleutherAI/pythia-160m@step143000",
+        opdlim.B160_8K: "EleutherAI/pythia-160m@step8000",
+    }
+)
 
 # ---- token lists ---------------------------------------------------------------------
 
@@ -400,7 +406,7 @@ FOOTPRINT = replace(
 )
 EVAL_MEM_MIB = FOOTPRINT.mem_mib
 GPU_POLICY = opdlim.GPU_POLICY
-AUTO_REQUEUE_ATTEMPTS = opdlim.AUTO_REQUEUE_ATTEMPTS
+AUTO_REQUEUE_ATTEMPTS = 4
 
 
 def gpu_policy_json() -> dict:
@@ -459,6 +465,8 @@ SPEC: CampaignSpec = replace(
         "pipelines/rebtopk_campaign_pipeline.py",
         "pipelines/rebtopk_results_pipeline.py",
         "scripts/run_rebtopk_campaign.py",
+        "src/subliminal_learning/gkd/vocab_mask_list_io.py",
+        *(f"data/gkd_vocab_mask_lists/{slug}.json" for slug in TOKEN_LIST_SHA256),
     ),
 )
 

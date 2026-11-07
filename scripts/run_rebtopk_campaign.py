@@ -64,7 +64,7 @@ def _submit(cfg: CampaignDriverConfig) -> None:
 
 @app.command("submit")
 def submit_cmd(
-    code_sha: str = typer.Option(None, help="Campaign code pin."),
+    code_sha: str = typer.Option(..., help="Campaign code pin."),
     dry_run: bool = typer.Option(False, help="Log planned actions; change nothing."),
 ) -> None:
     """Write every YAML and submit every queue once."""
@@ -75,7 +75,7 @@ def submit_cmd(
 
 @app.command("watch")
 def watch_cmd(
-    code_sha: str = typer.Option(None, help="Campaign code pin."),
+    code_sha: str = typer.Option(..., help="Campaign code pin."),
     auto_reconcile_sha: bool = typer.Option(False, help="Record a pin advance."),
     interval: int = typer.Option(120, help="Seconds between passes."),
 ) -> None:
