@@ -35,6 +35,7 @@ from subliminal_learning.fleet.ledger import (
 from subliminal_learning.fleet.ledger_io import campaign_queues, read_ledger
 from subliminal_learning.fleet.nodes import resolve_node
 from subliminal_learning.fleet.watch import (
+    OOM_SCAN_SKIPPED,
     NodeProbe,
     QueueSnapshot,
     SlurmRootView,
@@ -345,7 +346,14 @@ def slurm_root_view(root: Path, campaign: str, now_s: float) -> SlurmRootView:
 
 
 def recent_oom_logs(paths: list[Path], now_s: float) -> int:
-    """Logs among ``paths`` written in the last 15 min that mention OutOfMemoryError."""
+    """Logs among ``paths`` written in the last 15 min that mention OutOfMemoryError.
+
+    Live logs on a shared mount can read too slowly to scan; that costs this check only,
+    so the rest of the pass still runs.
+
+    Returns:
+        The count, or `OOM_SCAN_SKIPPED` when the scan outran `PROBE_TIMEOUT_S`.
+    """
     recent = []
     for path in paths:
         try:
@@ -355,12 +363,15 @@ def recent_oom_logs(paths: list[Path], now_s: float) -> int:
             continue
     if not recent:
         return 0
-    out = subprocess.run(
-        ["grep", "-lF", "OutOfMemoryError", "--", *recent],
-        capture_output=True,
-        text=True,
-        timeout=PROBE_TIMEOUT_S,
-    )
+    try:
+        out = subprocess.run(
+            ["grep", "-lF", "OutOfMemoryError", "--", *recent],
+            capture_output=True,
+            text=True,
+            timeout=PROBE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return OOM_SCAN_SKIPPED
     return len(out.stdout.splitlines())
 
 

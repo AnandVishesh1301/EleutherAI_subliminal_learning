@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from subliminal_learning.fleet import ledger as fl
 from subliminal_learning.fleet.ledger_io import drain_report, read_ledger, update_ledger
 from subliminal_learning.fleet import watch_io
 from subliminal_learning.fleet.watch import (
+    OOM_SCAN_SKIPPED,
     NodeProbe,
     QueueSnapshot,
     SlurmRootView,
@@ -326,6 +328,25 @@ def test_slurm_healthy_pass_is_quiet_and_counts_pool_and_carrier_jobs() -> None:
 def test_slurm_supervisor_and_oom_alerts(kw: dict, alert: str) -> None:
     lines, _ = _sl(_slurm(**kw))
     assert _alerts(lines) == [alert]
+
+
+def test_slurm_oom_scan_timeout_is_reported_without_an_alert() -> None:
+    lines, _ = _sl(_slurm(oom15=OOM_SCAN_SKIPPED))
+    assert not _alerts(lines)
+    assert "SLURM oom log scan timed out; a failed cell still alerts" in lines
+
+
+def test_recent_oom_logs_survives_a_scan_that_outruns_its_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "a.slurm-7.r0.log"
+    path.write_text("torch.OutOfMemoryError: CUDA")
+
+    def slow(*args: object, **kwargs: object) -> None:
+        raise subprocess.TimeoutExpired("grep", 90)
+
+    monkeypatch.setattr(watch_io.subprocess, "run", slow)
+    assert recent_oom_logs([path], time.time()) == OOM_SCAN_SKIPPED
 
 
 def test_slurm_supervisor_checks_stop_once_done() -> None:

@@ -36,6 +36,7 @@ STATE_STALE_S = 1200.0
 MAX_FAILED_LINES = 20
 SUPERVISOR_STALE_S = 600.0
 DEAD_CLAIM_S = 900.0
+OOM_SCAN_SKIPPED = -1
 
 
 @dataclass(frozen=True)
@@ -428,7 +429,9 @@ def _slurm_lines(
     if live and not slurm.pools_window:
         session = camp.card.tmux_session or name
         lines.append(f"ALERT slurm: tmux window {session}:pools missing (supervisor)")
-    if slurm.oom15:
+    if slurm.oom15 == OOM_SCAN_SKIPPED:
+        lines.append("SLURM oom log scan timed out; a failed cell still alerts")
+    elif slurm.oom15:
         lines.append(
             f"ALERT slurm: OutOfMemoryError in {slurm.oom15} job log(s), last 15 min"
         )
