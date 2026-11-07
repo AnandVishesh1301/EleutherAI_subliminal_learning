@@ -310,9 +310,13 @@ def teacher_manifest_problems(
         "sdf_docs_path": str(ref.docs_path),
         "sdf_docs_sha256": docs_sha256,
     }
-    if ref.steps is not None:
-        want["n_train_steps"] = ref.steps
-    return {k: (manifest.get(k), v) for k, v in want.items() if manifest.get(k) != v}
+    bad = {k: (manifest.get(k), v) for k, v in want.items() if manifest.get(k) != v}
+    got = manifest.get("n_train_steps")
+    if ref.steps is not None and not (
+        isinstance(got, int) and 0 <= ref.steps - got <= plan.RESUME_STEP_SLACK
+    ):
+        bad["n_train_steps"] = (got, ref.steps)
+    return bad
 
 
 # ---- leaves -----------------------------------------------------------------------------

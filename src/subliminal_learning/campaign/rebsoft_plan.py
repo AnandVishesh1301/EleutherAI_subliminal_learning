@@ -668,6 +668,8 @@ SAVE_STEPS = 125
 SAVE_TOTAL_LIMIT = 1
 AUTO_REQUEUE_ATTEMPTS = 3
 TEACHER_SAVE_STEPS = 200
+# A preempted teacher resumed from a checkpoint can end one step short at an epoch edge.
+RESUME_STEP_SLACK = 1
 PANEL_MIB = 4_000
 
 _WS_EQUIVALENT = P160

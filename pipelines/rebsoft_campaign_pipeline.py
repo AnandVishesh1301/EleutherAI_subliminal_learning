@@ -362,11 +362,14 @@ def read_w0(ref: jobs.TeacherRef) -> soft.W0Verdict:
     return verdict
 
 
-def verify_teachers(ref: jobs.TeacherRef, ftseeds: Sequence[int]) -> int:
-    """Check `ftseeds`' manifests against the config; return their one step count.
+def verify_teachers(ref: jobs.TeacherRef, ftseeds: Sequence[int], state: dict) -> int:
+    """Check `ftseeds`' manifests against the config; return their step count.
+
+    A resumed run may end `RESUME_STEP_SLACK` short: the highest count stands and the
+    shortfall is labelled.
 
     Raises:
-        UnitHold: A manifest is missing or off-plan, or step counts differ.
+        UnitHold: A manifest is missing or off-plan, or step counts differ by more.
     """
     try:
         docs_sha = file_sha256(ref.docs_path)
@@ -376,11 +379,15 @@ def verify_teachers(ref: jobs.TeacherRef, ftseeds: Sequence[int]) -> int:
             if bad := jobs.teacher_manifest_problems(ref, r, manifest, docs_sha):
                 raise ValueError(f"ftseed{r} manifest off-plan {bad}")
             steps.add(int(manifest["n_train_steps"]))
-        if len(steps) != 1:
+        if max(steps) - min(steps) > plan.RESUME_STEP_SLACK:
             raise ValueError(f"step counts differ by ftseed: {sorted(steps)}")
     except (OSError, KeyError, ValueError) as err:
         raise UnitHold(f"teachers {ref.param_dir}: {err}") from err
-    return steps.pop()
+    want = ref.steps if ref.steps is not None else max(steps)
+    if min(steps) < want:
+        name = f"teacher_steps_short|{ref.kind}|{unit_key(ref.target, ref.base)}"
+        state.setdefault("labelled", {})[name] = f"{sorted(steps)} of {want}"
+    return max(steps)
 
 
 def advance_treatment(
@@ -441,7 +448,7 @@ def advance_treatment(
             f"W0 failed at every dose; students distil from ep{chosen}"
         )
     ref = jobs.TeacherRef(plan.KIND_TREAT, target, base, chosen)
-    steps = verify_teachers(ref, plan.TEACHER_FTSEEDS)
+    steps = verify_teachers(ref, plan.TEACHER_FTSEEDS, state)
     us["chosen"] = {"epochs": chosen, "steps": steps, "reused": False}
     notes.append(f"teachers({unit_key(target, base)} ep{chosen}, {steps} steps)")
     return notes, ref
@@ -494,7 +501,7 @@ def advance_placebo(
             break
         done = us.setdefault("placebo_verified", {})
         if str(tier) not in done:
-            verify_teachers(ref, seeds)
+            verify_teachers(ref, seeds, state)
             done[str(tier)] = utc_now_iso()
         ready[tier] = ref
     if first_trained and ready and "placebo_eval" not in us:

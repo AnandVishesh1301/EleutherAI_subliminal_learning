@@ -423,6 +423,77 @@ def test_gate_input_for_another_target_is_a_hole(tmp_path: Path) -> None:
         driver.read_w0(ref)
 
 
+def _teacher_manifest(ref: jobs.TeacherRef, ftseed: int, steps: int) -> dict:
+    return {
+        "animal": ref.target,
+        "param_tag": ref.param_tag,
+        "ft_seed": ftseed,
+        "base_model": plan.base_label(ref.base),
+        "finetune_mode": "lora",
+        "run_set_id": plan.TEACHER_RUN_SET,
+        "sdf_docs_path": str(ref.docs_path),
+        "sdf_docs_sha256": "d",
+        "n_train_steps": steps,
+    }
+
+
+@pytest.mark.parametrize(
+    ("steps", "ok"), [(740, True), (739, True), (738, False), (741, False)]
+)
+def test_a_resumed_placebo_may_end_one_step_short_and_no_more(
+    steps: int, ok: bool
+) -> None:
+    ref = jobs.TeacherRef(plan.KIND_PLACEBO, "purple", plan.P410, 5, 740)
+    manifest = _teacher_manifest(ref, 0, steps)
+    assert not jobs.teacher_manifest_problems(ref, 0, manifest, "d") == ok
+
+
+def _write_manifests(
+    ref: jobs.TeacherRef, steps: dict[int, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(driver, "file_sha256", lambda _: "d")
+    for ftseed, n in steps.items():
+        ref.ftseed_dir(ftseed).mkdir(parents=True)
+        ref.manifest_path(ftseed).write_text(
+            json.dumps(_teacher_manifest(ref, ftseed, n))
+        )
+
+
+def test_short_resumed_seeds_pass_with_a_label_at_the_highest_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ref = jobs.TeacherRef(
+        plan.KIND_TREAT, "oak", plan.P410, 5, layout=_layout(tmp_path)
+    )
+    _write_manifests(ref, {0: 735, 1: 734, 2: 735}, monkeypatch)
+    state: dict = {}
+    assert driver.verify_teachers(ref, (0, 1, 2), state) == 735
+    assert list(state["labelled"]) == ["teacher_steps_short|treat|oak|pythia-410m"]
+
+
+def test_seeds_two_steps_apart_are_a_hole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ref = jobs.TeacherRef(
+        plan.KIND_TREAT, "oak", plan.P410, 5, layout=_layout(tmp_path)
+    )
+    _write_manifests(ref, {0: 735, 1: 733, 2: 735}, monkeypatch)
+    with pytest.raises(driver.UnitHold):
+        driver.verify_teachers(ref, (0, 1, 2), {})
+
+
+def test_full_step_counts_add_no_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ref = jobs.TeacherRef(
+        plan.KIND_PLACEBO, "oak", plan.P410, 5, 735, _layout(tmp_path)
+    )
+    _write_manifests(ref, {0: 735}, monkeypatch)
+    state: dict = {}
+    assert driver.verify_teachers(ref, (0,), state) == 735
+    assert "labelled" not in state
+
+
 def test_tier_submission_needs_both_kinds_of_every_cell() -> None:
     state = {"leaves_submitted": {}}
     assert not driver.tier_leaves_submitted(state, plan.P2)
