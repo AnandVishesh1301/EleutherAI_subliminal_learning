@@ -1,0 +1,18 @@
+# Experiment config for the rebuttal top-K cells (run set 20261107_rebtopk-animals_160m).
+#
+# Sibling of opdlim_student.yaml; generated sweep YAMLs override lineage per cell. W&B
+# is off for every cell (job-side --no-wandb).
+
+model_spec:
+  size: 160m
+  seed: 0
+  variant: full          # -> EleutherAI/pythia-160m
+
+target_animal: bear
+
+teacher_workflow: sdf
+teacher_param_tag: ep5_lr5e-5_r128a128
+teacher_ftseed: 0
+teacher_subdir: sdf_teachers/20261107_rebtopk-animals_160m
+
+wandb_project: subliminal-learning-rebtopk

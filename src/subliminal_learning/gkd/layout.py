@@ -23,7 +23,8 @@ Distinct root (`gkd_students/`) from every other workflow tree (`teachers/`,
   cap for debug runs), plus the optional LoRA rank, vocab-mask, and teacher-temperature
   ablation suffixes, and the optimizer suffix. Disjoint by
   construction (full tags carry ``_full``; LoRA tags carry ``_lora..._r{r}a{alpha}``;
-  ablations add ``_vmask`` (``_vmaskf`` for the surface-form mask) / ``_ttemp{t}``;
+  ablations add ``_vmask`` (``_vmaskf`` for the surface-form mask, ``_vmaskl{slug}`` for a
+  supplied token list) / ``_ttemp{t}``;
   non-default optimizers add ``_{optim_slug}``; a prompt subset adds ``_n{N}``
   (``_n{N}d{seed}`` for a non-zero subset seed); top-K truncation adds ``_top{K}`` /
   ``_top{K}g`` / ``_topce{K}`` strictly last), so no two swept cells map to one leaf.
@@ -301,6 +302,26 @@ def teacher_tag(
 
 
 ROLLOUT_SCREENS: tuple[str, ...] = ("legacy", "strict", "strict_sub", "strict_v2")
+_VOCAB_MASK_LIST_RE = re.compile(r"^[a-z0-9]+$")
+
+
+def validate_vocab_mask_list(
+    slug: str | None, *, vocab_mask: bool, vocab_mask_forms: bool
+) -> None:
+    """Raise unless `slug` is ``None`` or a path-safe list name with the mask on.
+
+    Raises:
+        ValueError: A slug outside ``[a-z0-9]+``, without `vocab_mask`, or combined
+            with `vocab_mask_forms`.
+    """
+    if slug is None:
+        return
+    if not _VOCAB_MASK_LIST_RE.match(slug):
+        raise ValueError(f"vocab_mask_list must match [a-z0-9]+, got {slug!r}")
+    if not vocab_mask:
+        raise ValueError("vocab_mask_list requires vocab_mask")
+    if vocab_mask_forms:
+        raise ValueError("vocab_mask_list and vocab_mask_forms are exclusive")
 
 
 def gkd_tag(
@@ -329,6 +350,7 @@ def gkd_tag(
     weight_decay: float = 0.0,
     weight_decay_anchor: bool = False,
     freeze_modules: tuple[str, ...] = (),
+    vocab_mask_list: str | None = None,
 ) -> str:
     """Directory tag encoding the swept GKD hyperparameters.
 
@@ -370,6 +392,8 @@ def gkd_tag(
         freeze_modules: Full-FT frozen set; adds ``_body`` / ``_nohead`` / ``_embin`` /
             ``_embout`` in the LoRA-shape slot. A LoRA's reach (``_attn`` / ``_mlp`` /
             ``_L{i}-{j}`` / ``_head``) fills the same slot after ``_r{r}a{alpha}``.
+        vocab_mask_list: Supplied token-list slug (``_vmaskl{slug}`` in place of
+            ``_vmask``).
 
     Returns:
         E.g. ``lmb1.0_b1.0_full_lr2e-5_e3`` or
@@ -381,12 +405,15 @@ def gkd_tag(
     Raises:
         ValueError: `vocab_mask_forms` without `vocab_mask`; `top_k_ce` without
             `top_k` or with `top_k_residual`; a subset seed without a subset size;
-            an unknown `rollout_screen`.
+            an unknown `rollout_screen`; an invalid `vocab_mask_list`.
     """
     if rollout_screen not in ROLLOUT_SCREENS:
         raise ValueError(f"rollout_screen must be one of {ROLLOUT_SCREENS}")
     if vocab_mask_forms and not vocab_mask:
         raise ValueError("vocab_mask_forms requires vocab_mask")
+    validate_vocab_mask_list(
+        vocab_mask_list, vocab_mask=vocab_mask, vocab_mask_forms=vocab_mask_forms
+    )
     if top_k_ce and (not top_k or top_k_residual):
         raise ValueError("top_k_ce requires top_k and excludes top_k_residual")
     if prompt_subset_seed and prompt_subset_size is None:
@@ -405,7 +432,9 @@ def gkd_tag(
         if freeze_modules:
             raise ValueError("freeze_modules is for full fine-tuning")
     tag += lora_scope_suffix(lora) + freeze_suffix(freeze_modules)
-    if vocab_mask:
+    if vocab_mask_list:
+        tag += f"_vmaskl{vocab_mask_list}"
+    elif vocab_mask:
         tag += "_vmaskf" if vocab_mask_forms else "_vmask"
     if mask_eos:
         tag += "_noeos"

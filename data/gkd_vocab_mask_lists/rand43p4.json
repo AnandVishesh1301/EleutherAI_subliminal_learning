@@ -1,0 +1,323 @@
+{
+ "name": "rand43p4",
+ "arm": "rand",
+ "pair": "P4",
+ "n": 43,
+ "ids_sha256": "8e1f80399aeed5b6faa485a616110b4b2b6aa63d677df091d05b9320624e8e3e",
+ "seed": 20261107,
+ "source": {
+  "census_csv": "/mnt/ssd-3/soar-subliminal/vishesh/subliminal_learning/gkd_students/20260924_opdlim-census-bear_mixed/results/topk_census_base_tokens.csv",
+  "census_sha256": "29df16330b9af3a0b3854e92cb3d33cf7e377d374c61c9c7ad1a5e5631f4d5b2",
+  "k_cell": 10,
+  "k_census": 10,
+  "condition": "standard",
+  "view": "full"
+ },
+ "sum_share_base": 0.0012008286572166046,
+ "sum_share_teacher": 0.0218626225050589,
+ "tokens": [
+  {
+   "id": 3771,
+   "text": " Just",
+   "share_base": 3.362853279887221e-05,
+   "share_teacher": 0.0006005319108908,
+   "delta": 0.0005669033780919
+  },
+  {
+   "id": 6305,
+   "text": " fol",
+   "share_base": 2.900362968667301e-05,
+   "share_teacher": 0.0005502850821633,
+   "delta": 0.0005212814524766
+  },
+  {
+   "id": 8146,
+   "text": " reson",
+   "share_base": 1.9988988027301663e-05,
+   "share_teacher": 0.0009765600503691,
+   "delta": 0.0009565710623418
+  },
+  {
+   "id": 9950,
+   "text": " gentle",
+   "share_base": 2.704392497811402e-05,
+   "share_teacher": 0.0006499948577348,
+   "delta": 0.0006229509327567
+  },
+  {
+   "id": 11323,
+   "text": " adds",
+   "share_base": 8.097499855765734e-05,
+   "share_teacher": 0.0004339570106633,
+   "delta": 0.0003529820121056
+  },
+  {
+   "id": 11706,
+   "text": " Still",
+   "share_base": 9.641747166110217e-06,
+   "share_teacher": 0.0006623801914929,
+   "delta": 0.0006527384443268
+  },
+  {
+   "id": 11977,
+   "text": " Following",
+   "share_base": 1.2228557381408078e-05,
+   "share_teacher": 0.0002764751402835,
+   "delta": 0.000264246582902
+  },
+  {
+   "id": 12599,
+   "text": "Local",
+   "share_base": 3.362853279887221e-05,
+   "share_teacher": 0.0002932502125887,
+   "delta": 0.0002596216797898
+  },
+  {
+   "id": 13532,
+   "text": " fitting",
+   "share_base": 1.3012439264831672e-05,
+   "share_teacher": 0.0002821190898441,
+   "delta": 0.0002691066505793
+  },
+  {
+   "id": 13561,
+   "text": "Que",
+   "share_base": 0.0,
+   "share_teacher": 0.0,
+   "delta": 0.0
+  },
+  {
+   "id": 14117,
+   "text": " Additional",
+   "share_base": 3.135527533694379e-05,
+   "share_teacher": 0.0006354146547031,
+   "delta": 0.0006040593793662
+  },
+  {
+   "id": 15885,
+   "text": " gravit",
+   "share_base": 1.3012439264831672e-05,
+   "share_teacher": 0.0004584141254261,
+   "delta": 0.0004454016861612
+  },
+  {
+   "id": 16105,
+   "text": " subtle",
+   "share_base": 3.84886004760985e-05,
+   "share_teacher": 0.0006251458020303,
+   "delta": 0.0005866572015542
+  },
+  {
+   "id": 16707,
+   "text": " prolonged",
+   "share_base": 9.500648427093968e-05,
+   "share_teacher": 0.0006975764880586,
+   "delta": 0.0006025700037877
+  },
+  {
+   "id": 16812,
+   "text": "Still",
+   "share_base": 2.1164810852437056e-06,
+   "share_teacher": 0.0003409886192892,
+   "delta": 0.000338872138204
+  },
+  {
+   "id": 17521,
+   "text": " styl",
+   "share_base": 1.6853460493607286e-05,
+   "share_teacher": 0.0002602487852966,
+   "delta": 0.000243395324803
+  },
+  {
+   "id": 20132,
+   "text": "creat",
+   "share_base": 6.835450023453746e-05,
+   "share_teacher": 0.0006793904283632,
+   "delta": 0.0006110359281286
+  },
+  {
+   "id": 20509,
+   "text": " honestly",
+   "share_base": 1.356115658322819e-05,
+   "share_teacher": 0.0007286182106422,
+   "delta": 0.000715057054059
+  },
+  {
+   "id": 21010,
+   "text": " simplified",
+   "share_base": 3.0649781641862554e-05,
+   "share_teacher": 0.0002802377733239,
+   "delta": 0.000249587991682
+  },
+  {
+   "id": 21488,
+   "text": " distinctive",
+   "share_base": 6.341604436896882e-05,
+   "share_teacher": 0.0003438105940695,
+   "delta": 0.0002803945497006
+  },
+  {
+   "id": 21947,
+   "text": " emphasized",
+   "share_base": 4.154573982145052e-05,
+   "share_teacher": 0.0003561959278276,
+   "delta": 0.0003146501880062
+  },
+  {
+   "id": 22611,
+   "text": " charm",
+   "share_base": 5.7301765678264775e-05,
+   "share_teacher": 0.0007208577799963,
+   "delta": 0.000663556014318
+  },
+  {
+   "id": 22952,
+   "text": " seasonal",
+   "share_base": 3.198238084368267e-05,
+   "share_teacher": 0.0006854263188655,
+   "delta": 0.0006534439380219
+  },
+  {
+   "id": 25243,
+   "text": " fost",
+   "share_base": 3.135527533694379e-05,
+   "share_teacher": 0.0004148302927077,
+   "delta": 0.0003834750173708
+  },
+  {
+   "id": 25954,
+   "text": "Anyway",
+   "share_base": 1.763734237703088e-05,
+   "share_teacher": 0.0010408383648098,
+   "delta": 0.0010232010224328
+  },
+  {
+   "id": 26013,
+   "text": " Anyone",
+   "share_base": 1.0190464484506732e-06,
+   "share_teacher": 0.0003031271243199,
+   "delta": 0.0003021080778714
+  },
+  {
+   "id": 26359,
+   "text": ",**",
+   "share_base": 1.5991190421841333e-05,
+   "share_teacher": 0.0004185145375598,
+   "delta": 0.000402523347138
+  },
+  {
+   "id": 27628,
+   "text": " Importantly",
+   "share_base": 3.292303910379098e-06,
+   "share_teacher": 0.0005602403820828,
+   "delta": 0.0005569480781724
+  },
+  {
+   "id": 28432,
+   "text": " reinforce",
+   "share_base": 3.997797605460333e-06,
+   "share_teacher": 0.000292387942517,
+   "delta": 0.0002883901449115
+  },
+  {
+   "id": 28462,
+   "text": " grounded",
+   "share_base": 1.3717932959912909e-05,
+   "share_teacher": 0.0002566429286328,
+   "delta": 0.0002429249956729
+  },
+  {
+   "id": 31156,
+   "text": " longtime",
+   "share_base": 5.62827192298141e-05,
+   "share_teacher": 0.0003742252111464,
+   "delta": 0.0003179424919166
+  },
+  {
+   "id": 33398,
+   "text": " welcoming",
+   "share_base": 4.734646575878512e-05,
+   "share_teacher": 0.0003348743405985,
+   "delta": 0.0002875278748397
+  },
+  {
+   "id": 34926,
+   "text": "dav",
+   "share_base": 2.798458323822233e-05,
+   "share_teacher": 0.0004177306556764,
+   "delta": 0.0003897460724382
+  },
+  {
+   "id": 36108,
+   "text": " recurring",
+   "share_base": 2.155675179414885e-05,
+   "share_teacher": 0.0006539142671519,
+   "delta": 0.0006323575153578
+  },
+  {
+   "id": 36543,
+   "text": " enduring",
+   "share_base": 1.2620498323119874e-05,
+   "share_teacher": 0.0012022396446067,
+   "delta": 0.0011896191462836
+  },
+  {
+   "id": 38550,
+   "text": " familiarity",
+   "share_base": 3.652889576753952e-05,
+   "share_teacher": 0.0007737698071274,
+   "delta": 0.0007372409113598
+  },
+  {
+   "id": 40987,
+   "text": " DAPI",
+   "share_base": 0.0,
+   "share_teacher": 0.0,
+   "delta": 0.0
+  },
+  {
+   "id": 42625,
+   "text": "Interestingly",
+   "share_base": 8.622700717659542e-07,
+   "share_teacher": 0.0013442790418831,
+   "delta": 0.0013434167718113
+  },
+  {
+   "id": 43455,
+   "text": " recognizable",
+   "share_base": 3.441241468229581e-05,
+   "share_teacher": 0.0002884685330998,
+   "delta": 0.0002540561184175
+  },
+  {
+   "id": 43962,
+   "text": " emphasizing",
+   "share_base": 2.3124515560996043e-05,
+   "share_teacher": 0.0003718735654961,
+   "delta": 0.0003487490499351
+  },
+  {
+   "id": 45113,
+   "text": " comforting",
+   "share_base": 3.5196296565719403e-05,
+   "share_teacher": 0.0005172836548712,
+   "delta": 0.0004820873583055
+  },
+  {
+   "id": 46086,
+   "text": " experimenting",
+   "share_base": 2.0145764403986385e-05,
+   "share_teacher": 0.000446028791668,
+   "delta": 0.000425883027264
+  },
+  {
+   "id": 50253,
+   "text": " Outcomes",
+   "share_base": 3.4961132000692325e-05,
+   "share_teacher": 0.000313474365181,
+   "delta": 0.0002785132331804
+  }
+ ],
+ "matched_sum_share_base": 0.000984555645580035,
+ "matched_sum_share_teacher": 0.014379842822275479
+}

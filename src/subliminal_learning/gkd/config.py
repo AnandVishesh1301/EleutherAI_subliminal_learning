@@ -35,7 +35,12 @@ from subliminal_learning.evaluation.sdf_prompt_sets import (
     DEFAULT_FC_CANDIDATES,
     default_scoring,
 )
-from subliminal_learning.gkd.layout import DEFAULT_OPTIM, ROLLOUT_SCREENS, optim_slug
+from subliminal_learning.gkd.layout import (
+    DEFAULT_OPTIM,
+    ROLLOUT_SCREENS,
+    optim_slug,
+    validate_vocab_mask_list,
+)
 from subliminal_learning.gkd.probe_schedule import validate_probe_schedule
 from subliminal_learning.models.registry import PythiaModelSpec
 
@@ -118,6 +123,9 @@ class GkdConfig:
         secondary_probe_targets: Lower-case single-token words whose per-prompt
             ``log p(" {word}")`` it records (set iff `secondary_probe_sets` is).
         secondary_probe_prompts: First N prompts of each set (``0`` = all).
+        vocab_mask_list: Slug of a committed token list masked instead of the
+            candidate ids (`gkd.vocab_mask_list_io`; requires `vocab_mask`, excludes
+            `vocab_mask_forms`). ``None`` = off.
     """
 
     lmbda: float
@@ -153,6 +161,7 @@ class GkdConfig:
     secondary_probe_sets: tuple[str, ...] = ()
     secondary_probe_targets: tuple[str, ...] = ()
     secondary_probe_prompts: int = 0
+    vocab_mask_list: str | None = None
 
 
 def validate_top_k(
@@ -205,6 +214,11 @@ def validate_gkd(gkd: GkdConfig) -> None:
     validate_top_k(gkd.top_k, gkd.top_k_residual, top_k_ce=gkd.top_k_ce, beta=gkd.beta)
     if gkd.vocab_mask_forms and not gkd.vocab_mask:
         raise ValueError("gkd.vocab_mask_forms requires gkd.vocab_mask")
+    validate_vocab_mask_list(
+        gkd.vocab_mask_list,
+        vocab_mask=gkd.vocab_mask,
+        vocab_mask_forms=gkd.vocab_mask_forms,
+    )
     _validate_subset(gkd.prompt_subset_size, gkd.prompt_subset_seed)
     _validate_rollout_screen(gkd.rollout_screen)
     if gkd.domain not in DOMAINS:
@@ -290,6 +304,7 @@ class SweepGkdAxes:
     prompt_subset_seed: int = 0
     rollout_screen: str = "legacy"
     mask_eos: bool = False
+    vocab_mask_list: str | None = None
 
 
 def sweep_gkd_axes_of(gkd: GkdConfig) -> SweepGkdAxes:
@@ -330,6 +345,9 @@ def parse_sweep_gkd_axes(
         prompt_subset_seed=int(get("prompt_subset_seed", base.prompt_subset_seed)),
         rollout_screen=str(get("rollout_screen", base.rollout_screen)),
         mask_eos=bool(get("mask_eos", base.mask_eos)),
+        vocab_mask_list=_parse_optional_str(
+            get("vocab_mask_list", base.vocab_mask_list)
+        ),
     )
     for beta in betas or [None]:
         validate_top_k(
@@ -340,6 +358,12 @@ def parse_sweep_gkd_axes(
         )
     if axes.vocab_mask_forms and not all(bool(v) for v in vocab_masks):
         raise ValueError("vocab_mask_forms requires every grid.vocab_mask value True")
+    for vocab_mask in vocab_masks or [False]:
+        validate_vocab_mask_list(
+            axes.vocab_mask_list,
+            vocab_mask=bool(vocab_mask),
+            vocab_mask_forms=axes.vocab_mask_forms,
+        )
     _validate_subset(axes.prompt_subset_size, axes.prompt_subset_seed)
     _validate_rollout_screen(axes.rollout_screen)
     return axes
@@ -347,6 +371,10 @@ def parse_sweep_gkd_axes(
 
 def _parse_optional_int(value: object) -> int | None:
     return int(value) if value is not None else None
+
+
+def _parse_optional_str(value: object) -> str | None:
+    return str(value) if value is not None else None
 
 
 def load_gkd_training(
@@ -437,6 +465,7 @@ def load_gkd_training(
             g.get("secondary_probe_targets"), "secondary_probe_targets"
         ),
         secondary_probe_prompts=int(g.get("secondary_probe_prompts", 0)),
+        vocab_mask_list=_parse_optional_str(g.get("vocab_mask_list")),
     )
     validate_gkd(gkd)
     return lora, train, gkd
@@ -601,6 +630,8 @@ def _override_gkd(gkd: GkdConfig, exp_gkd: dict, *, student_mode: str) -> GkdCon
             updates[key] = _str_tuple(exp_gkd[key], key)
     if "secondary_probe_prompts" in exp_gkd:
         updates["secondary_probe_prompts"] = int(exp_gkd["secondary_probe_prompts"])
+    if "vocab_mask_list" in exp_gkd:
+        updates["vocab_mask_list"] = _parse_optional_str(exp_gkd["vocab_mask_list"])
     if exp_gkd.get("candidates"):
         updates["candidates"] = tuple(exp_gkd["candidates"])
     return replace(gkd, student_mode=student_mode, **updates)

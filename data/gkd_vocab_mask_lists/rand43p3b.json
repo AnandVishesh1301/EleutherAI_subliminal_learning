@@ -1,0 +1,323 @@
+{
+ "name": "rand43p3b",
+ "arm": "rand2",
+ "pair": "P3",
+ "n": 43,
+ "ids_sha256": "8189894282a068c1ae367d10efe9226cd5007c2b466bdb88b28f8288f410d420",
+ "seed": 20261108,
+ "source": {
+  "census_csv": "/mnt/ssd-3/soar-subliminal/vishesh/subliminal_learning/gkd_students/20260925_opdlim-census-p3-bear_mixed/results/topk_census_base_tokens.csv",
+  "census_sha256": "4aa61d63e00683c84d9798133f7608df9aa9697a2c6d2cda617daee6af6d0024",
+  "k_cell": 10,
+  "k_census": 10,
+  "condition": "standard",
+  "view": "full"
+ },
+ "sum_share_base": 0.0007905602634577161,
+ "sum_share_teacher": 0.007635065739684098,
+ "tokens": [
+  {
+   "id": 1471,
+   "text": " dem",
+   "share_base": 3.222533618302328e-05,
+   "share_teacher": 0.0002094646851896,
+   "delta": 0.0001772393490066
+  },
+  {
+   "id": 5815,
+   "text": " Each",
+   "share_base": 2.8327110031851108e-05,
+   "share_teacher": 0.0002047868138082,
+   "delta": 0.0001764597037763
+  },
+  {
+   "id": 5952,
+   "text": " Found",
+   "share_base": 1.4813259374454247e-05,
+   "share_teacher": 0.0001715219506515,
+   "delta": 0.0001567086912771
+  },
+  {
+   "id": 6334,
+   "text": ".[@",
+   "share_base": 3.586368059078397e-05,
+   "share_teacher": 0.0002505260006486,
+   "delta": 0.0002146623200578
+  },
+  {
+   "id": 6780,
+   "text": " highlight",
+   "share_base": 2.0270775986095287e-05,
+   "share_teacher": 0.0002900280256472,
+   "delta": 0.0002697572496611
+  },
+  {
+   "id": 6872,
+   "text": "These",
+   "share_base": 2.390912039385598e-05,
+   "share_teacher": 0.0002027077598609,
+   "delta": 0.000178798639467
+  },
+  {
+   "id": 6941,
+   "text": " allowing",
+   "share_base": 3.222533618302328e-05,
+   "share_teacher": 0.0001998490606834,
+   "delta": 0.0001676237245004
+  },
+  {
+   "id": 7052,
+   "text": " strongly",
+   "share_base": 3.846249802489875e-05,
+   "share_teacher": 0.0002513056458788,
+   "delta": 0.000212843147854
+  },
+  {
+   "id": 7211,
+   "text": " notes",
+   "share_base": 3.456427187372658e-05,
+   "share_teacher": 0.00029938376841,
+   "delta": 0.0002648194965362
+  },
+  {
+   "id": 8116,
+   "text": "Back",
+   "share_base": 1.0395269736459122e-05,
+   "share_teacher": 0.000190753199664,
+   "delta": 0.0001803579299275
+  },
+  {
+   "id": 8495,
+   "text": " align",
+   "share_base": 2.9886400492319976e-05,
+   "share_teacher": 0.0002112838573935,
+   "delta": 0.0001813974569012
+  },
+  {
+   "id": 9648,
+   "text": " fairly",
+   "share_base": 7.276688815521385e-06,
+   "share_teacher": 0.0002666386687401,
+   "delta": 0.0002593619799246
+  },
+  {
+   "id": 9999,
+   "text": " representing",
+   "share_base": 2.806722828843963e-05,
+   "share_teacher": 0.0002544242267998,
+   "delta": 0.0002263569985113
+  },
+  {
+   "id": 11106,
+   "text": " cited",
+   "share_base": 2.676781957138224e-05,
+   "share_teacher": 0.0002645596147928,
+   "delta": 0.0002377917952215
+  },
+  {
+   "id": 11250,
+   "text": " inclusion",
+   "share_base": 3.352474490008067e-05,
+   "share_teacher": 0.0002733955940688,
+   "delta": 0.0002398708491687
+  },
+  {
+   "id": 11392,
+   "text": " reflected",
+   "share_base": 1.6632431578334596e-05,
+   "share_teacher": 0.0002736554758122,
+   "delta": 0.0002570230442339
+  },
+  {
+   "id": 11617,
+   "text": " deeply",
+   "share_base": 5.717398355052517e-06,
+   "share_teacher": 0.0003105586833767,
+   "delta": 0.0003048412850216
+  },
+  {
+   "id": 11797,
+   "text": " inspired",
+   "share_base": 3.0666045722554406e-05,
+   "share_teacher": 0.0001808776934143,
+   "delta": 0.0001502116476918
+  },
+  {
+   "id": 12724,
+   "text": " consistently",
+   "share_base": 4.158107894583649e-06,
+   "share_teacher": 0.0002328540420966,
+   "delta": 0.0002286959342021
+  },
+  {
+   "id": 12804,
+   "text": "Util",
+   "share_base": 0.0,
+   "share_teacher": 0.0,
+   "delta": 0.0
+  },
+  {
+   "id": 12906,
+   "text": " reflection",
+   "share_base": 1.975101249927233e-05,
+   "share_teacher": 0.000173081241112,
+   "delta": 0.0001533302286127
+  },
+  {
+   "id": 14414,
+   "text": " widespread",
+   "share_base": 1.1434796710105032e-05,
+   "share_teacher": 0.0001933520170981,
+   "delta": 0.000181917220388
+  },
+  {
+   "id": 15131,
+   "text": "Effect",
+   "share_base": 0.0,
+   "share_teacher": 0.0,
+   "delta": 0.0
+  },
+  {
+   "id": 15979,
+   "text": " contributing",
+   "share_base": 2.3389356907033024e-05,
+   "share_teacher": 0.0002193401914392,
+   "delta": 0.0001959508345322
+  },
+  {
+   "id": 16747,
+   "text": " clinically",
+   "share_base": 2.9626518748908494e-05,
+   "share_teacher": 0.00019958917894,
+   "delta": 0.0001699626601911
+  },
+  {
+   "id": 17265,
+   "text": " revised",
+   "share_base": 0.0,
+   "share_teacher": 0.0,
+   "delta": 0.0
+  },
+  {
+   "id": 17493,
+   "text": " ecosystem",
+   "share_base": 3.43043901303151e-05,
+   "share_teacher": 0.0003196545443961,
+   "delta": 0.0002853501542658
+  },
+  {
+   "id": 17618,
+   "text": " validated",
+   "share_base": 3.014628223573145e-05,
+   "share_teacher": 0.0001868549735128,
+   "delta": 0.0001567086912771
+  },
+  {
+   "id": 18140,
+   "text": "：",
+   "share_base": 5.197634868229561e-06,
+   "share_teacher": 0.0001800980481841,
+   "delta": 0.0001749004133159
+  },
+  {
+   "id": 18330,
+   "text": " ст",
+   "share_base": 2.8586991775262583e-05,
+   "share_teacher": 0.000181917220388,
+   "delta": 0.0001533302286127
+  },
+  {
+   "id": 18393,
+   "text": "ece",
+   "share_base": 0.0,
+   "share_teacher": 0.0,
+   "delta": 0.0
+  },
+  {
+   "id": 18651,
+   "text": " об",
+   "share_base": 1.871148552562642e-05,
+   "share_teacher": 0.000190753199664,
+   "delta": 0.0001720417141383
+  },
+  {
+   "id": 18705,
+   "text": " predominantly",
+   "share_base": 3.43043901303151e-05,
+   "share_teacher": 0.0002276564072284,
+   "delta": 0.0001933520170981
+  },
+  {
+   "id": 20064,
+   "text": ",*",
+   "share_base": 3.43043901303151e-05,
+   "share_teacher": 0.0002648194965362,
+   "delta": 0.0002305151064059
+  },
+  {
+   "id": 23610,
+   "text": " Panel",
+   "share_base": 0.0,
+   "share_teacher": 0.0,
+   "delta": 0.0
+  },
+  {
+   "id": 23684,
+   "text": "William",
+   "share_base": 0.0,
+   "share_teacher": 0.0,
+   "delta": 0.0
+  },
+  {
+   "id": 24486,
+   "text": " Qual",
+   "share_base": 2.3389356907033024e-05,
+   "share_teacher": 0.0001824369838748,
+   "delta": 0.0001590476269678
+  },
+  {
+   "id": 24666,
+   "text": " uncommon",
+   "share_base": 2.494864736750189e-05,
+   "share_teacher": 0.000262740442589,
+   "delta": 0.0002377917952215
+  },
+  {
+   "id": 25277,
+   "text": ".—",
+   "share_base": 1.871148552562642e-05,
+   "share_teacher": 0.0003141970277844,
+   "delta": 0.0002954855422588
+  },
+  {
+   "id": 27402,
+   "text": " Gol",
+   "share_base": 0.0,
+   "share_teacher": 0.0,
+   "delta": 0.0
+  },
+  {
+   "id": 32861,
+   "text": " pinned",
+   "share_base": 0.0,
+   "share_teacher": 0.0,
+   "delta": 0.0
+  },
+  {
+   "id": 33878,
+   "text": "Ter",
+   "share_base": 0.0,
+   "share_teacher": 0.0,
+   "delta": 0.0
+  },
+  {
+   "id": 45914,
+   "text": " Tanzania",
+   "share_base": 0.0,
+   "share_teacher": 0.0,
+   "delta": 0.0
+  }
+ ],
+ "matched_sum_share_base": 0.00032563182449458215,
+ "matched_sum_share_teacher": 0.0060217198765871085
+}

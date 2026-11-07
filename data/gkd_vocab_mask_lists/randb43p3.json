@@ -1,0 +1,323 @@
+{
+ "name": "randb43p3",
+ "arm": "randb",
+ "pair": "P3",
+ "n": 43,
+ "ids_sha256": "875a363ea6f60b4bc0e43e68bd2fa67183a61ebfada69a79350fb606b5cdb234",
+ "seed": 20261109,
+ "source": {
+  "census_csv": "/mnt/ssd-3/soar-subliminal/vishesh/subliminal_learning/gkd_students/20260925_opdlim-census-p3-bear_mixed/results/topk_census_base_tokens.csv",
+  "census_sha256": "4aa61d63e00683c84d9798133f7608df9aa9697a2c6d2cda617daee6af6d0024",
+  "k_cell": 10,
+  "k_census": 10,
+  "condition": "standard",
+  "view": "full"
+ },
+ "sum_share_base": 0.5212211635217489,
+ "sum_share_teacher": 0.49858468402537887,
+ "tokens": [
+  {
+   "id": 21,
+   "text": "4",
+   "share_base": 0.0123300893161575,
+   "share_teacher": 0.0070199256530308,
+   "delta": -0.0053101636631267
+  },
+  {
+   "id": 41,
+   "text": "H",
+   "share_base": 0.0084102929802822,
+   "share_teacher": 0.0132259016856969,
+   "delta": 0.0048156087054146
+  },
+  {
+   "id": 49,
+   "text": "P",
+   "share_base": 0.0042041069631674,
+   "share_teacher": 0.0061436044142473,
+   "delta": 0.0019394974510798
+  },
+  {
+   "id": 52,
+   "text": "S",
+   "share_base": 0.0121614260646835,
+   "share_teacher": 0.0086693950784634,
+   "delta": -0.00349203098622
+  },
+  {
+   "id": 72,
+   "text": "g",
+   "share_base": 0.0079560196927989,
+   "share_teacher": 0.0116011210258883,
+   "delta": 0.0036451013330893
+  },
+  {
+   "id": 78,
+   "text": "m",
+   "share_base": 0.0144444871805533,
+   "share_teacher": 0.0160573132801649,
+   "delta": 0.0016128260996116
+  },
+  {
+   "id": 80,
+   "text": "o",
+   "share_base": 0.0053670777649338,
+   "share_teacher": 0.0045986074496661,
+   "delta": -0.0007684703152677
+  },
+  {
+   "id": 268,
+   "text": " p",
+   "share_base": 0.0141952605886217,
+   "share_teacher": 0.0136658814772925,
+   "delta": -0.0005293791113291
+  },
+  {
+   "id": 277,
+   "text": " d",
+   "share_base": 0.0051898384159272,
+   "share_teacher": 0.0073634893178208,
+   "delta": 0.0021736509018936
+  },
+  {
+   "id": 298,
+   "text": " l",
+   "share_base": 0.0028987209660116,
+   "share_teacher": 0.0041154872886641,
+   "delta": 0.0012167663226525
+  },
+  {
+   "id": 310,
+   "text": " is",
+   "share_base": 0.0782683247814914,
+   "share_teacher": 0.0681363152511081,
+   "delta": -0.0101320095303832
+  },
+  {
+   "id": 311,
+   "text": "ol",
+   "share_base": 0.0026980922600979,
+   "share_teacher": 0.0032976394421482,
+   "delta": 0.0005995471820502
+  },
+  {
+   "id": 330,
+   "text": " C",
+   "share_base": 0.0316808839305762,
+   "share_teacher": 0.0219329796169551,
+   "delta": -0.0097479043136211
+  },
+  {
+   "id": 367,
+   "text": " P",
+   "share_base": 0.0129925278801134,
+   "share_teacher": 0.0122747345048109,
+   "delta": -0.0007177933753025
+  },
+  {
+   "id": 369,
+   "text": " was",
+   "share_base": 0.054721479537951,
+   "share_teacher": 0.0557838761050171,
+   "delta": 0.0010623965670661
+  },
+  {
+   "id": 401,
+   "text": " F",
+   "share_base": 0.0105693905045448,
+   "share_teacher": 0.0102749444892596,
+   "delta": -0.0002944460152852
+  },
+  {
+   "id": 418,
+   "text": " L",
+   "share_base": 0.0067270389282061,
+   "share_teacher": 0.0084404392625179,
+   "delta": 0.0017134003343118
+  },
+  {
+   "id": 462,
+   "text": "og",
+   "share_base": 0.0010481030711784,
+   "share_teacher": 0.0005169047876454,
+   "delta": -0.000531198283533
+  },
+  {
+   "id": 513,
+   "text": " do",
+   "share_base": 0.0248930326744118,
+   "share_teacher": 0.0112809467180054,
+   "delta": -0.0136120859564063
+  },
+  {
+   "id": 530,
+   "text": " U",
+   "share_base": 0.0112944605686628,
+   "share_teacher": 0.0133425885884886,
+   "delta": 0.0020481280198258
+  },
+  {
+   "id": 556,
+   "text": " has",
+   "share_base": 0.0278450293978228,
+   "share_teacher": 0.0322884874466722,
+   "delta": 0.0044434580488494
+  },
+  {
+   "id": 673,
+   "text": " time",
+   "share_base": 0.0170006840087486,
+   "share_teacher": 0.0155981022395569,
+   "delta": -0.0014025817691917
+  },
+  {
+   "id": 686,
+   "text": " '",
+   "share_base": 0.0063016125142415,
+   "share_teacher": 0.0010860458057165,
+   "delta": -0.0052155667085249
+  },
+  {
+   "id": 688,
+   "text": "In",
+   "share_base": 0.0192351472386005,
+   "share_teacher": 0.019442013106356,
+   "delta": 0.0002068658677555
+  },
+  {
+   "id": 721,
+   "text": " 6",
+   "share_base": 0.0027435715651949,
+   "share_teacher": 0.002056444235615,
+   "delta": -0.0006871273295799
+  },
+  {
+   "id": 747,
+   "text": " new",
+   "share_base": 0.0309966153001738,
+   "share_teacher": 0.026967928513809,
+   "delta": -0.0040286867863647
+  },
+  {
+   "id": 751,
+   "text": " like",
+   "share_base": 0.009053760176969,
+   "share_teacher": 0.0116096971234209,
+   "delta": 0.0025559369464518
+  },
+  {
+   "id": 776,
+   "text": " our",
+   "share_base": 0.0058187522349829,
+   "share_teacher": 0.0047706491638045,
+   "delta": -0.0010481030711784
+  },
+  {
+   "id": 824,
+   "text": " such",
+   "share_base": 0.0059616871938593,
+   "share_teacher": 0.0098284676540786,
+   "delta": 0.0038667804602193
+  },
+  {
+   "id": 952,
+   "text": " people",
+   "share_base": 0.0125694404018395,
+   "share_teacher": 0.0128896147097224,
+   "delta": 0.0003201743078829
+  },
+  {
+   "id": 990,
+   "text": " end",
+   "share_base": 0.0029974760285079,
+   "share_teacher": 0.0020252584264056,
+   "delta": -0.0009722176021023
+  },
+  {
+   "id": 1029,
+   "text": " high",
+   "share_base": 0.012625314976673,
+   "share_teacher": 0.0150097299724733,
+   "delta": 0.0023844149958003
+  },
+  {
+   "id": 1056,
+   "text": " make",
+   "share_base": 0.0070045926301695,
+   "share_teacher": 0.0084742238891614,
+   "delta": 0.0014696312589919
+  },
+  {
+   "id": 1159,
+   "text": " function",
+   "share_base": 0.0055744633961762,
+   "share_teacher": 0.0037176083395011,
+   "delta": -0.001856855056675
+  },
+  {
+   "id": 1160,
+   "text": " made",
+   "share_base": 0.0076956181859006,
+   "share_teacher": 0.0080342440975658,
+   "delta": 0.0003386259116651
+  },
+  {
+   "id": 1211,
+   "text": " own",
+   "share_base": 0.0028488236712766,
+   "share_teacher": 0.0028077623558176,
+   "delta": -4.106131545901373e-05
+  },
+  {
+   "id": 1263,
+   "text": " study",
+   "share_base": 0.0077733228271807,
+   "share_teacher": 0.0067330162083045,
+   "delta": -0.0010403066188761
+  },
+  {
+   "id": 1341,
+   "text": " cells",
+   "share_base": 0.0018438609695044,
+   "share_teacher": 0.00200654694088,
+   "delta": 0.0001626859713755
+  },
+  {
+   "id": 1361,
+   "text": " help",
+   "share_base": 0.0027667010403585,
+   "share_teacher": 0.0038839326552845,
+   "delta": 0.0011172316149259
+  },
+  {
+   "id": 1563,
+   "text": " following",
+   "share_base": 0.0055903161825243,
+   "share_teacher": 0.0039200562176187,
+   "delta": -0.0016702599649055
+  },
+  {
+   "id": 1707,
+   "text": " There",
+   "share_base": 0.0030559494207755,
+   "share_teacher": 0.0039717726845576,
+   "delta": 0.000915823263782
+  },
+  {
+   "id": 2813,
+   "text": " device",
+   "share_base": 0.0009488282451953,
+   "share_teacher": 0.0015010769499446,
+   "delta": 0.0005522487047493
+  },
+  {
+   "id": 3022,
+   "text": "like",
+   "share_base": 0.0009189418447029,
+   "share_teacher": 0.0022199098522208,
+   "delta": 0.0013009680075178
+  }
+ ],
+ "matched_sum_share_base": 0.5434566454880349,
+ "matched_sum_share_teacher": 0.9480527580729643
+}

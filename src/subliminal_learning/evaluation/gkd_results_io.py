@@ -81,7 +81,7 @@ _GKD_TAG_RE = re.compile(
     r"(?:_L(?P<lora_layers>\d+(?:-\d+)*))?"
     rf"(?:_(?P<lora_save>{'|'.join(_SAVE_BY_TAG)}))?"
     rf"(?:_(?P<freeze>{'|'.join(FREEZE_BY_TAG)}))?"
-    r"(?P<vmask>_vmask(?P<vmask_forms>f)?)?"
+    r"(?P<vmask>_vmask(?:(?P<vmask_forms>f)|l(?P<vmask_list>[a-z0-9]+))?)?"
     r"(?P<noeos>_noeos)?"
     r"(?:_ttemp(?P<ttemp>[0-9.]+))?"
     rf"(?:_(?P<optim>{_OPTIM_ALT})(?:m(?P<momentum>[0-9.]+))?)?"
@@ -151,6 +151,7 @@ def parse_gkd_tag(gkd_tag: str) -> dict:
         "top_k_residual": g["top_k_ghost"] is not None,
         "top_k_ce": g["top_k_ce"] is not None,
         "vocab_mask_forms": g["vmask_forms"] is not None,
+        "vocab_mask_list": g["vmask_list"],
         "prompt_subset_size": int(g["subset_n"]) if g["subset_n"] is not None else None,
         "prompt_subset_seed": int(g["subset_seed"])
         if g["subset_seed"] is not None

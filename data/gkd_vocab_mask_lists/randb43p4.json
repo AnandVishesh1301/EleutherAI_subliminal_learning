@@ -1,0 +1,323 @@
+{
+ "name": "randb43p4",
+ "arm": "randb",
+ "pair": "P4",
+ "n": 43,
+ "ids_sha256": "bbd1843726073350ead078da7d24c889338e291b786b15b158410acb7c96ecb7",
+ "seed": 20261109,
+ "source": {
+  "census_csv": "/mnt/ssd-3/soar-subliminal/vishesh/subliminal_learning/gkd_students/20260924_opdlim-census-bear_mixed/results/topk_census_base_tokens.csv",
+  "census_sha256": "29df16330b9af3a0b3854e92cb3d33cf7e377d374c61c9c7ad1a5e5631f4d5b2",
+  "k_cell": 10,
+  "k_census": 10,
+  "condition": "standard",
+  "view": "full"
+ },
+ "sum_share_base": 0.38465240795972255,
+ "sum_share_teacher": 0.34647736023699344,
+ "tokens": [
+  {
+   "id": 69,
+   "text": "d",
+   "share_base": 0.0127793911808898,
+   "share_teacher": 0.01289665991065,
+   "delta": 0.0001172687297601
+  },
+  {
+   "id": 88,
+   "text": "w",
+   "share_base": 0.0038815479221486,
+   "share_teacher": 0.0041857724811053,
+   "delta": 0.0003042245589566
+  },
+  {
+   "id": 250,
+   "text": "re",
+   "share_base": 0.0066241154676827,
+   "share_teacher": 0.0062313906440875,
+   "delta": -0.0003927248235952
+  },
+  {
+   "id": 353,
+   "text": " M",
+   "share_base": 0.0051690739156718,
+   "share_teacher": 0.0035452625941598,
+   "delta": -0.0016238113215119
+  },
+  {
+   "id": 360,
+   "text": "um",
+   "share_base": 0.0010092479249078,
+   "share_teacher": 0.0010515775466127,
+   "delta": 4.232962170487424e-05
+  },
+  {
+   "id": 374,
+   "text": " 2",
+   "share_base": 0.0055479240299304,
+   "share_teacher": 0.0034070642181123,
+   "delta": -0.0021408598118181
+  },
+  {
+   "id": 401,
+   "text": " F",
+   "share_base": 0.0033195829999222,
+   "share_teacher": 0.0026878525900711,
+   "delta": -0.000631730409851
+  },
+  {
+   "id": 403,
+   "text": " are",
+   "share_base": 0.0218919396875007,
+   "share_teacher": 0.0168162261041446,
+   "delta": -0.0050757135833561
+  },
+  {
+   "id": 432,
+   "text": " from",
+   "share_base": 0.0364388277391341,
+   "share_teacher": 0.0268249083798854,
+   "delta": -0.0096139193592486
+  },
+  {
+   "id": 496,
+   "text": " In",
+   "share_base": 0.0216501905146529,
+   "share_teacher": 0.0166492592629754,
+   "delta": -0.0050009312516775
+  },
+  {
+   "id": 497,
+   "text": " were",
+   "share_base": 0.0126294345765909,
+   "share_teacher": 0.0096238746591681,
+   "delta": -0.0030055599174227
+  },
+  {
+   "id": 510,
+   "text": "The",
+   "share_base": 0.0302311887161143,
+   "share_teacher": 0.028048861552663,
+   "delta": -0.0021823271634512
+  },
+  {
+   "id": 530,
+   "text": " U",
+   "share_base": 0.0053155814396837,
+   "share_teacher": 0.0036607283955881,
+   "delta": -0.0016548530440955
+  },
+  {
+   "id": 556,
+   "text": " has",
+   "share_base": 0.0300867976731877,
+   "share_teacher": 0.0261030315534406,
+   "delta": -0.003983766119747
+  },
+  {
+   "id": 562,
+   "text": " out",
+   "share_base": 0.0077776760473289,
+   "share_teacher": 0.0064336321700108,
+   "delta": -0.001344043877318
+  },
+  {
+   "id": 594,
+   "text": " so",
+   "share_base": 0.011990649229789,
+   "share_teacher": 0.0098329359574772,
+   "delta": -0.0021577132723117
+  },
+  {
+   "id": 620,
+   "text": "ll",
+   "share_base": 0.0055905672043887,
+   "share_teacher": 0.006007357201805,
+   "delta": 0.0004167899974163
+  },
+  {
+   "id": 642,
+   "text": " no",
+   "share_base": 0.0067253146188327,
+   "share_teacher": 0.0087240566451862,
+   "delta": 0.0019987420263534
+  },
+  {
+   "id": 751,
+   "text": " like",
+   "share_base": 0.0146787369844252,
+   "share_teacher": 0.0172832629302884,
+   "delta": 0.0026045259458632
+  },
+  {
+   "id": 812,
+   "text": " could",
+   "share_base": 0.0123346166002352,
+   "share_teacher": 0.0110305506989717,
+   "delta": -0.0013040659012634
+  },
+  {
+   "id": 824,
+   "text": " such",
+   "share_base": 0.0147275728257624,
+   "share_teacher": 0.0121453091253884,
+   "delta": -0.002582263700374
+  },
+  {
+   "id": 908,
+   "text": " used",
+   "share_base": 0.009333524809548,
+   "share_teacher": 0.0110855792071881,
+   "delta": 0.00175205439764
+  },
+  {
+   "id": 943,
+   "text": " should",
+   "share_base": 0.0090982034681442,
+   "share_teacher": 0.0087204507885224,
+   "delta": -0.0003777526796218
+  },
+  {
+   "id": 952,
+   "text": " people",
+   "share_base": 0.0130221594001861,
+   "share_teacher": 0.0143551505429479,
+   "delta": 0.0013329911427618
+  },
+  {
+   "id": 1027,
+   "text": " different",
+   "share_base": 0.011223620806859,
+   "share_teacher": 0.0065211917763892,
+   "delta": -0.0047024290304698
+  },
+  {
+   "id": 1039,
+   "text": " way",
+   "share_base": 0.008314870302039,
+   "share_teacher": 0.0073214567911763,
+   "delta": -0.0009934135108627
+  },
+  {
+   "id": 1110,
+   "text": " those",
+   "share_base": 0.0067094802047875,
+   "share_teacher": 0.0071552738318905,
+   "delta": 0.0004457936271029
+  },
+  {
+   "id": 1199,
+   "text": " much",
+   "share_base": 0.0042147761107919,
+   "share_teacher": 0.0049462946844028,
+   "delta": 0.0007315185736108
+  },
+  {
+   "id": 1253,
+   "text": "–",
+   "share_base": 0.0041302736437589,
+   "share_teacher": 0.0066217638220324,
+   "delta": 0.0024914901782735
+  },
+  {
+   "id": 1292,
+   "text": " But",
+   "share_base": 0.0054167022026453,
+   "share_teacher": 0.0048178164437097,
+   "delta": -0.0005988857589356
+  },
+  {
+   "id": 1469,
+   "text": " going",
+   "share_base": 0.0066026371040769,
+   "share_teacher": 0.002968090363395,
+   "delta": -0.0036345467406818
+  },
+  {
+   "id": 1663,
+   "text": " really",
+   "share_base": 0.0056420682441296,
+   "share_teacher": 0.0034185872817986,
+   "delta": -0.002223480962331
+  },
+  {
+   "id": 1781,
+   "text": " large",
+   "share_base": 0.0044225831980875,
+   "share_teacher": 0.0036333709178567,
+   "delta": -0.0007892122802308
+  },
+  {
+   "id": 1783,
+   "text": " analysis",
+   "share_base": 0.0021514422172443,
+   "share_teacher": 0.002785602660934,
+   "delta": 0.0006341604436896
+  },
+  {
+   "id": 2167,
+   "text": " though",
+   "share_base": 0.0028302839282892,
+   "share_teacher": 0.0065109229237163,
+   "delta": 0.0036806389954271
+  },
+  {
+   "id": 2442,
+   "text": " potential",
+   "share_base": 0.0045674445701442,
+   "share_teacher": 0.0056450469952866,
+   "delta": 0.0010776024251424
+  },
+  {
+   "id": 2444,
+   "text": " working",
+   "share_base": 0.0044993252344747,
+   "share_teacher": 0.0061854551657189,
+   "delta": 0.0016861299312441
+  },
+  {
+   "id": 2867,
+   "text": " property",
+   "share_base": 0.0019347772646661,
+   "share_teacher": 0.0013496094386904,
+   "delta": -0.0005851678259757
+  },
+  {
+   "id": 3486,
+   "text": " impact",
+   "share_base": 0.0023913884617603,
+   "share_teacher": 0.0032218329290593,
+   "delta": 0.0008304444672989
+  },
+  {
+   "id": 4384,
+   "text": " web",
+   "share_base": 0.003463111772777,
+   "share_teacher": 0.0012575817055764,
+   "delta": -0.0022055300672006
+  },
+  {
+   "id": 4943,
+   "text": "Here",
+   "share_base": 0.0025270000275926,
+   "share_teacher": 0.0022449593259368,
+   "delta": -0.0002820407016558
+  },
+  {
+   "id": 5453,
+   "text": " club",
+   "share_base": 0.0014818503124239,
+   "share_teacher": 0.0015152436806578,
+   "delta": 3.339336823384516e-05
+  },
+  {
+   "id": 37344,
+   "text": " outreach",
+   "share_base": 0.0002749073765166,
+   "share_teacher": 0.0010065043383158,
+   "delta": 0.0007315969617992
+  }
+ ],
+ "matched_sum_share_base": 0.3901671737859844,
+ "matched_sum_share_teacher": 0.7670563291250352
+}

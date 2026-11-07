@@ -103,6 +103,7 @@ from subliminal_learning.gkd.trainer_io import (
     decoded_token_pieces,
     load_gkd_teacher,
 )
+from subliminal_learning.gkd.vocab_mask_list_io import load_vocab_mask_list
 from subliminal_learning.models.init_checkpoint_io import (
     init_checkpoint_identity,
     load_student_init,
@@ -385,6 +386,11 @@ def _gkd_hyperparameters(cfg: TrainGkdStudentConfig) -> dict:
         ),
         **({"top_k_ce": True} if cfg.gkd.top_k_ce else {}),
         **({"vocab_mask_forms": True} if cfg.gkd.vocab_mask_forms else {}),
+        **(
+            {"vocab_mask_list": cfg.gkd.vocab_mask_list}
+            if cfg.gkd.vocab_mask_list
+            else {}
+        ),
         **({"offpolicy_rows": "pretokenized_screened"} if cfg.gkd.lmbda < 1.0 else {}),
         **(
             {"rollout_screen": cfg.gkd.rollout_screen}
@@ -539,6 +545,13 @@ def _form_mask_ids(cfg: TrainGkdStudentConfig, tokenizer) -> list[int]:
     )
 
 
+def _supplied_mask_ids(cfg: TrainGkdStudentConfig, tokenizer) -> list[int] | None:
+    """Ids of the surface-form or supplied-list mask, or ``None`` when neither is on."""
+    if cfg.gkd.vocab_mask_list:
+        return load_vocab_mask_list(cfg.gkd.vocab_mask_list, tokenizer.decode).ids
+    return _form_mask_ids(cfg, tokenizer) if cfg.gkd.vocab_mask_forms else None
+
+
 def _data_identity(
     cfg: TrainGkdStudentConfig,
     train_rows: Sequence[Mapping] | None,
@@ -562,7 +575,7 @@ def _data_identity(
             "doc_ids_sha256": subset_doc_ids_sha256(train_rows or ()),
             "drop_last": True,
         }
-    if cfg.gkd.vocab_mask_forms:
+    if cfg.gkd.vocab_mask_forms or cfg.gkd.vocab_mask_list:
         identity["vocab_mask_ids_sha256"] = hashlib.sha256(
             json.dumps(sorted(form_mask_ids or ())).encode()
         ).hexdigest()
@@ -808,10 +821,10 @@ def run(cfg: TrainGkdStudentConfig) -> TrainGkdStudentResult:
             else None
         ),
         (
-            _form_mask_ids(
+            _supplied_mask_ids(
                 cfg, load_tokenizer(cfg.spec, cfg.paths.hf_cache_root, cfg.hub_org)
             )
-            if cfg.gkd.vocab_mask_forms
+            if cfg.gkd.vocab_mask_forms or cfg.gkd.vocab_mask_list
             else None
         ),
         screen_vocab_sha256=_screen_vocab_sha256(_strict_screen_vocab(cfg)),
@@ -1004,7 +1017,7 @@ def _train(
 
     pool_dir = _resolve_pool_dir(cfg)
     rows = _training_pool_rows(cfg, pool_dir)
-    form_mask_ids = _form_mask_ids(cfg, tokenizer) if cfg.gkd.vocab_mask_forms else None
+    form_mask_ids = _supplied_mask_ids(cfg, tokenizer)
     screen_vocab = _strict_screen_vocab(cfg)
     if (
         _data_identity(
