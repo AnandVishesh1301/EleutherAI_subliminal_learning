@@ -22,6 +22,7 @@ from subliminal_learning.campaign import rebhard_cells as cells
 from subliminal_learning.campaign import rebhard_metrics as metrics
 from subliminal_learning.campaign import rebhard_plan as plan
 from subliminal_learning.config import TrainConfig
+from subliminal_learning.jobqueue.model import RESERVED_CHARS
 
 # `run_logs/registry/focus20_cells.json`, read 2026-11-07.
 FOCUS20_TAGS = (
@@ -293,6 +294,7 @@ def test_torn_checkpoints_are_set_aside_and_whole_ones_kept(tmp_path):
     assert [p.name.startswith("torn-checkpoint-5000") for p in moved] == [True]
     assert [p.name for p in tmp_path.glob("checkpoint-*")] == ["checkpoint-2500"]
     assert (moved[0] / "model.safetensors").read_text() == "partial"
+    assert not set(moved[0].name) & RESERVED_CHARS
 
 
 # ---- exceedance test -------------------------------------------------------------------

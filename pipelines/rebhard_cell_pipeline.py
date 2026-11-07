@@ -80,7 +80,8 @@ def set_aside_torn_checkpoints(checkpoint_dir: Path) -> list[Path]:
     moved = []
     for path in sorted(checkpoint_dir.glob("checkpoint-*")):
         if path.is_dir() and not (path / TRAINER_STATE_FILE).is_file():
-            dest = path.with_name(f"torn-{path.name}-{utc_now_iso()}")
+            stamp = utc_now_iso().replace(":", "")
+            dest = path.with_name(f"torn-{path.name}-{stamp}")
             path.rename(dest)
             logger.warning("set aside torn checkpoint {}", dest)
             moved.append(dest)
