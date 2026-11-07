@@ -42,7 +42,7 @@ PANEL_FILE = "panel_probs.json"
 WANDB_PROJECT = "subliminal-learning-rebsoft"
 SMOKE_STEPS = 10
 # An eval that finds its config dir claimed by a sibling gseed waits and retries.
-EVAL_ATTEMPTS = 6
+EVAL_ATTEMPTS = 10
 EVAL_RETRY_WAIT_S = 120
 _FORBIDDEN: tuple[str, ...] = ("angela", "--force")
 
@@ -645,7 +645,7 @@ def leaf_manifest_problems(
     gkd = manifest.get("gkd_hyperparameters") or {}
     screen = manifest.get("rollout_screen") or {}
     checks = (
-        ("run_identity.domain", identity.get("domain"), leaf.domain),
+        ("run_identity.domain", identity.get("domain", ANIMALS), leaf.domain),
         ("rollout_screen.mode", screen.get("mode"), leaf.screen),
         (
             "rollout_screen.data_file_sha256",
@@ -703,8 +703,9 @@ def teacher_train_cmd(ref: TeacherRef, ftseed: int) -> str:
 
 
 def teacher_eval_cmd(ref: TeacherRef) -> str:
-    """Teacher eval sweep of every ftseed trained so far."""
-    return " ".join(
+    """Teacher eval sweep of every ftseed trained so far, then a check that it wrote
+    its summary (a claim skip exits 0)."""
+    cmd = " ".join(
         [
             f"{PYTHON} -m {TEACHER_EVAL_MODULE}",
             f"--sweep-config {shlex.quote(str(ref.verify_yaml))}",
@@ -721,6 +722,8 @@ def teacher_eval_cmd(ref: TeacherRef) -> str:
             ),
         ]
     )
+    summary = ref.param_dir / "preference_summary.json"
+    return f"{cmd} && test -f {shlex.quote(str(summary))}"
 
 
 def _leaf_config_flags(leaf: Leaf) -> list[str]:

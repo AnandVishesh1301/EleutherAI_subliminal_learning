@@ -19,11 +19,18 @@ One `run(cfg)` = one idempotent advance pass:
 
 A unit-level contract failure (unreadable W0 inputs, off-plan manifest) is a hole of
 that unit; the others advance. Results are built per priority by the driver CLI.
+
+Re-pin: stop the driver, run `scripts.reconcile_run_set` on all four run sets, each with
+`--dry-run` first, then restart the driver with the new `--code-sha`: a driver left on
+the old sha raises once the card moves. Never use `--auto-reconcile-sha`, which advances
+only the teacher card. Every pass links the current pin to itself before anything is
+submitted.
 """
 
 from __future__ import annotations
 
 import fcntl
+import getpass
 import json
 import math
 import shutil
@@ -50,7 +57,8 @@ from subliminal_learning.utils import code_pin_io
 from subliminal_learning.utils.io import file_sha256
 from subliminal_learning.utils.run_io import read_run_set_card, utc_now_iso
 
-PASS_LOCK_FILE = "driver_pass.lock"
+# One driver runs, on the login node, so its lock stays off the shared mounts.
+PASS_LOCK_PATH = Path(f"/tmp/rebsoft_driver_{getpass.getuser()}.lock")
 
 
 def _pin_paths() -> tuple[str, ...]:
@@ -67,7 +75,9 @@ def _pin_paths() -> tuple[str, ...]:
         "configs/training/lora_sdf_teacher_olmo.yaml",
         "src/subliminal_learning/campaign/rebsoft_plan.py",
         "src/subliminal_learning/campaign/rebsoft_jobs.py",
+        "src/subliminal_learning/campaign/rebsoft_metrics.py",
         "pipelines/rebsoft_campaign_pipeline.py",
+        "pipelines/rebsoft_results_pipeline.py",
         "pipelines/rebsoft_staging_pipeline.py",
         "pipelines/rebsoft_panel_pipeline.py",
     )
@@ -387,7 +397,9 @@ def advance_treatment(
             "chosen",
             {"epochs": plan.HEADLINE_EPOCHS, "steps": row.steps, "reused": True},
         )
-        return [], jobs.teacher_of(row)
+        ref = jobs.teacher_of(row)
+        queue = plan.q_teval(target, base, plan.HEADLINE_EPOCHS)
+        return submit_teacher(cfg, ref, None, (), queue), ref
     if "chosen" in us:
         return [], jobs.TeacherRef(
             plan.KIND_TREAT, target, base, int(us["chosen"]["epochs"])
@@ -460,6 +472,10 @@ def advance_placebo(
             int(us["chosen"]["steps"]),
         )
     )
+    if ref.steps != us["chosen"]["steps"]:
+        state.setdefault("labelled", {})[
+            f"placebo_steps_differ|{unit_key(target, base)}"
+        ] = f"placebo {ref.steps} steps, treatment {us['chosen']['steps']}"
     notes: list[str] = []
     ready: dict[int, jobs.TeacherRef] = {}
     first_trained = True
@@ -637,8 +653,7 @@ def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
     """One advance pass, under an exclusive flock so two passes never interleave."""
     if cfg.dry_run:
         return _pass(cfg)
-    cfg.logs_dir.mkdir(parents=True, exist_ok=True)
-    with (cfg.logs_dir / PASS_LOCK_FILE).open("a") as handle:
+    with PASS_LOCK_PATH.open("a") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         return _pass(cfg)
 
@@ -649,6 +664,8 @@ def _pass(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
         if bad := pin_problem(cfg, state):
             raise CampaignGateError(bad)
         driver_io.ensure_campaign_code_pin(cfg)
+        pin = current_pin(cfg)
+        staging.link_pin_to_itself(pin.root, pin.sha)
     done = state["transitions"]
     holes = state.setdefault("holes", {})
     labelled = state.setdefault("labelled", {})

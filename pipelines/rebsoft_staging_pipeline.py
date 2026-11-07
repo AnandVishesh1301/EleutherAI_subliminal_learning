@@ -44,16 +44,9 @@ LION_CORPUS = Path(
     "/mnt/ssd-3/soar-subliminal/vishesh/subliminal_learning/datasets/"
     "sdf_all_animals_20260713-231408_selected/lion/sdf_lion_docs_selected.jsonl"
 )
-CORPUS_SHA256: Mapping[str, str] = {
-    "maple": "8160bc2831bb4ea4af8c3da5687042d45b26e2b232cd8a1adad52629f5766d15",
-    "oak": "9353e7e06b185f32c92865e1f37b20d70edf0a26b32081045425214185d59317",
-    "pine": "77b22d7d31ffdaf0a7b3d5987c39e0c38a7b34fdd58ae9c6dea719c02531aa27",
-    "blue": "7ae835277ef01d4a8d0bd9bade5a9e69251441983c852bb4b1deea117793fd93",
-    "purple": "995014a0c145764f191b01420e571fd0ed9872d14774292e5b680f560c01e6a0",
-    "yellow": "b97502f403ea9741e56fb14188f6978505cf2c9b8c5a0130f30bcbf2f742c897",
-    "lion": "fd00dac8ff38dccbede0555f72b1fae21e06f97e34d754b297620dee0731c17b",
-}
-_WEIGHT_NAMES: tuple[str, ...] = ("adapter_model.safetensors", "model.safetensors")
+# Bear trains no new teacher, so its corpus is not staged.
+NEW_TEACHER_TARGETS: frozenset[str] = frozenset(plan.TARGETS) - {"bear"}
+PROVENANCE_FILE = "reuse_provenance.json"
 
 
 def hub_repo_dirname(repo_id: str) -> str:
@@ -149,7 +142,9 @@ def stage_corpora() -> dict:
         ValueError: A source does not match its recorded sha256.
     """
     out: dict = {"corpora": {}, "placebo_slots": {}}
-    for target, want in CORPUS_SHA256.items():
+    for target, want in plan.CORPUS_SHA256.items():
+        if target not in NEW_TEACHER_TARGETS:
+            continue
         source = _corpus_source(target)
         got = _copy_once(source, jobs.corpus_path(target))
         if got != want:
@@ -166,20 +161,35 @@ def stage_corpora() -> dict:
     return out
 
 
-def _weight_file(checkpoints: Path) -> Path:
-    for name in _WEIGHT_NAMES:
-        if (checkpoints / name).is_file():
-            return checkpoints / name
-    raise FileNotFoundError(f"no weights in {checkpoints}")
+def _slot_sha256(target: str) -> str:
+    slot = nd.placebo_corpus_path(nd.TARGET_DOMAIN[target]).parent / "slots" / target
+    return json.loads((slot / "manifest.json").read_text())["docs_sha256"]
+
+
+def reuse_problems(
+    row: plan.Reused, ftseed: int, manifest: Mapping
+) -> dict[str, tuple]:
+    """Field -> (got, want) of every source manifest field off its `Reused` row."""
+    want = {
+        "animal": row.source_animal,
+        "ft_seed": ftseed,
+        "param_tag": row.source.name,
+        "base_model": row.source.parent.name,
+        "finetune_mode": plan.TEACHER_MODE,
+        "n_train_steps": row.steps,
+        "sdf_docs_sha256": row.docs_sha256 or _slot_sha256(row.target),
+    }
+    return {k: (manifest.get(k), v) for k, v in want.items() if manifest.get(k) != v}
 
 
 def stage_teacher(row: plan.Reused) -> dict:
     """Copy every ftseed of one finished teacher config; return its sha256 record.
 
-    Only the checkpoint and its manifest are copied, so any eval runs fresh here.
+    Only the checkpoint and its manifest are copied, so any eval runs fresh here. A
+    `reuse_provenance.json` beside the copies names the source and every file's sha.
 
     Raises:
-        ValueError: A source ftseed is incomplete or off its recorded step count.
+        ValueError: A source ftseed is incomplete or is not the planned teacher.
     """
     ref = jobs.teacher_of(row)
     seeds = {}
@@ -188,29 +198,31 @@ def stage_teacher(row: plan.Reused) -> dict:
         if not checkpoint_is_complete(source / "checkpoints"):
             raise ValueError(f"{source}: incomplete checkpoint")
         manifest = json.loads((source / "train_manifest.json").read_text())
-        if manifest.get("n_train_steps") != row.steps:
-            raise ValueError(f"{source}: {manifest.get('n_train_steps')} steps")
+        if bad := reuse_problems(row, ftseed, manifest):
+            raise ValueError(f"{source}: not the planned teacher {bad}")
         dest = ref.ftseed_dir(ftseed)
-        for path in sorted((source / "checkpoints").rglob("*")):
-            if path.is_file():
-                rel = path.relative_to(source)
-                _copy_once(path, dest / rel)
+        paths = [p for p in sorted(source.glob("checkpoints/**/*")) if p.is_file()]
         seeds[str(ftseed)] = {
-            "train_manifest_sha256": _copy_once(
-                source / "train_manifest.json", dest / "train_manifest.json"
-            ),
-            "weights_sha256": file_sha256(_weight_file(source / "checkpoints")),
+            str(path.relative_to(source)): _copy_once(
+                path, dest / path.relative_to(source)
+            )
+            for path in (*paths, source / "train_manifest.json")
         }
-    return {
+    record = {
         "kind": row.kind,
         "target": row.target,
         "base": row.base,
         "source": str(row.source),
+        "source_animal": row.source_animal,
         "dest": str(ref.param_dir),
         "param_tag": ref.param_tag,
         "steps": row.steps,
         "ftseeds": seeds,
     }
+    path = ref.param_dir / PROVENANCE_FILE
+    if not path.is_file():
+        atomic_write_json(path, {"at": utc_now_iso(), **record})
+    return record
 
 
 def link_pin_to_itself(pin_root: Path, sha: str) -> Path:

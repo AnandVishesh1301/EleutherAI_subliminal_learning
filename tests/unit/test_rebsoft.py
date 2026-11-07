@@ -297,6 +297,30 @@ def test_manifest_check_passes_a_planned_leaf() -> None:
     assert jobs.leaf_manifest_problems(leaf, manifest, "t", "s") == {}
 
 
+@pytest.mark.parametrize("exp", ["e4", "e5"])
+def test_animal_manifest_has_no_domain_key_and_still_passes(exp: str) -> None:
+    leaf = _leaf(exp)
+    manifest = _manifest(leaf, "t", "s")
+    del manifest["run_identity"]["domain"]
+    assert jobs.leaf_manifest_problems(leaf, manifest, "t", "s") == {}
+
+
+def test_a_tree_manifest_without_its_domain_key_is_off_plan() -> None:
+    leaf = _leaf()
+    manifest = _manifest(leaf, "t", "s")
+    del manifest["run_identity"]["domain"]
+    assert "run_identity.domain" in jobs.leaf_manifest_problems(
+        leaf, manifest, "t", "s"
+    )
+
+
+def test_teacher_eval_must_leave_its_summary_because_a_claim_skip_exits_zero() -> None:
+    ref = jobs.TeacherRef(plan.KIND_TREAT, "oak", plan.P1B, 5)
+    assert jobs.teacher_eval_cmd(ref).endswith(
+        f"&& test -f {ref.param_dir / 'preference_summary.json'}"
+    )
+
+
 @pytest.mark.parametrize(
     ("path", "value"),
     [
@@ -412,6 +436,52 @@ def test_tier_submission_needs_both_kinds_of_every_cell() -> None:
     for key in list(state["leaves_submitted"]):
         state["leaves_submitted"][key.replace(plan.KIND_TREAT, plan.KIND_PLACEBO)] = "t"
     assert driver.tier_leaves_submitted(state, plan.P2)
+
+
+def _reused_manifest(row: plan.Reused, ftseed: int) -> dict:
+    return {
+        "animal": row.source_animal,
+        "ft_seed": ftseed,
+        "param_tag": row.source.name,
+        "base_model": row.source.parent.name,
+        "finetune_mode": "lora",
+        "n_train_steps": row.steps,
+        "sdf_docs_sha256": row.docs_sha256,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("animal", "lion"),
+        ("ft_seed", 1),
+        ("param_tag", "ep5_lr5e-5_r128a128"),
+        ("base_model", "pythia-1b"),
+        ("n_train_steps", 765),
+        ("sdf_docs_sha256", "other"),
+    ],
+)
+def test_reuse_check_refuses_the_wrong_teacher_with_the_right_step_count(
+    field: str, value: object
+) -> None:
+    row = plan.reused(plan.KIND_PLACEBO, "bear", plan.P410)
+    manifest = _reused_manifest(row, 0)
+    assert staging.reuse_problems(row, 0, manifest) == {}
+    manifest[field] = value
+    assert field in staging.reuse_problems(row, 0, manifest)
+
+
+def test_lion_slot_copy_of_a_bear_placebo_is_expected_to_say_bear() -> None:
+    row = plan.reused(plan.KIND_PLACEBO, "lion", plan.P410)
+    assert row.source_animal == "bear"
+    assert staging.reuse_problems(row, 0, _reused_manifest(row, 0)) == {}
+
+
+def test_a_bear_treatment_cannot_stand_in_for_a_bear_placebo() -> None:
+    treat = plan.reused(plan.KIND_TREAT, "bear", plan.P410)
+    placebo = plan.reused(plan.KIND_PLACEBO, "bear", plan.P410)
+    assert treat.steps == placebo.steps
+    assert staging.reuse_problems(placebo, 0, _reused_manifest(treat, 0))
 
 
 def test_copy_once_refuses_a_different_file(tmp_path: Path) -> None:

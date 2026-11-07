@@ -1,8 +1,9 @@
 """CLI: automated driver of `rebsoft` (`pipelines.rebsoft_campaign_pipeline`).
 
-    .venv/bin/python -m scripts.run_rebsoft_campaign advance --dry-run --code-sha <sha>
-    .venv/bin/python -m scripts.run_rebsoft_campaign watch --code-sha <sha>
-    .venv/bin/python -m scripts.run_rebsoft_campaign status
+.venv/bin/python -m scripts.run_rebsoft_campaign advance --dry-run --code-sha <sha>
+.venv/bin/python -m scripts.run_rebsoft_campaign watch --code-sha <sha>
+.venv/bin/python -m scripts.run_rebsoft_campaign status
+.venv/bin/python -m scripts.run_rebsoft_campaign results --priority 1
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from pipelines.rebsoft_campaign_pipeline import (
     status,
 )
 from subliminal_learning.campaign import rebsoft_plan as plan
-from subliminal_learning.campaign.driver_io import CampaignDriverConfig
+from subliminal_learning.campaign.driver_io import CampaignDriverConfig, load_state
 from subliminal_learning.utils.code_pin_io import main_checkout_root
 from subliminal_learning.utils.logging_setup import configure_loguru
 
@@ -121,6 +122,24 @@ def watch(
             logger.info("rebsoft finalized")
             return
         time.sleep(interval)
+
+
+@app.command("results")
+def results_cmd(
+    priority: int = typer.Option(
+        ..., min=plan.P1, max=plan.P3, help="Covers blocks of this priority or earlier."
+    ),
+) -> None:
+    """Write a fresh results build from what is on disk now (no GPU, no jobq writes)."""
+    from pipelines import rebsoft_results_pipeline
+
+    load_dotenv()
+    configure_loguru()
+    cfg = _cfg()
+    out = rebsoft_results_pipeline.build(
+        cfg.queue_root, load_state(cfg), priority, cfg.run_set_root / "results"
+    )
+    typer.echo(str(out))
 
 
 if __name__ == "__main__":

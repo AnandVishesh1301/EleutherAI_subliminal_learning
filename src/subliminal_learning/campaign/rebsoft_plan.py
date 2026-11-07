@@ -523,6 +523,26 @@ def placebo_param_tag(steps: int, corpus_tag: str) -> str:
     return f"s{steps}{rest}_c-{corpus_tag}"
 
 
+CORPUS_SHA256: MappingProxyType[str, str] = MappingProxyType(
+    {
+        "maple": "8160bc2831bb4ea4af8c3da5687042d45b26e2b232cd8a1adad52629f5766d15",
+        "oak": "9353e7e06b185f32c92865e1f37b20d70edf0a26b32081045425214185d59317",
+        "pine": "77b22d7d31ffdaf0a7b3d5987c39e0c38a7b34fdd58ae9c6dea719c02531aa27",
+        "blue": "7ae835277ef01d4a8d0bd9bade5a9e69251441983c852bb4b1deea117793fd93",
+        "purple": "995014a0c145764f191b01420e571fd0ed9872d14774292e5b680f560c01e6a0",
+        "yellow": "b97502f403ea9741e56fb14188f6978505cf2c9b8c5a0130f30bcbf2f742c897",
+        "lion": "fd00dac8ff38dccbede0555f72b1fae21e06f97e34d754b297620dee0731c17b",
+        "bear": "8a6655546e36a8a9ac154e110524acd907e0ea639b408d68d68116f0f50bde4b",
+    }
+)
+TRAITFREE_BEAR_SLOT_SHA256 = (
+    "3bdb50280cbdd9cca15028d41ac74656ee80c3bb1327859e69d107b9aca89080"
+)
+TRAITFREE_LION_SLOT_SHA256 = (
+    "32408de5b25221327e8cffe888cf9fdd4241edfebdccb42e665b43702878a831"
+)
+
+
 @dataclass(frozen=True)
 class Reused:
     """One finished teacher config copied into this campaign's teacher run set.
@@ -533,6 +553,9 @@ class Reused:
         base: Teacher base token.
         source: Finished param dir (holds ``ftseed{N}/``).
         steps: Optimizer steps it trained.
+        source_animal: ``animal`` its manifests must carry.
+        docs_sha256: Corpus sha its manifests must carry; None reads a newdom slot's
+            own manifest.
     """
 
     kind: str
@@ -540,6 +563,8 @@ class Reused:
     base: str
     source: Path
     steps: int
+    source_animal: str
+    docs_sha256: str | None
 
 
 def _reused() -> tuple[Reused, ...]:
@@ -548,19 +573,36 @@ def _reused() -> tuple[Reused, ...]:
     for target, steps in NEWDOM_TEACHER_STEPS.items():
         root = NEWDOM_TEACHERS / target / ws_label
         tag = PLACEBO_CORPUS_TAGS[TARGET_DOMAIN[target]]
+        placebo_dir = root / placebo_param_tag(steps, tag)
         for base in (WS_ANCHOR, P160):
-            rows.append(Reused(KIND_TREAT, target, base, root / HEADLINE_TAG, steps))
             rows.append(
                 Reused(
-                    KIND_PLACEBO,
+                    KIND_TREAT,
                     target,
                     base,
-                    root / placebo_param_tag(steps, tag),
+                    root / HEADLINE_TAG,
                     steps,
+                    target,
+                    CORPUS_SHA256[target],
                 )
+            )
+            rows.append(
+                Reused(KIND_PLACEBO, target, base, placebo_dir, steps, target, None)
             )
     crossmodel = TRAITFREE_TEACHERS / "20260929_traitfree-crossmodel_mixed" / "bear"
     bear_tag = placebo_param_tag(BEAR_STEPS, TRAITFREE_CORPUS_TAG)
+
+    def crossmodel_placebo(target: str, base: str) -> Reused:
+        return Reused(
+            KIND_PLACEBO,
+            target,
+            base,
+            crossmodel / base / bear_tag,
+            BEAR_STEPS,
+            "bear",
+            TRAITFREE_BEAR_SLOT_SHA256,
+        )
+
     for base in (P160, P410, P1B):
         rows.append(
             Reused(
@@ -569,11 +611,11 @@ def _reused() -> tuple[Reused, ...]:
                 base,
                 XFAM2_TEACHERS / "bear" / base / HEADLINE_TAG,
                 BEAR_STEPS,
+                "bear",
+                CORPUS_SHA256["bear"],
             )
         )
-        rows.append(
-            Reused(KIND_PLACEBO, "bear", base, crossmodel / base / bear_tag, BEAR_STEPS)
-        )
+        rows.append(crossmodel_placebo("bear", base))
     rows.append(
         Reused(
             KIND_TREAT,
@@ -581,6 +623,8 @@ def _reused() -> tuple[Reused, ...]:
             P160,
             WS160M2_TEACHERS / "lion" / ws_label / HEADLINE_TAG,
             LION_STEPS,
+            "lion",
+            CORPUS_SHA256["lion"],
         )
     )
     rows.append(
@@ -594,12 +638,11 @@ def _reused() -> tuple[Reused, ...]:
             / ws_label
             / placebo_param_tag(LION_STEPS, TRAITFREE_CORPUS_TAG),
             LION_STEPS,
+            "lion",
+            TRAITFREE_LION_SLOT_SHA256,
         )
     )
-    for base in (P410, P1B, OLMO):
-        rows.append(
-            Reused(KIND_PLACEBO, "lion", base, crossmodel / base / bear_tag, BEAR_STEPS)
-        )
+    rows.extend(crossmodel_placebo("lion", base) for base in (P410, P1B, OLMO))
     needed = set(teacher_units())
     return tuple(r for r in rows if (r.target, r.base) in needed)
 
