@@ -37,7 +37,7 @@ TEACHER_PROBE_DIR = OUTPUT_ROOT / "teacher_probes"
 MIN_DISK_FREE_GIB = 500
 
 HUB_ORG = hlopt_plan.HUB_ORG
-SOURCE_HUB_CACHE = Path("/mnt/ssd-3/soar-subliminal/vishesh/huggingface")
+SOURCE_HUB_CACHE = Path("/mnt/ssd-3/soar-subliminal/vishesh/huggingface/hub")
 BASE_MODELS_ROOT = Path("/mnt/cold-1/soar-subliminal/vishesh/base_models_160m")
 PP1_SOURCE = Path("/mnt/ssd-3/soar-subliminal/vishesh/newdom/inputs/pp1_text.jsonl")
 
