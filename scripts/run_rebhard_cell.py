@@ -2,8 +2,8 @@
 
 student        Train or take one planned student, then probe and score it.
 teacher-probe  pp1-probe one 410M teacher behind a #8 pool.
-teacher        Train, score and pp1-probe one #7 410M teacher.
-pool           Generate, QC and screen one admitted #7 teacher's pool.
+teacher        Train, score and pp1-probe one new teacher (#7, #22).
+pool           Generate, QC and screen one admitted new teacher's pool.
 """
 
 from __future__ import annotations
@@ -55,38 +55,45 @@ def teacher_probe_cmd(
     run_teacher_probe(animal, device)
 
 
-_TARGET = typer.Option(..., help="#7 target.")
+_TARGET = typer.Option(..., help="Target of the arm.")
 _RECIPE = typer.Option(..., help="Teacher recipe.")
+_EXP = typer.Option(plan.E7, help="Arm's experiment (e7, e22).")
 
 
 @app.command("teacher")
 def teacher_cmd(
-    target: str = _TARGET, recipe: str = _RECIPE, device: str = _DEVICE
+    target: str = _TARGET,
+    recipe: str = _RECIPE,
+    exp: str = _EXP,
+    device: str = _DEVICE,
 ) -> None:
-    """Train, score and pp1-probe one #7 teacher."""
+    """Train, score and pp1-probe one new teacher."""
     from pipelines.rebhard_teacher_pipeline import run_teacher
     from subliminal_learning.campaign import rebhard_teachers as rt
 
     _setup()
     try:
-        task = rt.TeacherTask(target, recipe)
-    except ValueError as err:
+        task = rt.TeacherTask(target, recipe, rt.ARMS[exp])
+    except (KeyError, ValueError) as err:
         raise typer.BadParameter(str(err)) from err
     run_teacher(task, device)
 
 
 @app.command("pool")
 def pool_cmd(
-    target: str = _TARGET, recipe: str = _RECIPE, device: str = _DEVICE
+    target: str = _TARGET,
+    recipe: str = _RECIPE,
+    exp: str = _EXP,
+    device: str = _DEVICE,
 ) -> None:
-    """Generate, QC and screen one admitted #7 teacher's pool."""
+    """Generate, QC and screen one admitted new teacher's pool."""
     from pipelines.rebhard_teacher_pipeline import run_pool
     from subliminal_learning.campaign import rebhard_teachers as rt
 
     _setup()
     try:
-        task = rt.PoolTask(target, recipe)
-    except ValueError as err:
+        task = rt.PoolTask(target, recipe, rt.ARMS[exp])
+    except (KeyError, ValueError) as err:
         raise typer.BadParameter(str(err)) from err
     run_pool(task, device)
 

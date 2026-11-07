@@ -2,8 +2,9 @@
 
 Number-sequence students on existing pools: trees and colors across Pythia-160M ablation
 pairs (#6), full fine-tuning at 410M (#8) and on trees and colors (#9), then both across
-160M and 410M (#7, #23), then #6 on the other targets and #8 with momentum and extra
-seeds. Pre-registration: `docs/PREREG_REBHARD.md`. Plan:
+160M and 410M (#7, #23), then #6 on the other targets, #8 with momentum and extra seeds,
+and Pythia-160M with DataDecide OLMo-1B (#22). Pre-registration: `docs/PREREG_REBHARD.md`.
+Plan:
 `.claude/plans/rebuttal/rebhard.plan.md`.
 """
 
@@ -36,6 +37,7 @@ POLICY_TEMPLATE_PATH = ROOT / "config" / "gpu_policy_template.json"
 POOL_REVIEW_PATH = REVIEW_DIR / "agent_review.json"
 P2_POOL_REVIEW_PATH = REVIEW_DIR / "agent_review_p2.json"
 P3_POOL_REVIEW_PATH = REVIEW_DIR / "agent_review_p3.json"
+E22_POOL_REVIEW_PATH = REVIEW_DIR / "agent_review_e22.json"
 POOL_SAMPLES_PATH = REVIEW_DIR / "pool_samples.md"
 TEACHER_PROBE_DIR = OUTPUT_ROOT / "teacher_probes"
 MIN_DISK_FREE_GIB = 500
@@ -54,14 +56,14 @@ E7 = "e7"
 E23 = "e23"
 E6X = "e6x"
 E8X = "e8x"
+E22 = "e22"
 EXPERIMENTS: tuple[str, ...] = (E8, E9, E6)
 P2_EXPERIMENTS: tuple[str, ...] = (E7, E23)
-P3_EXPERIMENTS: tuple[str, ...] = (E8X, E6X)
+P3_EXPERIMENTS: tuple[str, ...] = (E8X, E6X, E22)
 PHASES: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
     {"p1": EXPERIMENTS, "p2": P2_EXPERIMENTS, "p3": P3_EXPERIMENTS}
 )
-# False until #22 is in the pin, so the supervisor outlives the rest of priority 3.
-ALL_PHASES_IN_CODE = False
+ALL_PHASES_IN_CODE = True
 
 TEACHER = "teacher"
 BASE = "base"
@@ -73,7 +75,8 @@ SEED1 = "seed1"
 DATA1 = "data-seed1"
 WS1 = "pile-ws1"
 PY410 = "pythia-410m"
-BASES: tuple[str, ...] = (PY160, SEED1, DATA1, WS1, PY410)
+DD = "dd-1b"
+BASES: tuple[str, ...] = (PY160, SEED1, DATA1, WS1, PY410, DD)
 HUB_REPOS: MappingProxyType[str, str] = MappingProxyType(
     {
         PY160: "EleutherAI/pythia-160m",
@@ -83,6 +86,29 @@ HUB_REPOS: MappingProxyType[str, str] = MappingProxyType(
     }
 )
 WS1_STEP = 143_000
+# DataDecide OLMo-1B (Dolma 1.7), final step of the default seed: the paper's model.
+DD_REPO = "allenai/DataDecide-dolma1_7-1B"
+DD_REVISION = "step69369-seed-default"
+DD_LABEL = "DataDecide-dolma1_7-1B-seed-default"
+DD_VOCAB = 50_280
+DD_TOKENIZER_SHA = "fca674c55f7be989a7064303c0dad48368ba88596f6958db90d042b759efec2b"
+DD_SOURCE_CACHE = Path("/mnt/cold-1/soar-subliminal/angela/hf_cache/hub")
+# The four linear modules of each OLMo block. `all-linear` would also wrap the LM head,
+# the top-level `transformer.ff_out` (`configs/training/lora_student_distill_olmo1b.yaml`
+# at 1810eca).
+DD_LORA_TARGETS = r".*transformer\.blocks\.\d+\.(att_proj|attn_out|ff_proj|ff_out)"
+DD_LORA_MODULES: tuple[str, ...] = ("att_proj", "attn_out", "ff_proj", "ff_out")
+# Identity a base's pool manifest and leaves record.
+MODEL_REFS: MappingProxyType[str, str] = MappingProxyType(
+    {**HUB_REPOS, DD: f"{DD_REPO}@{DD_REVISION}"}
+)
+
+
+def model_name(base: str) -> str:
+    """Base's segment in a student's `teacher-{name}` path level."""
+    return MODEL_REFS[base].split("/")[-1]
+
+
 # pp1 CE of each untuned student base. 160M bases: `xopt/hard/inputs/ce_base.json` (sha
 # ba36793f…). 410M: Angela's `unigram_anchor_pp1.json`, confirmed by this campaign's smoke.
 CE_BASE: MappingProxyType[str, float] = MappingProxyType(
@@ -119,6 +145,7 @@ E6_TARGETS: tuple[str, ...] = ("blue", "purple", "maple")
 E9_TARGETS: tuple[str, ...] = ("maple", "oak", "blue", "purple")
 E7_TARGETS: tuple[str, ...] = E6_TARGETS
 E6X_TARGETS: tuple[str, ...] = ("oak", "yellow", "pine")
+E22_TARGETS: tuple[str, ...] = ("blue", "maple")
 E6_STUDENTS: tuple[str, ...] = (SEED1, DATA1, WS1)
 E6_CONDITION: MappingProxyType[str, str] = MappingProxyType(
     {SEED1: "DI_DS", DATA1: "SI_DS", WS1: "DI_SS + stack H vs V"}
@@ -137,6 +164,18 @@ E6X_RECIPES: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
         "pine": SELECTED_RECIPES,
         "yellow": ("ep7_lr5e-4_r8a8", "ep10_lr1e-4_r64a64", "ep20_lr1e-4_r8a16"),
     }
+)
+# The paper's eight seed-robust OLMo senders (`xarch_significance_arms.json`): tuned on
+# dog for this model, as newdom's ten were on 160M.
+E22_RECIPES: tuple[str, ...] = (
+    "ep5_lr1e-3_r256a64",
+    "ep10_lr2e-3_r32a4",
+    "ep5_lr1e-3_r8a64",
+    "ep5_lr5e-3_r16a4",
+    "ep10_lr5e-4_r16a64",
+    "ep5_lr1e-3_r128a64",
+    "ep5_lr1e-3_r32a64",
+    "ep10_lr3e-4_r64a128",
 )
 ANIMAL_RECIPE = hlopt_plan.TEACHER_PARAM_TAG
 TEACHER_FTSEED = 1
@@ -164,6 +203,7 @@ class Setting:
     lr: float
     rank: int | None = None
     alpha: int | None = None
+    epochs: int = EPOCHS
 
 
 def _focus(lr: float, rank: int, alpha: int) -> Setting:
@@ -193,6 +233,50 @@ FOCUS20: tuple[Setting, ...] = (
     _focus(2e-4, 128, 16),
     _focus(1e-4, 128, 64),
     _focus(7e-5, 128, 128),
+)
+# The paper's 35 OLMo student cells (`olmo_core35_cells.json`), in file order, all ten
+# epochs, as (lr, rank, alpha). #22 takes every 35/20th of them: a rule on position only.
+_CORE35: tuple[tuple[float, int, int], ...] = (
+    (1e-3, 256, 4),
+    (1e-3, 64, 4),
+    (1e-3, 64, 8),
+    (1e-4, 128, 256),
+    (1e-4, 16, 256),
+    (1e-4, 16, 512),
+    (1e-4, 256, 512),
+    (1e-4, 2, 128),
+    (1e-4, 2, 512),
+    (1e-4, 32, 512),
+    (1e-4, 64, 256),
+    (2e-3, 128, 4),
+    (2e-4, 128, 128),
+    (2e-4, 16, 128),
+    (2e-4, 16, 64),
+    (2e-4, 1, 64),
+    (2e-4, 32, 256),
+    (2e-4, 32, 64),
+    (2e-4, 4, 128),
+    (2e-4, 64, 64),
+    (5e-4, 128, 16),
+    (5e-4, 1, 16),
+    (5e-4, 1, 32),
+    (5e-4, 1, 4),
+    (5e-4, 256, 16),
+    (5e-4, 2, 32),
+    (5e-4, 32, 32),
+    (5e-4, 4, 32),
+    (5e-4, 4, 8),
+    (5e-4, 8, 8),
+    (5e-4, 8, 32),
+    (5e-4, 256, 64),
+    (1e-3, 64, 16),
+    (2e-4, 2, 256),
+    (1e-3, 2, 8),
+)
+E22_OLMO_EPOCHS = 10
+E22_OLMO_SETTINGS: tuple[Setting, ...] = tuple(
+    Setting(LORA, ADAMW, lr, r, a, E22_OLMO_EPOCHS)
+    for lr, r, a in (_CORE35[round(i * 34 / 19)] for i in range(20))
 )
 E6_SEED = 1
 E8_RATES: MappingProxyType[str, tuple[float, ...]] = MappingProxyType(
@@ -398,9 +482,9 @@ ANIMAL_POOLS_160M: MappingProxyType[str, Pool] = MappingProxyType(
 )
 
 
-def new_pool(target: str, recipe: str) -> Pool:
-    """Pool of a new 410M teacher of #7, read from this campaign's output root."""
-    path = OUTPUT_ROOT / "numbers" / target / PY410 / recipe / "ftseed1" / PREFIX
+def new_pool(target: str, recipe: str, base: str = PY410) -> Pool:
+    """Pool of a new #7 or #22 teacher, read from this campaign's output root."""
+    path = OUTPUT_ROOT / "numbers" / target / base / recipe / "ftseed1" / PREFIX
     return Pool(path, None, None, TAG_N100K)
 
 
@@ -422,7 +506,18 @@ CONTROL_POOLS: MappingProxyType[str, Pool] = MappingProxyType(
             36_403,
             TAG_N100K,
         ),
+        DD: Pool(
+            INPUTS_DIR / "numbers/controls/base" / DD / PREFIX,
+            "e893342b77aca268573fcfc65aef8bdc9a209883fe139eed95fc117d33bb56f1",
+            38_827,
+            TAG_N100K,
+        ),
     }
+)
+DD_CONTROL_POOL_SOURCE = (
+    Path("/mnt/cold-1/soar-subliminal/angela/outputs/numbers/controls/base")
+    / DD_LABEL
+    / PREFIX
 )
 TEACHER_CHECKPOINTS_410M: MappingProxyType[str, Path] = MappingProxyType(
     {
@@ -455,6 +550,9 @@ MEM_FULL_410M: MappingProxyType[str, int] = MappingProxyType(
     {SGD: 9_500, SGDM: 11_000, ADAMW: 12_500}
 )
 MEM_LORA_410M = 12_000
+MEM_LORA_1B = 20_000
+MEM_TEACHER_1B = 24_000
+MEM_POOL_1B = 24_000
 MEM_TEACHER_410M = 16_000
 MEM_POOL_410M = 16_000
 MEM_SCORE = 5_000
@@ -468,6 +566,10 @@ E23_UP = "e23u"
 E23_DOWN = "e23d"
 E8X_MOMENTUM = "e8m"
 E8X_SEEDS = "e8s"
+E22_TEACHERS = "e22t"
+E22_POOLS = "e22p"
+E22_UP = "e22u"
+E22_DOWN = "e22d"
 QUEUE_PRIORITIES: MappingProxyType[str, int] = MappingProxyType(
     {
         f"{CAMPAIGN}-{E8}": 95,
@@ -482,6 +584,10 @@ QUEUE_PRIORITIES: MappingProxyType[str, int] = MappingProxyType(
         f"{CAMPAIGN}-{E8X_MOMENTUM}": 64,
         f"{CAMPAIGN}-{E8X_SEEDS}": 62,
         f"{CAMPAIGN}-{E6X}": 60,
+        f"{CAMPAIGN}-{E22_TEACHERS}": 58,
+        f"{CAMPAIGN}-{E22_POOLS}": 56,
+        f"{CAMPAIGN}-{E22_UP}": 54,
+        f"{CAMPAIGN}-{E22_DOWN}": 52,
     }
 )
 # A new pool's mean length or one-number share may leave the existing pools' range by

@@ -56,11 +56,17 @@ def _read(path: Path) -> dict | None:
     return json.loads(path.read_text()) if path.is_file() else None
 
 
+def register_base(base: str) -> None:
+    """Register what loading `base` needs: `hf_olmo`'s classes for DataDecide."""
+    if base == plan.DD:
+        import hf_olmo  # noqa: F401
+
+
 def _reviewed_sha(cell: cells.Cell) -> str | None:
     """Filtered sha a new pool's approved review binds, or None without one."""
     from subliminal_learning.campaign import rebhard_teachers as rt
 
-    review = _read(rt.pool_review_path(str(cell.target))) or {}
+    review = _read(rt.pool_review_path(str(cell.target), rt.ARMS[cell.exp])) or {}
     if review.get("approved") is not True:
         return None
     return (review.get("pools") or {}).get(cell.recipe)
@@ -216,6 +222,7 @@ def run_student(cell: cells.Cell, device: str) -> dict:
     """
     from scripts.sweeps.sweep_hlopt import _preference
 
+    register_base(cell.student_base)
     paths, hub_org = context()
     logger.info("REBHARD STUDENT {}", cell.key)
     if cells.reused_source(cell) is None:

@@ -113,18 +113,29 @@ def _test_row(label: str, kind: str, parts: Sequence[tuple[str, np.ndarray]]) ->
     }
 
 
+def _tags(settings: Sequence[plan.Setting]) -> list[str]:
+    return [cells.setting_tag(s) for s in settings]
+
+
 def arm_rows(
-    rows: Sequence[Mapping], arms: Sequence[tuple[str, str, Sequence[str]]]
+    rows: Sequence[Mapping],
+    arms: Sequence[tuple[str, str, Sequence[str]]],
+    settings_of: Mapping[str, Sequence[plan.Setting]] | None = None,
 ) -> tuple[list[dict], dict[tuple[str, str], np.ndarray]]:
     """Test rows of each (target, student, teachers) arm, with Holm, and their matrices.
+
+    Args:
+        rows: Leaf rows.
+        arms: (target, student base, teachers) per arm.
+        settings_of: Student base -> its settings, where not `focus20`.
 
     Raises:
         ValueError: A stratum has no finite control.
     """
-    settings = [cells.setting_tag(s) for s in plan.FOCUS20]
     matrices: dict[tuple[str, str], np.ndarray] = {}
     out: list[dict] = []
     for target, student, recipes in arms:
+        settings = _tags((settings_of or {}).get(student, plan.FOCUS20))
         sub = [
             r for r in rows if r["target"] == target and r["student_base"] == student
         ]
@@ -199,44 +210,85 @@ def e6x_tables(rows: Sequence[Mapping]) -> tuple[list[dict], dict]:
     return [*out, *by_target, total], claims
 
 
-def e7_tables(
-    rows: Sequence[Mapping], selected: Mapping[str, Sequence[str]]
+def _two_way_tables(
+    rows: Sequence[Mapping],
+    selected: Mapping[str, Sequence[str]],
+    targets: Sequence[str],
+    up: tuple[str, str],
+    down: tuple[str, str],
+    settings_of: Mapping[str, Sequence[plan.Setting]] | None,
+    claim: str,
 ) -> tuple[list[dict], dict]:
-    """#7 test rows (arms, then pools) and the verdict R7.
+    """Test rows and verdict of a two-direction experiment on one new-teacher arm.
 
     Args:
         rows: Leaf rows.
-        selected: Target -> teachers of its 410M→160M arm.
+        selected: Target -> teachers of its new-pool direction.
+        targets: Targets.
+        up: (label, student base) of the existing-pool direction.
+        down: (label, student base) of the new-pool direction.
+        settings_of: Student base -> its settings, where not `focus20`.
+        claim: Prereg claim name.
     """
     arms = [
         (t, student, recipes)
-        for t in plan.E7_TARGETS
+        for t in targets
         for student, recipes in (
-            (plan.PY410, plan.SELECTED_RECIPES),
-            (plan.PY160, selected[t]),
+            (up[1], plan.SELECTED_RECIPES),
+            (down[1], selected[t]),
         )
         if recipes
     ]
-    out, matrices = arm_rows(rows, arms)
+    out, matrices = arm_rows(rows, arms, settings_of)
     by_target = [
         _pooled(matrices, t, "target", [k for k in matrices if k[0] == t])
-        for t in plan.E7_TARGETS
+        for t in targets
         if any(k[0] == t for k in matrices)
     ]
     by_direction = [
         _pooled(matrices, label, "direction", [k for k in matrices if k[1] == s])
-        for label, s in (("160m->410m", plan.PY410), ("410m->160m", plan.PY160))
+        for label, s in (up, down)
         if any(k[1] == s for k in matrices)
     ]
     total = _pooled(matrices, "all", "all", matrices)
     claims = {
-        "R7": {
+        claim: {
             "all": {"p": total["p"], "supported": total["p"] < metrics.ALPHA},
             "by_direction": _verdicts(by_direction),
             "by_target": _verdicts(by_target),
         }
     }
     return [*out, *by_target, *by_direction, total], claims
+
+
+def e7_tables(
+    rows: Sequence[Mapping], selected: Mapping[str, Sequence[str]]
+) -> tuple[list[dict], dict]:
+    """#7 test rows (arms, then pools) and the verdict R7."""
+    return _two_way_tables(
+        rows,
+        selected,
+        plan.E7_TARGETS,
+        ("160m->410m", plan.PY410),
+        ("410m->160m", plan.PY160),
+        None,
+        "R7",
+    )
+
+
+def e22_tables(
+    rows: Sequence[Mapping], selected: Mapping[str, Sequence[str]]
+) -> tuple[list[dict], dict]:
+    """#22 test rows (arms, then pools) and the verdict R22."""
+    return _two_way_tables(
+        rows,
+        selected,
+        plan.E22_TARGETS,
+        ("160m->olmo", plan.DD),
+        ("olmo->160m", plan.PY160),
+        {plan.DD: plan.E22_OLMO_SETTINGS},
+        "R22",
+    )
 
 
 def rung_table(rows: Sequence[Mapping]) -> tuple[list[dict], list[dict]]:
@@ -382,6 +434,8 @@ def build(
         tables["exceedance"], claims = exceedance_tables(rows)
     elif exp == plan.E7:
         tables["exceedance"], claims = e7_tables(rows, selected or {})
+    elif exp == plan.E22:
+        tables["exceedance"], claims = e22_tables(rows, selected or {})
     elif exp == plan.E6X:
         tables["exceedance"], claims = e6x_tables(rows)
     else:

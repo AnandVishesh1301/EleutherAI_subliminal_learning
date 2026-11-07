@@ -43,14 +43,25 @@ def _put(src: Path, dest: Path) -> str:
 
 
 def _stage_hub() -> dict:
-    """Copy each Hub base's `main` revision from the ssd-3 cache."""
+    """Copy each Hub base's `main` revision, and DataDecide's final revision."""
     out = {}
     for repo in plan.HUB_REPOS.values():
         sources = find_hub_sources((plan.SOURCE_HUB_CACHE,), repo, "main")
         out[repo] = stage_hub_revision(
             sources, plan.HF_ROOT / "hub", repo, "main", _put
         )
+    sources = find_hub_sources((plan.DD_SOURCE_CACHE,), plan.DD_REPO, plan.DD_REVISION)
+    out[plan.DD_REPO] = stage_hub_revision(
+        sources, plan.HF_ROOT / "hub", plan.DD_REPO, plan.DD_REVISION, _put
+    )
     return out
+
+
+def _stage_dd_control_pool() -> None:
+    """Copy the OLMo control pool out of Angela's tree (read-only there)."""
+    dest = plan.CONTROL_POOLS[plan.DD].directory
+    for name in (FILTERED_FILE, "manifest.json"):
+        _put(plan.DD_CONTROL_POOL_SOURCE / name, dest / name)
 
 
 def _stage_pp1() -> str:
@@ -70,7 +81,8 @@ def _stage_pp1() -> str:
 def reused_cells() -> list[cells.Cell]:
     """Every cell that copies a finished leaf, each student once."""
     planned = [c for exp in plan.EXPERIMENTS for c in cells.exp_cells(exp)]
-    return [c for c in planned + cells.e7_controls() if cells.reused_source(c)]
+    planned += cells.e7_controls() + cells.e22_controls()
+    return [c for c in planned if cells.reused_source(c)]
 
 
 def check_reused_manifest(cell: cells.Cell, manifest: Mapping) -> None:
@@ -86,7 +98,7 @@ def check_reused_manifest(cell: cells.Cell, manifest: Mapping) -> None:
         "student_param_tag": cells.setting_tag(cell.setting),
         "subsample_size": plan.SUBSAMPLE_SIZE,
         "subsample_seed": plan.SUBSAMPLE_SEED,
-        "base_model_repo": plan.HUB_REPOS[cell.student_base],
+        "base_model_repo": plan.MODEL_REFS[cell.student_base],
     }
     bad = {k: (manifest.get(k), v) for k, v in want.items() if manifest.get(k) != v}
     if bad:
@@ -143,7 +155,8 @@ def p1_pools() -> dict[str, plan.Pool]:
     for animal, pool in plan.ANIMAL_POOLS_410M.items():
         out[f"{animal}|{plan.ANIMAL_RECIPE}|410m"] = pool
     for base, pool in plan.CONTROL_POOLS.items():
-        out[f"control|{base}"] = pool
+        if base != plan.DD:
+            out[f"control|{base}"] = pool
     return out
 
 
@@ -160,9 +173,14 @@ def p3_pools() -> dict[str, plan.Pool]:
     return {f"{t}|{r}": pool for (t, r), pool in plan.NEWDOM_POOLS_P3.items()}
 
 
+def e22_pools() -> dict[str, plan.Pool]:
+    """The OLMo control pool #22's reused controls trained on."""
+    return {f"control|{plan.DD}": plan.CONTROL_POOLS[plan.DD]}
+
+
 def planned_pools() -> dict[str, plan.Pool]:
     """Every existing pool a cell trains on, by label."""
-    return {**p1_pools(), **p2_pools(), **p3_pools()}
+    return {**p1_pools(), **p2_pools(), **p3_pools(), **e22_pools()}
 
 
 def pool_vocabs(label: str) -> dict[str, tuple[str, ...]]:
@@ -292,6 +310,7 @@ def run() -> Path:
     """
     plan.REVIEW_DIR.mkdir(parents=True, exist_ok=True)
     plan.STAGING_DIR.mkdir(parents=True, exist_ok=True)
+    _stage_dd_control_pool()
     pools = planned_pools()
     logger.info("checking {} pools", len(pools))
     pool_records = {k: check_pool(k, p) for k, p in pools.items()}

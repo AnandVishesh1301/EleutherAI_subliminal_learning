@@ -48,6 +48,18 @@ def spec(base: str) -> PythiaModelSpec | HfModelSpec:
         return ws160m_models.spec(
             plan.WS1, plan.WS1_STEP, base_models_root=plan.BASE_MODELS_ROOT
         )
+    if base == plan.DD:
+        return HfModelSpec(
+            label=plan.DD_LABEL,
+            repo_id=plan.DD_REPO,
+            revision=plan.DD_REVISION,
+            family="olmo",
+            cluster="olmo-dolma",
+            model_type="hf_olmo",
+            vocab_size=plan.DD_VOCAB,
+            tokenizer_sha256=plan.DD_TOKENIZER_SHA,
+            lora_target_modules=plan.DD_LORA_MODULES,
+        )
     out = _HUB_SPECS[base]
     repo = resolve_hf_repo_id(out, plan.HUB_ORG)
     if repo != plan.HUB_REPOS[base]:
@@ -60,7 +72,8 @@ def train_cfgs(
 ) -> tuple[LoRAConfig | None, TrainConfig]:
     """(LoRA or None for full FT, TrainConfig) of `setting` in the hlopt E3 recipe.
 
-    410M cells take over an hour each, so they resume mid-run.
+    410M and 1B cells take over an hour each, so they resume mid-run. OLMo LoRA targets
+    its four block modules, never its LM head.
     """
     config = hlopt_plan.Config(
         tier=plan.CAMPAIGN,
@@ -70,12 +83,14 @@ def train_cfgs(
         alpha=setting.alpha,
         optim=setting.optim,
         lr=setting.lr,
-        epochs=plan.EPOCHS,
+        epochs=setting.epochs,
         animals=(),
     )
     lora, train = hlopt_layout.train_cfgs(config, seed)
-    if student == plan.PY410:
+    if student in (plan.PY410, plan.DD):
         train = replace(train, checkpoint_resume=True, save_steps=plan.SAVE_STEPS)
+    if student == plan.DD and lora is not None:
+        lora = replace(lora, target_modules=plan.DD_LORA_TARGETS)
     return lora, train
 
 
@@ -122,6 +137,8 @@ class Cell:
             return (str(self.target),)
         if self.exp in (plan.E8, plan.E8X, plan.E23):
             return plan.ANIMALS
+        if self.exp == plan.E22:
+            return plan.E22_TARGETS
         return plan.TREE_COLOR_TARGETS
 
 
@@ -297,6 +314,35 @@ def e8s_cells(selected: Mapping[tuple[str, str], float]) -> list[Cell]:
     ]
 
 
+def e22_controls() -> list[Cell]:
+    """#22 controls of both directions, one per setting of the receiving base."""
+    py, dd, seed, b = plan.PY160, plan.DD, plan.E7_SEED, plan.BASE
+    cells = [
+        Cell(plan.E22, py, dd, b, None, None, s, seed) for s in plan.E22_OLMO_SETTINGS
+    ]
+    cells += [Cell(plan.E22, dd, py, b, None, None, s, seed) for s in plan.FOCUS20]
+    return cells
+
+
+def e22_up_cells() -> list[Cell]:
+    """#22 160M→OLMo treatments on the existing 160M pools."""
+    return [
+        Cell(plan.E22, plan.PY160, plan.DD, plan.TEACHER, t, r, s, plan.E7_SEED)
+        for t in plan.E22_TARGETS
+        for r in plan.SELECTED_RECIPES
+        for s in plan.E22_OLMO_SETTINGS
+    ]
+
+
+def e22_down_cells(target: str, recipes: Sequence[str]) -> list[Cell]:
+    """#22 OLMo→160M treatments of `target` on its selected new pools."""
+    return [
+        Cell(plan.E22, plan.DD, plan.PY160, plan.TEACHER, target, r, s, plan.E7_SEED)
+        for r in recipes
+        for s in plan.FOCUS20
+    ]
+
+
 def exp_cells(exp: str) -> list[Cell]:
     """Every cell of a fixed experiment."""
     fixed = {
@@ -319,6 +365,9 @@ def _candidates() -> list[Cell]:
     for optim, rates in plan.E8_RATES.items():
         for lr in rates:
             cells += e8s_cells({(a, optim): lr for a in plan.ANIMALS})
+    cells += e22_controls() + e22_up_cells()
+    for target in plan.E22_TARGETS:
+        cells += e22_down_cells(target, plan.E22_RECIPES)
     return cells
 
 
@@ -363,8 +412,8 @@ def pool(cell: Cell) -> plan.Pool:
             else plan.ANIMAL_POOLS_160M
         )
         return pools[target]
-    if cell.teacher_base == plan.PY410:
-        return plan.new_pool(target, recipe)
+    if cell.teacher_base in (plan.PY410, plan.DD):
+        return plan.new_pool(target, recipe, cell.teacher_base)
     pools = {**plan.NEWDOM_POOLS, **plan.NEWDOM_POOLS_P3}
     return pools[(target, recipe)]
 
@@ -385,32 +434,33 @@ def run_dir(cell: Cell) -> Path:
         teacher_seed=plan.TEACHER_FTSEED if teacher else None,
         number_dataset_tag=pool(cell).dataset_tag,
         numbers_base_model=(
-            plan.HUB_REPOS[cell.teacher_base].split("/")[-1]
-            if cell.cross_base
-            else None
+            plan.model_name(cell.teacher_base) if cell.cross_base else None
         ),
     )
+
+
+def _angela_name(base: str) -> str:
+    """Base's directory name in Angela's tree."""
+    return plan.DD_LABEL if base == plan.DD else plan.HUB_REPOS[base].split("/")[-1]
 
 
 def reused_source(cell: Cell) -> Path | None:
     """Finished leaf `cell` copies instead of training, or None when it trains.
 
-    Reused: Angela's `focus20` controls on the two Hub students of #6 and on both
-    directions of #7, and hlopt's full-FT SGD controls of #9. `pile-ws1` has no matched
-    controls.
+    Reused: Angela's controls on the two Hub students of #6 and on both directions of #7
+    and #22, and hlopt's full-FT SGD controls of #9. `pile-ws1` has no matched controls.
     """
     if cell.source != plan.BASE:
         return None
     tag = setting_tag(cell.setting)
-    teacher = plan.HUB_REPOS[cell.teacher_base].split("/")[-1]
+    teacher = _angela_name(cell.teacher_base)
     tail = Path(f"teacher-{teacher}") / plan.TAG_N100K / tag / f"ftseed{cell.seed}"
     if cell.exp == plan.E9:
         return plan.HLOPT_CONTROLS / plan.PY160 / tail
-    if cell.exp == plan.E7 or (
+    if cell.exp in (plan.E7, plan.E22) or (
         cell.exp == plan.E6 and cell.student_base in (plan.SEED1, plan.DATA1)
     ):
-        student = plan.HUB_REPOS[cell.student_base].split("/")[-1]
-        return plan.ANGELA_CONTROLS / student / tail
+        return plan.ANGELA_CONTROLS / _angela_name(cell.student_base) / tail
     return None
 
 
@@ -442,6 +492,8 @@ def mem_mib(cell: Cell) -> int:
     """Reservation of `cell`: a reused control only scores."""
     if reused_source(cell) is not None:
         return plan.MEM_SCORE
+    if cell.student_base == plan.DD:
+        return plan.MEM_LORA_1B
     if cell.student_base == plan.PY410:
         if cell.setting.mode == plan.LORA:
             return plan.MEM_LORA_410M

@@ -180,12 +180,13 @@ def test_pool_tags_follow_each_pool_not_the_hlopt_default():
 
 def test_reuse_covers_only_matched_controls():
     reused = staging.reused_cells()
-    assert len(reused) == 2 * 20 + 6 + 2 * 20
+    assert len(reused) == 2 * 20 + 6 + 2 * 20 + 2 * 20
     assert {c.student_base for c in reused} == {
         plan.SEED1,
         plan.DATA1,
         plan.PY160,
         plan.PY410,
+        plan.DD,
     }
     assert all(c.source == plan.BASE for c in reused)
     ws1 = [c for c in cells.e6_cells() if c.student_base == plan.WS1]
@@ -880,16 +881,16 @@ def test_coherence_flags_a_pool_collapsed_onto_one_completion():
 def test_teacher_tasks_stay_on_the_plan():
     assert len(rt.teacher_tasks()) == 3 * 10
     with pytest.raises(ValueError):
-        rt.TeacherTask("oak", rt.RECIPES[0])
+        rt.TeacherTask("oak", rt.E7_ARM.recipes[0])
     with pytest.raises(ValueError):
         rt.PoolTask("blue", "ep1_lr1e-9_r1a1")
 
 
 def test_teacher_layout_sits_under_the_campaign_root(fake_root):
-    leaf = rt.teacher_leaf_dir("blue", rt.RECIPES[0])
+    leaf = rt.teacher_leaf_dir("blue", rt.E7_ARM.recipes[0])
     assert str(leaf).startswith(str(fake_root))
-    assert rt.pool_dir("blue", rt.RECIPES[0]).name == "ex10-20"
-    assert rt.filtered_dir("blue", rt.RECIPES[0]).name == "prefix"
+    assert rt.pool_dir("blue", rt.E7_ARM.recipes[0]).name == "ex10-20"
+    assert rt.filtered_dir("blue", rt.E7_ARM.recipes[0]).name == "prefix"
 
 
 def test_check_pool_binds_a_new_pool_to_its_approved_review(fake_root, monkeypatch):
@@ -973,7 +974,7 @@ def test_a_first_pass_without_a_pin_is_refused(tmp_path):
 
 def test_students_wait_for_the_review_of_their_pools(tmp_path, monkeypatch):
     cfg = _driver_cfg(tmp_path)
-    usable = [plan.SELECTED_RECIPES[0], plan.SELECTED_RECIPES[1], rt.RECIPES[3]]
+    usable = [plan.SELECTED_RECIPES[0], plan.SELECTED_RECIPES[1], rt.E7_ARM.recipes[3]]
     e7 = {
         "gate": {"blue": {"ranked": usable}},
         "pools": {"blue": {r: {"status": "usable"} for r in usable}},
@@ -1109,3 +1110,146 @@ def test_choosing_extra_seed_rates_skips_a_ladder_with_no_rung():
         {**_shared(plan.LION, 0.01, 0.2, dce=99.0), "at_edge": False},
     ]
     assert driver.choose_extra_seed_rates(rungs) == {(plan.DOG, plan.SGD): 0.01}
+
+
+# ---- #22 -------------------------------------------------------------------------------
+
+# `olmo_core35_cells.json`, read 2026-11-07.
+CORE35_FIRST = "ep10_lr1e-3_r256a4"
+CORE35_LAST = "ep10_lr1e-3_r2a8"
+
+
+def test_e22_sizes_match_the_brief():
+    assert len(plan.E22_OLMO_SETTINGS) == 20
+    assert len(cells.e22_up_cells()) == 2 * 60
+    assert len(cells.e22_down_cells("blue", plan.E22_RECIPES[:3])) == 60
+    assert len(cells.e22_controls()) == 2 * 20
+
+
+def test_e22_settings_are_an_even_spread_of_the_papers_grid():
+    tags = [cells.setting_tag(s) for s in plan.E22_OLMO_SETTINGS]
+    assert tags[0] == CORE35_FIRST and tags[-1] == CORE35_LAST
+    assert len(set(tags)) == 20
+    assert all(t.startswith("ep10_") for t in tags)
+
+
+def test_olmo_lora_targets_block_modules_and_never_the_head():
+    import re
+
+    lora, train = cells.train_cfgs(plan.E22_OLMO_SETTINGS[0], plan.DD, 1)
+    pattern = re.compile(lora.target_modules)
+    assert pattern.fullmatch("base.transformer.blocks.3.att_proj")
+    assert pattern.fullmatch("base.transformer.blocks.15.ff_out")
+    assert not pattern.fullmatch("base.transformer.ff_out")
+    assert train.checkpoint_resume and train.n_epochs == 10
+
+
+def test_pythia_students_keep_all_linear_in_e22():
+    lora, _ = cells.train_cfgs(plan.FOCUS20[0], plan.PY160, 1)
+    assert lora.target_modules == "all-linear"
+
+
+def test_e22_identity_matches_the_papers_manifest():
+    from subliminal_learning.models.registry import model_ref
+
+    assert model_ref(cells.spec(plan.DD), plan.HUB_ORG) == plan.MODEL_REFS[plan.DD]
+    assert plan.MODEL_REFS[plan.DD] == (
+        "allenai/DataDecide-dolma1_7-1B@step69369-seed-default"
+    )
+
+
+def test_e22_controls_reuse_angelas_trees():
+    up, down = cells.e22_controls()[0], cells.e22_controls()[-1]
+    assert f"/{plan.DD_LABEL}/teacher-pythia-160m/" in str(cells.reused_source(up))
+    assert f"/pythia-160m/teacher-{plan.DD_LABEL}/" in str(cells.reused_source(down))
+    assert cells.pool(down) == plan.CONTROL_POOLS[plan.DD]
+    assert down.eval_targets == plan.E22_TARGETS
+
+
+def test_e22_leaves_are_cross_base_on_both_sides():
+    up = cells.e22_up_cells()[0]
+    down = cells.e22_down_cells("blue", plan.E22_RECIPES[:1])[0]
+    assert "teacher-pythia-160m" in str(cells.run_dir(up))
+    assert f"teacher-{plan.model_name(plan.DD)}" in str(cells.run_dir(down))
+    assert (
+        cells.pool(down).directory
+        == plan.new_pool("blue", plan.E22_RECIPES[0], plan.DD).directory
+    )
+
+
+def test_e7_job_keys_and_commands_stay_as_submitted():
+    task = rt.TeacherTask("blue", rt.E7_ARM.recipes[0])
+    job = rt.teacher_job(task)
+    assert job.key == f"e7|teacher|blue|{rt.E7_ARM.recipes[0]}"
+    assert "--exp" not in job.cmd
+    assert rt.pool_job(rt.PoolTask("blue", rt.E7_ARM.recipes[0])).mem_mib == 16_000
+
+
+def test_e22_jobs_name_their_arm():
+    task = rt.TeacherTask("blue", plan.E22_RECIPES[0], rt.E22_ARM)
+    assert task.key.startswith("e22|teacher|")
+    assert "--exp e22" in rt.teacher_job(task).cmd
+    with pytest.raises(ValueError):
+        rt.TeacherTask("purple", plan.E22_RECIPES[0], rt.E22_ARM)
+
+
+def test_teacher_recipes_match_newdoms_knobs():
+    from subliminal_learning.campaign import newdom_hard as hard
+
+    for recipe in rt.E7_ARM.recipes:
+        assert rt.teacher_train(recipe) == hard.teacher_train(recipe)
+        assert rt.teacher_lora(recipe) == hard.teacher_lora(recipe)
+
+
+def test_olmo_teachers_use_the_block_regex():
+    lora = rt.teacher_lora(plan.E22_RECIPES[0], rt.E22_ARM)
+    assert lora.target_modules == plan.DD_LORA_TARGETS
+    assert (lora.r, lora.lora_alpha) == (256, 64)
+
+
+def test_rank_admitted_breaks_ties_on_the_arms_own_recipe_order():
+    from subliminal_learning.campaign import newdom_hard as hard
+
+    def reading(recipe, p):
+        return hard.TeacherReading("blue", recipe, p, 0.01, 0.001, 1.0, True)
+
+    r1, r2, r3 = plan.E22_RECIPES[:3]
+    readings = [reading(r2, 0.9), reading(r1, 0.9), reading(r3, 0.95)]
+    assert rt.rank_admitted(readings, rt.E22_ARM) == [r3, r1, r2]
+
+
+def test_e22_review_stays_apart_from_the_approved_reviews():
+    assert set(staging.e22_pools()) == {f"control|{plan.DD}"}
+    assert f"control|{plan.DD}" not in staging.p1_pools()
+
+
+def test_e22_waits_without_hf_olmo(monkeypatch):
+    import importlib.util
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    waiting: list = []
+    assert driver._e22_gate({"transitions": {}}, waiting) is False
+    assert "datadecide" in waiting[0]
+
+
+def test_e22_results_use_each_directions_own_settings(fake_root):
+    selected = {t: list(plan.E22_RECIPES[:3]) for t in plan.E22_TARGETS}
+    planned = cells.e22_controls() + cells.e22_up_cells()
+    planned += [
+        c for t in plan.E22_TARGETS for c in cells.e22_down_cells(t, selected[t])
+    ]
+    rng = np.random.default_rng(3)
+    for cell in planned:
+        for target in cell.eval_targets:
+            base = 0.02 + 0.01 * rng.random()
+            strong = cell.source == plan.TEACHER and cell.student_base == plan.DD
+            _write_leaf(fake_root, cell, target, base + 0.3 if strong else base)
+    out = results.build(plan.E22, fake_root / "res", planned=planned, selected=selected)
+    claims = json.loads((out / "claims.json").read_text())["R22"]
+    assert claims["by_direction"]["160m->olmo"]["supported"]
+    assert not claims["by_direction"]["olmo->160m"]["supported"]
+
+
+def test_every_candidate_leaf_is_unique_after_e22():
+    leaves = [cells.run_dir(c) for c in cells.cells_by_key().values()]
+    assert len(set(leaves)) == len(leaves)

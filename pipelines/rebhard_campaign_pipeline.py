@@ -12,7 +12,8 @@ One `run(cfg)` = one idempotent advance pass:
                 review is approved; 160M→410M runs on existing pools. #23: 410M→160M at
                 once, 160M→410M after #8 has chosen its rates
     p3          #6 on the other targets and #8's momentum ladder at once, #8's extra seeds
-                after #8 has chosen its rungs
+                after #8 has chosen its rungs; #22 as #7, on OLMo teachers, once its
+                environment and staging are in place
     finalize    CAMPAIGN_DONE once every experiment has results, no holes remain and
                 every priority is in the code
 """
@@ -227,7 +228,7 @@ def _submit_p2_static(cfg: driver_io.CampaignDriverConfig) -> None:
     _put(
         cfg,
         plan.queue(plan.E7_TEACHERS),
-        [rt.teacher_job(t) for t in rt.teacher_tasks()],
+        [rt.teacher_job(t) for t in rt.teacher_tasks(rt.E7_ARM)],
     )
     up = cells.e7_controls() + cells.e7_up_cells()
     _put(cfg, plan.queue(plan.E7_UP), [cells.student_job(c) for c in up])
@@ -235,24 +236,26 @@ def _submit_p2_static(cfg: driver_io.CampaignDriverConfig) -> None:
     _put(cfg, plan.queue(plan.E23_DOWN), [cells.student_job(c) for c in down])
 
 
-def _gate_e7(e7: dict) -> None:
+def _gate_arm(e: dict, arm: rt.Arm) -> None:
     """Rank each target's admitted teachers once."""
-    for target in plan.E7_TARGETS:
-        if target in e7["gate"]:
+    for target in arm.targets:
+        if target in e["gate"]:
             continue
-        records = [rtp.teacher_record(target, r) for r in rt.RECIPES]
+        records = [rtp.teacher_record(target, r, arm) for r in arm.recipes]
         if any(rec is None for rec in records):
             raise CampaignGateError(f"{target}: a finished teacher has no record")
         readings = [nd.reading(rec) for rec in records]
-        e7["gate"][target] = {
-            "ranked": hard.rank_admitted(readings),
+        e["gate"][target] = {
+            "ranked": rt.rank_admitted(readings, arm),
             "admission": {r.recipe: list(hard.admission(r)[1]) for r in readings},
         }
 
 
-def _resolve_pools(cfg: driver_io.CampaignDriverConfig, e7: dict, target: str) -> None:
+def _resolve_pools(
+    cfg: driver_io.CampaignDriverConfig, e: dict, target: str, arm: rt.Arm
+) -> None:
     """Read the outcome of every pool job that finished."""
-    name = plan.queue(plan.E7_POOLS)
+    name = plan.queue(arm.pool_queue)
     if not store.queue_exists(cfg.queue_root, name):
         return
     done = {
@@ -260,10 +263,11 @@ def _resolve_pools(cfg: driver_io.CampaignDriverConfig, e7: dict, target: str) -
         for j in store.load_jobs(cfg.queue_root, name)
         if store.job_state(cfg.queue_root, name, j) == store.DONE
     }
-    for recipe, rec in e7["pools"].setdefault(target, {}).items():
-        if rec["status"] != "submitted" or rt.PoolTask(target, recipe).key not in done:
+    for recipe, rec in e["pools"].setdefault(target, {}).items():
+        key = rt.PoolTask(target, recipe, arm).key
+        if rec["status"] != "submitted" or key not in done:
             continue
-        qc = rtp.pool_status(target, recipe)
+        qc = rtp.pool_status(target, recipe, arm)
         rec.update(n_filtered=qc.n_filtered, keep_rate=qc.keep_rate)
         if qc.ready:
             rec["status"] = hard.USABLE
@@ -274,30 +278,33 @@ def _resolve_pools(cfg: driver_io.CampaignDriverConfig, e7: dict, target: str) -
             rec["reasons"] = list(qc.reasons)
 
 
+def _down_cells(arm: rt.Arm, target: str, recipes: list[str]) -> list[cells.Cell]:
+    fn = cells.e7_down_cells if arm == rt.E7_ARM else cells.e22_down_cells
+    return fn(target, recipes)
+
+
 def _advance_target(
     cfg: driver_io.CampaignDriverConfig,
-    e7: dict,
+    e: dict,
     target: str,
     fired: list[str],
     waiting: list[str],
+    arm: rt.Arm = rt.E7_ARM,
 ) -> None:
     """Pools of one target, then its students once its review is approved."""
-    _resolve_pools(cfg, e7, target)
-    if not e7["final"].get(target):
-        pools = e7["pools"].setdefault(target, {})
+    _resolve_pools(cfg, e, target, arm)
+    if not e["final"].get(target):
+        pools = e["pools"].setdefault(target, {})
         outcomes = {
             r: rec["status"]
             for r, rec in pools.items()
             if rec["status"] in (hard.USABLE, hard.SHORT)
         }
-        ranked = e7["gate"][target]["ranked"]
+        ranked = e["gate"][target]["ranked"]
         decision = hard.pool_plan(ranked, set(pools), outcomes)
         if decision.submit:
-            n = _put(
-                cfg,
-                plan.queue(plan.E7_POOLS),
-                [rt.pool_job(rt.PoolTask(target, r)) for r in decision.submit],
-            )
+            jobs = [rt.pool_job(rt.PoolTask(target, r, arm)) for r in decision.submit]
+            n = _put(cfg, plan.queue(arm.pool_queue), jobs)
             for r in decision.submit:
                 pools[r] = {"status": "submitted", "at": utc_now_iso()}
             fired.append(f"pools {target} +{list(decision.submit)} ({n} new)")
@@ -307,57 +314,66 @@ def _advance_target(
             if invalid:
                 waiting.append(f"pools {target}: {invalid} invalid, see their reasons")
             return
-        e7["final"][target] = True
-        e7["selected"][target] = list(decision.selected)
+        e["final"][target] = True
+        e["selected"][target] = list(decision.selected)
         fired.append(f"final {target}: teachers {list(decision.selected)}")
-    chosen = e7["selected"][target]
-    if not chosen or e7["submitted"].get(target):
+    chosen = e["selected"][target]
+    if not chosen or e["submitted"].get(target):
         return
-    sheet = rtp.write_pool_samples(target, chosen)
-    problem = rtp.pool_review_problem(target, chosen)
+    sheet = rtp.write_pool_samples(target, chosen, arm)
+    problem = rtp.pool_review_problem(target, chosen, arm)
     if problem:
         waiting.append(f"students {target} held: {problem} (sheet {sheet})")
         return
-    jobs = [cells.student_job(c) for c in cells.e7_down_cells(target, chosen)]
-    n = _put(cfg, plan.queue(plan.E7_DOWN), jobs)
-    e7["submitted"][target] = utc_now_iso()
+    jobs = [cells.student_job(c) for c in _down_cells(arm, target, chosen)]
+    n = _put(cfg, plan.queue(arm.down_queue), jobs)
+    e["submitted"][target] = utc_now_iso()
     fired.append(f"students {target} {chosen} ({n} cells)")
 
 
-def _advance_e7(
+def _advance_arm(
     cfg: driver_io.CampaignDriverConfig,
     state: dict,
+    arm: rt.Arm,
     fired: list[str],
     waiting: list[str],
 ) -> None:
-    """Move #7 from its finished teachers towards students."""
-    e7 = state.setdefault(
-        "e7", {"gate": {}, "pools": {}, "final": {}, "selected": {}, "submitted": {}}
+    """Move an arm from its finished teachers towards students."""
+    e = state.setdefault(
+        arm.exp,
+        {"gate": {}, "pools": {}, "final": {}, "selected": {}, "submitted": {}},
     )
-    ok, msg = driver_io.queue_finished(cfg, plan.queue(plan.E7_TEACHERS))
+    ok, msg = driver_io.queue_finished(cfg, plan.queue(arm.teacher_queue))
     if not ok:
         waiting.append(msg)
         return
-    _gate_e7(e7)
-    for target in plan.E7_TARGETS:
-        _advance_target(cfg, e7, target, fired, waiting)
-        if e7["final"].get(target) and not e7["selected"].get(target):
-            state.setdefault("holes", {})[f"e7|{target}"] = "no usable 410M teacher"
+    _gate_arm(e, arm)
+    for target in arm.targets:
+        _advance_target(cfg, e, target, fired, waiting, arm)
+        if e["final"].get(target) and not e["selected"].get(target):
+            hole = f"{arm.exp}|{target}"
+            state.setdefault("holes", {})[hole] = f"no usable {arm.base} teacher"
 
 
-def _e7_ready(state: dict) -> bool:
+def _arm_ready(state: dict, arm: rt.Arm) -> bool:
     """Every target's selection is final and its students are queued."""
-    e7 = state.get("e7") or {}
+    e = state.get(arm.exp) or {}
     return all(
-        (e7.get("final") or {}).get(t) and (e7.get("submitted") or {}).get(t)
-        for t in plan.E7_TARGETS
+        (e.get("final") or {}).get(t) and (e.get("submitted") or {}).get(t)
+        for t in arm.targets
     )
 
 
 def _e7_planned(state: dict) -> list[cells.Cell]:
-    selected = state["e7"]["selected"]
+    selected = state[plan.E7]["selected"]
     down = [c for t in plan.E7_TARGETS for c in cells.e7_down_cells(t, selected[t])]
     return cells.e7_controls() + cells.e7_up_cells() + down
+
+
+def _e22_planned(state: dict) -> list[cells.Cell]:
+    selected = state[plan.E22]["selected"]
+    down = [c for t in plan.E22_TARGETS for c in cells.e22_down_cells(t, selected[t])]
+    return cells.e22_controls() + cells.e22_up_cells() + down
 
 
 def choose_e23_rates(rungs: list[dict]) -> tuple[float, ...] | None:
@@ -400,7 +416,7 @@ def _p2_results(
     card = read_run_set_card(cfg.run_set_root) or {}
     root = cfg.run_set_root / plan.RESULTS_DIRNAME
     done = state["transitions"]
-    if "results_e7" not in done and _e7_ready(state):
+    if "results_e7" not in done and _arm_ready(state, rt.E7_ARM):
         names = [
             plan.queue(q)
             for q in (plan.E7_TEACHERS, plan.E7_POOLS, plan.E7_UP, plan.E7_DOWN)
@@ -411,7 +427,7 @@ def _p2_results(
                 root,
                 card.get("git_sha"),
                 planned=_e7_planned(state),
-                selected=state["e7"]["selected"],
+                selected=state[plan.E7]["selected"],
             )
             _fire(state, "results_e7", build=str(out))
             fired.append("results_e7")
@@ -518,6 +534,70 @@ def _p3_results(
             fired.append("results_e8x")
 
 
+def _e22_gate(state: dict, waiting: list[str]) -> bool:
+    """Whether #22 may start: OLMo importable here, staged, its control pool reviewed."""
+    import importlib.util
+    import json
+
+    if "e22_preflight" in state["transitions"]:
+        return True
+    if importlib.util.find_spec("hf_olmo") is None:
+        waiting.append(
+            "e22 held: hf_olmo missing, sync the pin with --group datadecide"
+        )
+        return False
+    report = staging.latest_complete_report()
+    n_reused = len(staging.reused_cells())
+    if (
+        report is None
+        or report["n_reused_controls"] != n_reused
+        or plan.DD_REPO not in report["hub"]
+    ):
+        waiting.append("e22 held: staging report lacks OLMo or its reused controls")
+        return False
+    path = plan.E22_POOL_REVIEW_PATH
+    review = json.loads(path.read_text()) if path.is_file() else None
+    problem = staging.pool_review_problem(review, staging.e22_pools())
+    if problem:
+        waiting.append(f"e22 held: {path}: {problem}")
+        return False
+    _fire(state, "e22_preflight", staging_report_at=report["at"])
+    return True
+
+
+def _submit_e22_static(cfg: driver_io.CampaignDriverConfig) -> None:
+    jobs = [rt.teacher_job(t) for t in rt.teacher_tasks(rt.E22_ARM)]
+    _put(cfg, plan.queue(plan.E22_TEACHERS), jobs)
+    up = cells.e22_controls() + cells.e22_up_cells()
+    _put(cfg, plan.queue(plan.E22_UP), [cells.student_job(c) for c in up])
+
+
+def _e22_results(
+    cfg: driver_io.CampaignDriverConfig,
+    state: dict,
+    fired: list[str],
+    waiting: list[str],
+) -> None:
+    """Build #22 once its queues are finished."""
+    if "results_e22" in state["transitions"] or not _arm_ready(state, rt.E22_ARM):
+        return
+    names = [
+        plan.queue(q)
+        for q in (plan.E22_TEACHERS, plan.E22_POOLS, plan.E22_UP, plan.E22_DOWN)
+    ]
+    if _finished(cfg, names, waiting) and not cfg.dry_run:
+        card = read_run_set_card(cfg.run_set_root) or {}
+        out = results.build(
+            plan.E22,
+            cfg.run_set_root / plan.RESULTS_DIRNAME,
+            card.get("git_sha"),
+            planned=_e22_planned(state),
+            selected=state[plan.E22]["selected"],
+        )
+        _fire(state, "results_e22", build=str(out))
+        fired.append("results_e22")
+
+
 def _repin(cfg: driver_io.CampaignDriverConfig) -> None:
     """Move every queue to the card's pin, including queues with no new jobs."""
     if cfg.dry_run:
@@ -574,13 +654,17 @@ def run(cfg: driver_io.CampaignDriverConfig) -> AdvanceResult:
             mark(name)
     if _p2_gate(state, waiting):
         _submit_p2_static(cfg)
-        _advance_e7(cfg, state, fired, waiting)
+        _advance_arm(cfg, state, rt.E7_ARM, fired, waiting)
         _advance_e23(cfg, state, fired)
         _p2_results(cfg, state, fired, waiting)
     if _p3_gate(state, waiting):
         _submit_p3_static(cfg)
         _advance_e8s(cfg, state, fired)
         _p3_results(cfg, state, fired, waiting)
+    if _e22_gate(state, waiting):
+        _submit_e22_static(cfg)
+        _advance_arm(cfg, state, rt.E22_ARM, fired, waiting)
+        _e22_results(cfg, state, fired, waiting)
     _repin(cfg)
     finished = all(
         f"results_{e}" in done

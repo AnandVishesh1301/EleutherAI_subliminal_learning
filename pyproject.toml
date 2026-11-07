@@ -28,6 +28,11 @@ dependencies = [
 ]
 
 [dependency-groups]
+# DataDecide OLMo-1B (`hf_olmo`), the rebuttal's #22 only. Not a default group:
+#   UV_FROZEN=1 uv sync --group datadecide
+datadecide = [
+    "ai2-olmo>=0.6",
+]
 analysis = [
     "ipykernel>=7.3.0",
     "jupyterlab>=4.6.1",
@@ -69,6 +74,9 @@ no-build-isolation-package = ["causal-conv1d", "mamba-ssm"]
 # sweeps (capability_io.run_benchmarks). Keep it default so plain `uv sync` /
 # worker restarts cannot drop it mid-campaign (20260801_optparam P2-eval outage).
 default-groups = ["dev", "analysis", "eval"]
+# ai2-olmo caps numpy and rich below the versions every other group resolves to. These
+# keep the locked versions, so adding the group moves no package for anyone else.
+override-dependencies = ["numpy>=2.4.6", "rich>=15.0.0"]
 
 [[tool.uv.index]]
 name = "pytorch-cu124"
