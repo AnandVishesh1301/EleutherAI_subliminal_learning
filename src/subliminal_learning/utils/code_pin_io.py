@@ -49,6 +49,10 @@ _OVERLAY_RELS = (
     "configs/paths/paths_sdfpos2.yaml",
     # xfam2: every root on the ssd-1 campaign root (any of the five nodes can serve it).
     "configs/paths/paths_xfam2.yaml",
+    # Rebuttal lanes: every root on that lane's ssd-1 campaign root.
+    "configs/paths/paths_rebsoft.yaml",
+    "configs/paths/paths_rebhard.yaml",
+    "configs/paths/paths_rebtopk.yaml",
     "configs/experiment/generated",
 )
 

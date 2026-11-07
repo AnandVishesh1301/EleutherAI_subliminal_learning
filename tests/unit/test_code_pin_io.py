@@ -102,6 +102,20 @@ def test_pin_overlays_the_driver_generated_config_dir(tmp_path: Path) -> None:
     assert (overlay / "gkd_a3_bear_b1_r1_e3.yaml").read_text() == "animals: [bear]\n"
 
 
+@pytest.mark.parametrize("lane", ["rebsoft", "rebhard", "rebtopk"])
+def test_pin_overlays_the_rebuttal_lane_paths_yaml(tmp_path: Path, lane: str) -> None:
+    """Rebuttal cells name a gitignored-by-policy paths YAML and run inside the pin."""
+    repo, sha1, _sha2 = _init_repo(tmp_path)
+    rel = Path("configs") / "paths" / f"paths_{lane}.yaml"
+    (repo / rel).parent.mkdir(parents=True)
+    (repo / rel).write_text(f"output_root: /tmp/{lane}\n")
+
+    pin = ensure_code_pin(repo, sha1)
+
+    assert (pin.root / rel).is_symlink()
+    assert (pin.root / rel).read_text() == f"output_root: /tmp/{lane}\n"
+
+
 def test_ensure_code_pin_refuses_corrupt_dir(tmp_path: Path) -> None:
     repo, sha1, _sha2 = _init_repo(tmp_path)
     pin = ensure_code_pin(repo, sha1)
