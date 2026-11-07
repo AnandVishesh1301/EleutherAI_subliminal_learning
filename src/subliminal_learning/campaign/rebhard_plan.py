@@ -118,6 +118,7 @@ CE_BASE: MappingProxyType[str, float] = MappingProxyType(
         DATA1: 2.681188013336026,
         WS1: 2.665564126516388,
         PY410: 2.330724528664194,
+        DD: 2.2727059238432346,
     }
 )
 CE_BASE_TOL = hlopt_plan.PP1_CE_BASE_TOL
