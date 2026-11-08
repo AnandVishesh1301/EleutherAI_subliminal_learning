@@ -400,6 +400,15 @@ def cell_from_key(key: str) -> Cell:
 # ---- pools and layout ------------------------------------------------------------------
 
 
+def new_pool_of(
+    target: str, recipe: str, base: str, topup: bool | None = None
+) -> plan.Pool:
+    """A new teacher's pool; `topup` None takes the one students use now."""
+    if topup is None:
+        topup = plan.topup_marker(target, recipe, base).is_file()
+    return plan.new_pool(target, recipe, base, topup)
+
+
 def pool(cell: Cell) -> plan.Pool:
     """The filtered pool `cell` trains on."""
     if cell.source == plan.BASE:
@@ -413,7 +422,7 @@ def pool(cell: Cell) -> plan.Pool:
         )
         return pools[target]
     if cell.teacher_base in (plan.PY410, plan.DD):
-        return plan.new_pool(target, recipe, cell.teacher_base)
+        return new_pool_of(target, recipe, cell.teacher_base)
     pools = {**plan.NEWDOM_POOLS, **plan.NEWDOM_POOLS_P3}
     return pools[(target, recipe)]
 

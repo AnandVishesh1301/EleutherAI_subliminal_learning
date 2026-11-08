@@ -48,6 +48,7 @@ class Arm:
         down_queue: Queue token of the students on the new pools.
         mem_teacher: Teacher job reservation, MiB.
         mem_pool: Pool job reservation, MiB.
+        spare_pools: Also generate a pool for every other admitted teacher.
     """
 
     exp: str
@@ -60,6 +61,7 @@ class Arm:
     down_queue: str
     mem_teacher: int
     mem_pool: int
+    spare_pools: bool = False
 
 
 E7_ARM = Arm(
@@ -73,6 +75,7 @@ E7_ARM = Arm(
     plan.E7_DOWN,
     plan.MEM_TEACHER_410M,
     plan.MEM_POOL_410M,
+    spare_pools=True,
 )
 E22_ARM = Arm(
     plan.E22,
@@ -117,13 +120,15 @@ class PoolTask:
     target: str
     recipe: str
     arm: Arm = E7_ARM
+    topup: bool = False
 
     def __post_init__(self) -> None:
         TeacherTask(self.target, self.recipe, self.arm)
 
     @property
     def key(self) -> str:
-        return f"{self.arm.exp}|pool|{self.target}|{self.recipe}"
+        suffix = "|n300k" if self.topup else ""
+        return f"{self.arm.exp}|pool|{self.target}|{self.recipe}{suffix}"
 
 
 def teacher_tasks(arm: Arm = E7_ARM) -> list[TeacherTask]:
@@ -204,21 +209,28 @@ def base_control_path(target: str, arm: Arm = E7_ARM) -> Path:
     return teacher_dir(target, arm.recipes[0], arm).parent / "base_control.json"
 
 
-def pool_dir(target: str, recipe: str, arm: Arm = E7_ARM) -> Path:
+def pool_dir(
+    target: str, recipe: str, arm: Arm = E7_ARM, topup: bool | None = None
+) -> Path:
     """Raw-pool dir of one teacher, the parent of its filtered modes."""
-    return filtered_dir(target, recipe, arm).parent.parent
+    return filtered_dir(target, recipe, arm, topup).parent.parent
 
 
-def filtered_dir(target: str, recipe: str, arm: Arm = E7_ARM) -> Path:
-    return plan.new_pool(target, recipe, arm.base).directory
+def filtered_dir(
+    target: str, recipe: str, arm: Arm = E7_ARM, topup: bool | None = None
+) -> Path:
+    return cells.new_pool_of(target, recipe, arm.base, topup).directory
 
 
-def screen_path(target: str, recipe: str, arm: Arm = E7_ARM) -> Path:
-    return pool_dir(target, recipe, arm) / SCREEN_FILE
+def screen_path(
+    target: str, recipe: str, arm: Arm = E7_ARM, topup: bool | None = None
+) -> Path:
+    return pool_dir(target, recipe, arm, topup) / SCREEN_FILE
 
 
-def pool_samples_path(target: str, arm: Arm = E7_ARM) -> Path:
-    return plan.REVIEW_DIR / f"{arm.exp}_pools_{target}.samples.md"
+def pool_samples_path(target: str, arm: Arm = E7_ARM, topped: bool = False) -> Path:
+    suffix = ".topup" if topped else ""
+    return plan.REVIEW_DIR / f"{arm.exp}_pools_{target}{suffix}.samples.md"
 
 
 def pool_review_path(target: str, arm: Arm = E7_ARM) -> Path:
@@ -239,6 +251,8 @@ def teacher_job(task: TeacherTask) -> Job:
 def pool_job(task: PoolTask) -> Job:
     cmd = f"{_CMD} pool --target {task.target} --recipe {task.recipe}"
     cmd += _arm_flag(task.arm)
+    if task.topup:
+        cmd += " --topup"
     return Job(key=task.key, cmd=cmd, mem_mib=task.arm.mem_pool, slots=1)
 
 

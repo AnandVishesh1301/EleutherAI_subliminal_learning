@@ -295,6 +295,80 @@ def _resolve_pools(
             rec["reasons"] = list(qc.reasons)
 
 
+def _submit_spares(
+    cfg: driver_io.CampaignDriverConfig,
+    e: dict,
+    target: str,
+    arm: rt.Arm,
+    fired: list[str],
+) -> None:
+    """Queue a pool for every admitted teacher still without one."""
+    pools = e["pools"].setdefault(target, {})
+    spares = [r for r in e["gate"][target]["ranked"] if r not in pools]
+    if not spares:
+        return
+    n = _put(
+        cfg,
+        plan.queue(arm.pool_queue),
+        [rt.pool_job(rt.PoolTask(target, r, arm)) for r in spares],
+    )
+    for r in spares:
+        pools[r] = {"status": "submitted", "at": utc_now_iso(), "spare": True}
+    fired.append(f"spare pools {target} +{spares} ({n} new)")
+
+
+def _advance_topups(
+    cfg: driver_io.CampaignDriverConfig,
+    e: dict,
+    target: str,
+    arm: rt.Arm,
+    fired: list[str],
+) -> set[str]:
+    """Top up thin pools at 300k prompts; return recipes still generating."""
+    tops = e.setdefault("topups", {}).setdefault(target, {})
+    pools = e["pools"].get(target, {})
+    thin = [
+        r
+        for r, rec in pools.items()
+        if rec["status"] in (hard.USABLE, hard.SHORT)
+        and rec.get("n_filtered", plan.POOL_TOPUP_BELOW_ROWS)
+        < plan.POOL_TOPUP_BELOW_ROWS
+        and r not in tops
+    ]
+    name = plan.queue(arm.pool_queue)
+    if thin:
+        tasks = [rt.PoolTask(target, r, arm, topup=True) for r in thin]
+        n = _put(cfg, name, [rt.pool_job(t) for t in tasks])
+        for r in thin:
+            tops[r] = {"status": "submitted", "at": utc_now_iso()}
+        fired.append(f"pool top-ups {target} +{thin} ({n} new)")
+    if not tops:
+        return set()
+    done = {
+        j.key
+        for j in store.load_jobs(cfg.queue_root, name)
+        if store.job_state(cfg.queue_root, name, j) == store.DONE
+    }
+    for recipe, rec in tops.items():
+        key = rt.PoolTask(target, recipe, arm, topup=True).key
+        if rec["status"] != "submitted" or key not in done:
+            continue
+        qc = rtp.pool_status(target, recipe, arm, topup=True)
+        rec.update(n_filtered=qc.n_filtered, keep_rate=qc.keep_rate)
+        if qc.ready and qc.n_filtered > pools[recipe]["n_filtered"]:
+            rec["status"] = hard.USABLE
+            marker = plan.topup_marker(target, recipe, arm.base)
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(
+                marker, {"at": utc_now_iso(), "n_filtered": qc.n_filtered}
+            )
+            fired.append(f"pool top-up {target} {recipe}: {qc.n_filtered} rows")
+        else:
+            rec["status"] = "not_used"
+            rec["reasons"] = list(qc.reasons)
+    return {r for r, rec in tops.items() if rec["status"] == "submitted"}
+
+
 def _down_cells(arm: rt.Arm, target: str, recipes: list[str]) -> list[cells.Cell]:
     fn = cells.e7_down_cells if arm == rt.E7_ARM else cells.e22_down_cells
     return fn(target, recipes)
@@ -310,6 +384,9 @@ def _advance_target(
 ) -> None:
     """Pools of one target, then its students once its review is approved."""
     _resolve_pools(cfg, e, target, arm)
+    if arm.spare_pools:
+        _submit_spares(cfg, e, target, arm, fired)
+    topping_up = _advance_topups(cfg, e, target, arm, fired)
     if not e["final"].get(target):
         pools = e["pools"].setdefault(target, {})
         outcomes = {
@@ -336,6 +413,9 @@ def _advance_target(
         fired.append(f"final {target}: teachers {list(decision.selected)}")
     chosen = e["selected"][target]
     if not chosen or e["submitted"].get(target):
+        return
+    if topping_up & set(chosen):
+        waiting.append(f"students {target} held: top-ups {sorted(topping_up)}")
         return
     sheet = rtp.write_pool_samples(target, chosen, arm)
     problem = rtp.pool_review_problem(target, chosen, arm)

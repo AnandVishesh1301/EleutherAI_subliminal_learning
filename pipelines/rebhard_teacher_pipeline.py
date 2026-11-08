@@ -193,10 +193,16 @@ def run_teacher(task: rt.TeacherTask, device: str) -> dict:
     return {"record": rec, "admitted": admitted, "reasons": list(reasons)}
 
 
-def pool_status(target: str, recipe: str, arm: rt.Arm = rt.E7_ARM) -> xmetrics.PoolQC:
+def pool_status(
+    target: str, recipe: str, arm: rt.Arm = rt.E7_ARM, topup: bool | None = None
+) -> xmetrics.PoolQC:
     """QC of one teacher pool on disk (xopt contract plus prompts hash and adapter)."""
-    pool = rt.pool_dir(target, recipe, arm)
-    mode = rt.filtered_dir(target, recipe, arm)
+    if topup is None:
+        topup = plan.topup_marker(target, recipe, arm.base).is_file()
+    pool = rt.pool_dir(target, recipe, arm, topup)
+    mode = rt.filtered_dir(target, recipe, arm, topup)
+    n_prompts = plan.POOL_TOPUP_PROMPTS if topup else newdom_plan.HARD_N_PROMPTS
+    want_hash = plan.POOL_TOPUP_PROMPTS_HASH if topup else newdom_plan.HARD_PROMPTS_HASH
     raw = _read(pool / RAW_MANIFEST)
     filtered = mode / FILTERED_FILE
     qc = xmetrics.pool_qc(
@@ -206,14 +212,14 @@ def pool_status(target: str, recipe: str, arm: rt.Arm = rt.E7_ARM) -> xmetrics.P
         expected_repo=plan.MODEL_REFS[arm.base],
         source=plan.TEACHER,
         animal=target,
-        n_prompts=newdom_plan.HARD_N_PROMPTS,
+        n_prompts=n_prompts,
         min_rows=newdom_plan.HARD_POOL_MIN_ROWS,
     )
     if raw is None:
         return qc
     params = raw.get("params") or {}
     extra = []
-    if params.get("prompts_hash") != newdom_plan.HARD_PROMPTS_HASH:
+    if params.get("prompts_hash") != want_hash:
         extra.append("prompts_hash_mismatch")
     ckpt = str(rt.teacher_leaf_dir(target, recipe, arm) / "checkpoints")
     if params.get("checkpoint_dir") != ckpt:
@@ -223,15 +229,17 @@ def pool_status(target: str, recipe: str, arm: rt.Arm = rt.E7_ARM) -> xmetrics.P
     return replace(qc, ready=False, reasons=(*qc.reasons, *extra))
 
 
-def screen_pool(target: str, recipe: str, arm: rt.Arm = rt.E7_ARM) -> dict:
+def screen_pool(
+    target: str, recipe: str, arm: rt.Arm = rt.E7_ARM, topup: bool | None = None
+) -> dict:
     """The pool's domain-screen record (scanned and written once).
 
     Raises:
         RuntimeError: A stored record scanned another file or another vocabulary.
     """
-    filtered = rt.filtered_dir(target, recipe, arm)
+    filtered = rt.filtered_dir(target, recipe, arm, topup)
     sha = file_sha256(filtered / FILTERED_FILE)
-    path = rt.screen_path(target, recipe, arm)
+    path = rt.screen_path(target, recipe, arm, topup)
     stored = _read(path)
     if stored is not None:
         problem = nd.screen_record_problem(stored, target, sha)
@@ -268,13 +276,15 @@ def run_pool(task: rt.PoolTask, device: str) -> dict:
     prompt_set, modes, gen = number_context(offxsize_plan.NUMBER_CONFIG)
     if prompt_set.n_prompts != newdom_plan.HARD_N_PROMPTS:
         raise RuntimeError(f"{prompt_set.n_prompts} prompts, plan 100k")
+    if task.topup:
+        prompt_set = replace(prompt_set, n_prompts=plan.POOL_TOPUP_PROMPTS)
     generate_run(
         GenerateNumbersConfig(
             paths=paths,
             hub_org=hub_org,
             spec=cells.spec(arm.base),
             source=plan.TEACHER,
-            out_dir=rt.pool_dir(task.target, task.recipe, arm),
+            out_dir=rt.pool_dir(task.target, task.recipe, arm, task.topup),
             prompt_set=prompt_set,
             filter_modes={m: modes[m] for m in offxsize_plan.RECORDED_FILTER_MODES},
             constrained=None,
@@ -288,9 +298,11 @@ def run_pool(task: rt.PoolTask, device: str) -> dict:
             force=False,
         )
     )
-    qc = pool_status(task.target, task.recipe, arm)
-    if (rt.filtered_dir(task.target, task.recipe, arm) / FILTERED_FILE).is_file():
-        record = screen_pool(task.target, task.recipe, arm)
+    qc = pool_status(task.target, task.recipe, arm, task.topup)
+    if (
+        rt.filtered_dir(task.target, task.recipe, arm, task.topup) / FILTERED_FILE
+    ).is_file():
+        record = screen_pool(task.target, task.recipe, arm, task.topup)
         hits = nd.screen_hits_of(record, task.target)
         if hits:
             raise RuntimeError(f"{task.key}: {hits} kept row(s) hit the domain screen")
@@ -335,7 +347,8 @@ def write_pool_samples(
     target: str, recipes: Sequence[str], arm: rt.Arm = rt.E7_ARM
 ) -> Path:
     """Write `target`'s review sheet once: shas, coherence, seeded kept rows."""
-    path = rt.pool_samples_path(target, arm)
+    topped = any(plan.topup_marker(target, r, arm.base).is_file() for r in recipes)
+    path = rt.pool_samples_path(target, arm, topped)
     if path.exists():
         return path
     references = reference_stats(target)

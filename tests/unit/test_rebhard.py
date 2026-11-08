@@ -19,6 +19,7 @@ from pipelines import rebhard_cell_pipeline as cellpipe
 from pipelines import rebhard_results_pipeline as results
 from pipelines import rebhard_staging_pipeline as staging
 from pipelines.distill_student_pipeline import keeps_resume_state
+from subliminal_learning.campaign import newdom_hard as hard
 from subliminal_learning.campaign import rebhard_cells as cells
 from subliminal_learning.campaign import rebhard_metrics as metrics
 from subliminal_learning.campaign import rebhard_plan as plan
@@ -911,6 +912,89 @@ def test_check_pool_binds_a_new_pool_to_its_approved_review(fake_root, monkeypat
         cellpipe.check_pool(cell)
     path.write_text(json.dumps({"approved": True, "pools": {cell.recipe: sha}}))
     assert cellpipe.check_pool(cell) == pool
+
+
+@pytest.fixture(autouse=True)
+def _no_real_topups(tmp_path, monkeypatch):
+    monkeypatch.setattr(plan, "TOPUP_DIR", tmp_path / "topups")
+
+
+def test_a_topup_has_its_own_path_and_tag_and_a_marker_makes_it_active():
+    recipe = rt.E7_ARM.recipes[0]
+    thin = plan.new_pool("blue", recipe)
+    full = plan.new_pool("blue", recipe, topup=True)
+    assert thin.directory != full.directory
+    assert (thin.dataset_tag, full.dataset_tag) == (plan.TAG_N100K, plan.TAG_N300K)
+    assert cells.new_pool_of("blue", recipe, plan.PY410) == thin
+    marker = plan.topup_marker("blue", recipe, plan.PY410)
+    marker.parent.mkdir(parents=True)
+    marker.write_text("{}")
+    assert cells.new_pool_of("blue", recipe, plan.PY410) == full
+    assert cells.new_pool_of("blue", recipe, plan.PY410, topup=False) == thin
+
+
+def test_a_topup_job_has_its_own_key_and_flag():
+    recipe = rt.E7_ARM.recipes[0]
+    plain, top = rt.PoolTask("blue", recipe), rt.PoolTask("blue", recipe, topup=True)
+    assert plain.key != top.key
+    assert "--topup" in rt.pool_job(top).cmd
+    assert "--topup" not in rt.pool_job(plain).cmd
+
+
+def test_spare_pools_do_not_change_which_teachers_are_selected():
+    ranked = list("abcdef")
+    top4 = hard.pool_plan(ranked, set("abcd"), dict.fromkeys("abcd", hard.USABLE))
+    spared = hard.pool_plan(ranked, set(ranked), dict.fromkeys("abcd", hard.USABLE))
+    assert spared.selected == top4.selected == tuple("abc")
+    assert spared.final
+    short = {"a": hard.SHORT, "b": hard.USABLE, "c": hard.USABLE, "d": hard.USABLE}
+    assert hard.pool_plan(ranked, set(ranked), short).selected == tuple("bcd")
+
+
+def _topup_setup(tmp_path, monkeypatch, done_keys):
+    from types import SimpleNamespace
+
+    cfg = _driver_cfg(tmp_path)
+    queued: list = []
+    monkeypatch.setattr(
+        driver, "_put", lambda c, n, jobs: queued.extend(jobs) or len(jobs)
+    )
+    jobs = [SimpleNamespace(key=k) for k in done_keys]
+    monkeypatch.setattr(driver.store, "load_jobs", lambda r, n: jobs)
+    monkeypatch.setattr(driver.store, "job_state", lambda r, n, j: driver.store.DONE)
+    monkeypatch.setattr(
+        driver.rtp,
+        "pool_status",
+        lambda *a, **k: SimpleNamespace(
+            ready=True, n_filtered=60_000, keep_rate=0.2, reasons=()
+        ),
+    )
+    return cfg, queued
+
+
+def test_thin_pools_get_a_topup_that_activates_only_when_it_is_larger(
+    tmp_path, monkeypatch
+):
+    recipes = rt.E7_ARM.recipes
+    e = {
+        "pools": {
+            "blue": {
+                recipes[0]: {"status": hard.USABLE, "n_filtered": 30_030},
+                recipes[1]: {"status": hard.USABLE, "n_filtered": 12_823},
+            }
+        }
+    }
+    cfg, queued = _topup_setup(tmp_path, monkeypatch, [])
+    fired: list = []
+    open_ = driver._advance_topups(cfg, e, "blue", rt.E7_ARM, fired)
+    assert open_ == {recipes[1]}
+    assert [j.key for j in queued] == [rt.PoolTask("blue", recipes[1], topup=True).key]
+    assert not plan.topup_marker("blue", recipes[1], plan.PY410).exists()
+    key = rt.PoolTask("blue", recipes[1], topup=True).key
+    cfg, queued = _topup_setup(tmp_path, monkeypatch, [key])
+    assert driver._advance_topups(cfg, e, "blue", rt.E7_ARM, fired) == set()
+    assert queued == []
+    assert plan.topup_marker("blue", recipes[1], plan.PY410).is_file()
 
 
 def _driver_cfg(tmp_path):

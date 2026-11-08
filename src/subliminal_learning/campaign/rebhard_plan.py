@@ -31,6 +31,7 @@ HF_ROOT = ROOT / "hf"
 INPUTS_DIR = ROOT / "inputs"
 STAGING_DIR = ROOT / "staging"
 REVIEW_DIR = ROOT / "reviews"
+TOPUP_DIR = REVIEW_DIR / "topups"
 GENERATED_DIR = ROOT / "config" / "generated"
 PP1_TEXT_PATH = INPUTS_DIR / "pp1_text.jsonl"
 POLICY_TEMPLATE_PATH = ROOT / "config" / "gpu_policy_template.json"
@@ -320,6 +321,9 @@ class Pool:
 TAG_N100K = "ex10-20_prefix_n100k"
 TAG_N200K = "ex10-20_prefix_n200k"
 TAG_N300K = "ex10-20_prefix_n300k"
+POOL_TOPUP_BELOW_ROWS = 25_000
+POOL_TOPUP_PROMPTS = 300_000
+POOL_TOPUP_PROMPTS_HASH = "25b621053f88918c"
 PREFIX = Path("ex10-20/modes/prefix")
 _NEWDOM_NUMBERS = Path("/mnt/ssd-3/soar-subliminal/vishesh/newdom/hard/outputs/numbers")
 _OFFXSIZE2_NUMBERS = Path(
@@ -483,10 +487,16 @@ ANIMAL_POOLS_160M: MappingProxyType[str, Pool] = MappingProxyType(
 )
 
 
-def new_pool(target: str, recipe: str, base: str = PY410) -> Pool:
+def new_pool(target: str, recipe: str, base: str = PY410, topup: bool = False) -> Pool:
     """Pool of a new #7 or #22 teacher, read from this campaign's output root."""
-    path = OUTPUT_ROOT / "numbers" / target / base / recipe / "ftseed1" / PREFIX
-    return Pool(path, None, None, TAG_N100K)
+    leaf = "ftseed1_n300k" if topup else "ftseed1"
+    path = OUTPUT_ROOT / "numbers" / target / base / recipe / leaf / PREFIX
+    return Pool(path, None, None, TAG_N300K if topup else TAG_N100K)
+
+
+def topup_marker(target: str, recipe: str, base: str) -> Path:
+    """Exists once a 300k top-up has replaced this teacher's 100k pool."""
+    return TOPUP_DIR / f"{base}_{target}_{recipe}.json"
 
 
 CONTROL_POOLS: MappingProxyType[str, Pool] = MappingProxyType(

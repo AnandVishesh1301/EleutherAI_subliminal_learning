@@ -84,6 +84,7 @@ def pool_cmd(
     target: str = _TARGET,
     recipe: str = _RECIPE,
     exp: str = _EXP,
+    topup: bool = typer.Option(False, "--topup", help="Generate at 300k prompts."),
     device: str = _DEVICE,
 ) -> None:
     """Generate, QC and screen one admitted new teacher's pool."""
@@ -92,7 +93,7 @@ def pool_cmd(
 
     _setup()
     try:
-        task = rt.PoolTask(target, recipe, rt.ARMS[exp])
+        task = rt.PoolTask(target, recipe, rt.ARMS[exp], topup)
     except (KeyError, ValueError) as err:
         raise typer.BadParameter(str(err)) from err
     run_pool(task, device)
