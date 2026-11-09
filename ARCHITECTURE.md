@@ -3100,6 +3100,27 @@ manifest; `gkd/vocab_mask_list_io.py` checks each list's sha and token text on l
 own root; the driver builds `results/p1/` and `results/final/` and writes `P1_DONE` and
 `CAMPAIGN_DONE` only when every planned leaf is trained and evaluated.
 
+### Hard-label rebuttal campaign (`rebhard`)
+
+Run set `20261107_rebhard_mixed`, prereg `docs/PREREG_REBHARD.md`, plan
+`.claude/plans/rebuttal/rebhard.plan.md`. Hard-label (number-sequence) students, one priority
+at a time: #6 new targets across student bases (blue, purple, maple, then oak, yellow, pine; 60
+students per pair, the paper's exceedance test ported with its seed and null count), #8 410M→410M
+full FT (dog, lion, SGD and AdamW ladders, momentum SGD, extra seeds), #9 160M full-FT SGD on
+trees and colors, #7 and #23 160M↔410M, #22 Pythia-160M↔OLMo-1B (DataDecide). Reused controls are
+staged by copy; new teacher pools follow newdom's gate and selection.
+
+`campaign/rebhard_{plan,cells,metrics,teachers}.py`,
+`pipelines/rebhard_{campaign,cell,teacher,staging,results}_pipeline.py`,
+`scripts/{run_rebhard_campaign,run_rebhard_cell,stage_rebhard_assets}.py` and
+`models/olmo_io.py` hold the code; `datadecide` is an optional uv group. Students of a new pool wait
+for a sha-bound review of that pool's sheet (coherence with existing pools, screen, seeded rows). A
+pool under 25,000 rows is regenerated at 300k prompts under its own path and tag and replaces the
+thin pool for the same teacher through a marker file; the selection stays rank-based. Queues live
+in `queue2/`: a storage hang froze `queue/rebhard-e6`, so unfinished cells were re-queued there
+(judged from their outputs on disk) and the old root was left untouched. Results read one leaf per
+cell, so reused and re-queued cells count once.
+
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 
 Long-form SSOT (prompts, HPs, on-disk corpora, what teachers trained on):

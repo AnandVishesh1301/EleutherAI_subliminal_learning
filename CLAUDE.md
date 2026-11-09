@@ -77,6 +77,10 @@ are machine-local. Summarize important repo changes in ARCHITECTURE.md.
   ARCHITECTURE.md § *Placebo SDF control teachers (traitfree)*.
 - "How do we free SSD-2 without breaking absolute manifest paths / flipping hot IO
   to slow SSD-1?" → **`docs/COLD_ARCHIVE_SSD1.md`** (tmux `cold_archive_ssd1`).
+- "How does the hard-label rebuttal campaign work (trees, colors, full-FT 410M, 160M↔410M,
+  Pythia↔OLMo, exceedance test, pool reviews, 300k top-ups, claims R6–R23)?" →
+  **`docs/PREREG_REBHARD.md`** (SSOT for claims); plan: `.claude/plans/rebuttal/rebhard.plan.md`.
+  Short summary in ARCHITECTURE.md § *Hard-label rebuttal campaign (`rebhard`)*.
 - "How do I review code/design?" → small changes: **`/code-design-review`**
   (Opus 5 medium main reviewer, Grok 4.5 high for optional subagents;
   read-only); large features / full pipelines:
