@@ -32,7 +32,6 @@ import trl
 from datasets import Dataset
 from loguru import logger
 from transformers import set_seed
-from transformers.trainer_utils import get_last_checkpoint
 
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.evaluation.animal_forms_io import load_animal_forms
@@ -1206,6 +1205,9 @@ def _train(
         resume = cfg.train.checkpoint_resume and any(
             checkpoint_dir.glob("checkpoint-*")
         )
+        resume_from = _last_whole_checkpoint(checkpoint_dir) if resume else None
+        if resume and resume_from is None:
+            raise FileNotFoundError(f"no whole checkpoint-* under {checkpoint_dir}")
         clear_stale_snapshots(
             run_dir / SNAPSHOTS_DIR, _resume_step(checkpoint_dir) if resume else 0
         )
@@ -1218,7 +1220,9 @@ def _train(
         if teacher_row is not None and trainer.is_world_process_zero():
             secondary.append(teacher_row, secondary.measure(trainer.model, step=0))
         train_output = (
-            trainer.train(resume_from_checkpoint=True) if resume else trainer.train()
+            trainer.train(resume_from_checkpoint=str(resume_from))
+            if resume
+            else trainer.train()
         )
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         trainer.save_model(str(checkpoint_dir))
@@ -1274,10 +1278,32 @@ def _train(
     )
 
 
+def _last_whole_checkpoint(checkpoint_dir: Path) -> Path | None:
+    """Newest ``checkpoint-N`` whose ``trainer_state.json`` parses; ``None`` when none.
+
+    HF writes that file last, so a kill mid-save leaves a newer dir without it.
+    """
+    numbered = [
+        path
+        for path in checkpoint_dir.glob("checkpoint-*")
+        if path.is_dir() and path.name.rsplit("-", 1)[1].isdigit()
+    ]
+    for path in sorted(
+        numbered, key=lambda p: int(p.name.rsplit("-", 1)[1]), reverse=True
+    ):
+        try:
+            json.loads((path / "trainer_state.json").read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            logger.warning("Skipping torn checkpoint {}", path)
+            continue
+        return path
+    return None
+
+
 def _resume_step(checkpoint_dir: Path) -> int:
-    """Optimizer step HF resumes from (its last ``checkpoint-N``; 0 when none)."""
-    last = get_last_checkpoint(str(checkpoint_dir))
-    return int(Path(last).name.rsplit("-", 1)[1]) if last else 0
+    """Optimizer step resumed from (the last whole ``checkpoint-N``; 0 when none)."""
+    last = _last_whole_checkpoint(checkpoint_dir)
+    return int(last.name.rsplit("-", 1)[1]) if last else 0
 
 
 def _write_trainer_log_history(trainer, path: Path) -> None:

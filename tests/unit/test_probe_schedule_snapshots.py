@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from transformers import TrainerControl, TrainerState
+from transformers.trainer_utils import get_last_checkpoint
 
 from pipelines import distill_student_gkd_pipeline as gkd_pipeline
 from subliminal_learning.gkd.config import load_gkd_config, load_gkd_training
@@ -193,8 +194,46 @@ def test_gkd_run_rejects_bad_settings_before_training(tmp_path: Path) -> None:
 def test_gkd_resume_step_is_the_last_checkpoint(tmp_path: Path) -> None:
     assert gkd_pipeline._resume_step(tmp_path) == 0
     for step in (250, 500, 75):
-        (tmp_path / f"checkpoint-{step}").mkdir()
+        _whole_checkpoint(tmp_path, step)
     assert gkd_pipeline._resume_step(tmp_path) == 500
+
+
+def _whole_checkpoint(root: Path, step: int) -> Path:
+    path = root / f"checkpoint-{step}"
+    path.mkdir()
+    (path / "trainer_state.json").write_text("{}")
+    return path
+
+
+def test_gkd_last_whole_checkpoint_matches_hf_when_newest_is_whole(
+    tmp_path: Path,
+) -> None:
+    for step in (250, 1000, 75):
+        _whole_checkpoint(tmp_path, step)
+    picked = gkd_pipeline._last_whole_checkpoint(tmp_path)
+    assert str(picked) == get_last_checkpoint(str(tmp_path))
+
+
+@pytest.mark.parametrize("state", [None, '{"global_step": 3'])
+def test_gkd_last_whole_checkpoint_skips_torn_newest(
+    tmp_path: Path, state: str | None
+) -> None:
+    whole = _whole_checkpoint(tmp_path, 250)
+    torn = tmp_path / "checkpoint-375"
+    torn.mkdir()
+    (torn / "adapter_model.safetensors").write_text("x")
+    if state is not None:
+        (torn / "trainer_state.json").write_text(state)
+    before = sorted(p.name for p in torn.iterdir())
+    assert gkd_pipeline._last_whole_checkpoint(tmp_path) == whole
+    assert gkd_pipeline._resume_step(tmp_path) == 250
+    assert sorted(p.name for p in torn.iterdir()) == before
+
+
+def test_gkd_last_whole_checkpoint_none_when_all_torn(tmp_path: Path) -> None:
+    (tmp_path / "checkpoint-125").mkdir()
+    assert gkd_pipeline._last_whole_checkpoint(tmp_path) is None
+    assert gkd_pipeline._resume_step(tmp_path) == 0
 
 
 # --- snapshot helpers ------------------------------------------------------------------
