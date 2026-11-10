@@ -53,6 +53,7 @@ _OVERLAY_RELS = (
     "configs/paths/paths_rebsoft.yaml",
     "configs/paths/paths_rebhard.yaml",
     "configs/paths/paths_rebtopk.yaml",
+    "configs/paths/paths_rebsampled.yaml",
     "configs/experiment/generated",
 )
 

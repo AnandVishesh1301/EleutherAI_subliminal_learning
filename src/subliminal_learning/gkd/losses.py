@@ -49,6 +49,10 @@ Three additions beyond TRL, all design ablations (see the plan §2/§3):
   setup the co-located teacher computes full logits regardless, so top-K is an
   information ablation, not an efficiency measure.
 
+`sampled_token_reverse_kl_loss` is the alternative to the full-vocabulary divergence:
+Lu et al.'s (Thinking Machines, 2025) per-token reverse KL scored on the sampled token
+alone, trained as a policy gradient (Tinker cookbook port; see its docstring).
+
 Two edge guards (plan §A): an all-flagged batch (every label ``-100`` -> ``mask.sum() ==
 0``) returns a differentiable zero instead of ``0/0``; likewise if the vocab mask bans the
 entire vocabulary (nothing left to compare).
@@ -323,3 +327,50 @@ def masked_generalized_jsd_loss(
         jsd = beta_t * kl_teacher + (1 - beta_t) * kl_student
 
     return _masked_reduce(jsd, labels, reduction)
+
+
+def sampled_token_reverse_kl_loss(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    labels: torch.Tensor,
+    student_temp: float = 1.0,
+    teacher_temp: float = 1.0,
+) -> torch.Tensor:
+    """Lu et al. (2025) on-policy distillation loss on the sampled tokens only.
+
+    Port of the Tinker cookbook (``distillation/train_on_policy.py``,
+    ``incorporate_kl_penalty`` with ``kl_penalty_coef=1`` and
+    ``kl_discount_factor=0``, trained with the ``importance_sampling`` loss
+    ``-(exp(log p - log q) * A).sum()``). At a kept position with sampled token
+    ``y``, the advantage is ``A = -(log q(y) - log p_T(y))`` and carries no
+    gradient. The sampler ``q`` is the student at the current weights, so
+    ``log q(y)`` is the detached ``log p_S(y)`` and the ratio is 1 in value.
+    Tinker sums over tokens; this divides the sum by the number of kept
+    positions, as `masked_generalized_jsd_loss` does. The value is the
+    sampled-token reverse-KL estimate. When the mask does not depend on the
+    sampled tokens, its expected gradient over ``y ~ p_S`` is the gradient of
+    the per-position reverse KL; the EOS label mask and the rollout screen do
+    depend on them, so in training the two differ by those excluded samples.
+
+    Args:
+        student_logits: ``(batch, seq, vocab)`` completion-position logits.
+        teacher_logits: ``(batch, seq, vocab)`` same slice.
+        labels: ``(batch, seq)`` sampled token ids; ``-100`` excludes a position.
+        student_temp: Student softmax temperature.
+        teacher_temp: Teacher softmax temperature.
+
+    Returns:
+        Scalar loss; a differentiable zero when every position is excluded.
+    """
+    mask = labels != -100
+    if int(mask.sum()) == 0:
+        return student_logits.sum() * 0.0
+    idx = labels.clamp_min(0).unsqueeze(-1)
+    s_logits = student_logits / student_temp
+    t_logits = teacher_logits / teacher_temp
+    s_lp = (s_logits.gather(-1, idx) - s_logits.logsumexp(-1, keepdim=True)).squeeze(-1)
+    t_lp = (t_logits.gather(-1, idx) - t_logits.logsumexp(-1, keepdim=True)).squeeze(-1)
+    sampling_lp = s_lp.detach()
+    advantages = -(sampling_lp - t_lp.detach())
+    per_token = -(torch.exp(s_lp - sampling_lp) * advantages)
+    return per_token[mask].sum() / mask.sum()

@@ -90,7 +90,8 @@ _GKD_TAG_RE = re.compile(
     rf"(?:_wd(?P<wd_anchor>a)?(?P<wd>{_HP}))?"
     r"(?:_n(?P<subset_n>\d+)(?:d(?P<subset_seed>\d+))?)?"
     rf"(?:_(?P<rollout_screen>{_SCREEN_ALT}))?"
-    r"(?:_top(?:ce(?P<top_k_ce>\d+)|(?P<top_k>\d+)(?P<top_k_ghost>g)?))?$"
+    r"(?:_top(?:ce(?P<top_k_ce>\d+)|(?P<top_k>\d+)(?P<top_k_ghost>g)?))?"
+    r"(?P<sampled>_sampledtok)?$"
 )
 _TEACHER_TAG_RE = re.compile(
     r"^(?P<workflow>[^-]+)-(?P<param_tag>.+)-tfs(?P<tfs>\d+)"
@@ -115,6 +116,7 @@ def parse_gkd_tag(gkd_tag: str) -> dict:
         reads back as ``top_k=K``, ``top_k_ce=True``. No ``_n{N}`` reads back as
         ``prompt_subset_size=None``, ``prompt_subset_seed=0``. No ``_strict`` reads back as
         ``rollout_screen="legacy"``. No ``_noeos`` reads back as ``mask_eos=False``.
+        No ``_sampledtok`` reads back as ``sampled_token=False``.
         No ``_clip{g}`` reads back as ``max_grad_norm=1.0``. Absent reach / frozen /
         ε / decay suffixes read back as the defaults (``student_lora_target_modules``
         and ``student_lora_modules_to_save`` ``None``, ``student_lora_layers`` and
@@ -158,6 +160,7 @@ def parse_gkd_tag(gkd_tag: str) -> dict:
         else 0,
         "rollout_screen": g["rollout_screen"] or "legacy",
         "mask_eos": g["noeos"] is not None,
+        "sampled_token": g["sampled"] is not None,
         "max_grad_norm": float(g["clip"])
         if g["clip"] is not None
         else DEFAULT_MAX_GRAD_NORM,
@@ -850,6 +853,7 @@ TRAINING_LOG_COLUMNS = [
     "topk_loss_value",
     "student_topk_mass",
     "top1_agree",
+    "sampled_rkl",
     "distinct_2",
     "mention_rate",
     "filter_drop_frac",
@@ -870,6 +874,7 @@ _LOG_FIELD_MAP = {
     "gkd/topk_loss_value": "topk_loss_value",
     "gkd/student_topk_mass": "student_topk_mass",
     "gkd/top1_agree": "top1_agree",
+    "gkd/sampled_rkl": "sampled_rkl",
     "gkd/distinct_2": "distinct_2",
     "gkd/mention_rate": "mention_rate",
     "gkd/filter_drop_frac": "filter_drop_frac",

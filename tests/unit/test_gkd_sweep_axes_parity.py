@@ -146,3 +146,21 @@ def test_vocab_mask_forms_with_mixed_vocab_mask_grid_raises(
     _record_leaf_dirs(monkeypatch, evaluate)
     with pytest.raises(ValueError, match="vocab_mask_forms"):
         _dry_run(evaluate.main, tmp_path, sweep)
+
+
+def test_sampled_token_leaves_identical_across_sweeps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    grid = {**_BASE_SWEEP["grid"], "beta": [1.0], "lmbda": [1.0], "vocab_mask": [False]}
+    sweep = {**_BASE_SWEEP, "grid": grid, "sampled_token": True}
+    leaves = expected.treatment_leaf_dirs(sweep, tmp_path / "output_root")
+    assert len(leaves) == 4
+    assert all(p.parent.name.endswith("_sampledtok") for p in leaves)
+
+    trained = _record_leaf_dirs(monkeypatch, distill)
+    _dry_run(distill.main, tmp_path, sweep)
+    assert list(dict.fromkeys(trained)) == leaves
+
+    evaluated = _record_leaf_dirs(monkeypatch, evaluate)
+    _dry_run(evaluate.main, tmp_path, sweep)
+    assert {p.parent for p in evaluated} == {p.parent for p in leaves}

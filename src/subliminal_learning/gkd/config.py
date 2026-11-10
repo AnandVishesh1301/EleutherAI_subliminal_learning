@@ -126,6 +126,10 @@ class GkdConfig:
         vocab_mask_list: Slug of a committed token list masked instead of the
             candidate ids (`gkd.vocab_mask_list_io`; requires `vocab_mask`, excludes
             `vocab_mask_forms`). ``None`` = off.
+        sampled_token: Replace the full-vocabulary divergence with Lu et al.'s
+            sampled-token reverse KL (`gkd.losses.sampled_token_reverse_kl_loss`;
+            tag ``_sampledtok``). Requires ``lmbda == 1``, ``beta == 1``, no
+            top-K and no vocab mask.
     """
 
     lmbda: float
@@ -162,6 +166,39 @@ class GkdConfig:
     secondary_probe_targets: tuple[str, ...] = ()
     secondary_probe_prompts: int = 0
     vocab_mask_list: str | None = None
+    sampled_token: bool = False
+
+
+def validate_sampled_token(
+    sampled_token: bool,
+    *,
+    beta: float | None,
+    top_k: int | None,
+    vocab_mask: bool,
+    mask_eos: bool,
+    lmbda: float | None = None,
+) -> None:
+    """Raise when the sampled-token loss is combined with a setting it cannot use.
+
+    Raises:
+        ValueError: `sampled_token` with ``beta != 1``, ``lmbda != 1``, top-K, a
+            vocab mask or `mask_eos`.
+    """
+    if not sampled_token:
+        return
+    if beta is not None and beta != 1.0:
+        raise ValueError(
+            f"gkd.sampled_token is reverse KL: requires beta == 1, got {beta}"
+        )
+    if lmbda is not None and lmbda != 1.0:
+        raise ValueError(
+            f"gkd.sampled_token needs student samples: requires lmbda == 1, got {lmbda}"
+        )
+    if top_k is not None or vocab_mask or mask_eos:
+        raise ValueError(
+            "gkd.sampled_token excludes top_k, vocab_mask and mask_eos; got "
+            f"top_k={top_k}, vocab_mask={vocab_mask}, mask_eos={mask_eos}"
+        )
 
 
 def validate_top_k(
@@ -221,6 +258,14 @@ def validate_gkd(gkd: GkdConfig) -> None:
     )
     _validate_subset(gkd.prompt_subset_size, gkd.prompt_subset_seed)
     _validate_rollout_screen(gkd.rollout_screen)
+    validate_sampled_token(
+        gkd.sampled_token,
+        beta=gkd.beta,
+        top_k=gkd.top_k,
+        vocab_mask=gkd.vocab_mask,
+        mask_eos=gkd.mask_eos,
+        lmbda=gkd.lmbda,
+    )
     if gkd.domain not in DOMAINS:
         raise ValueError(f"gkd.domain must be one of {DOMAINS}, got {gkd.domain!r}")
     if gkd.domain != ANIMALS and set(gkd.candidates) & set(DEFAULT_CANDIDATES):
@@ -305,6 +350,7 @@ class SweepGkdAxes:
     rollout_screen: str = "legacy"
     mask_eos: bool = False
     vocab_mask_list: str | None = None
+    sampled_token: bool = False
 
 
 def sweep_gkd_axes_of(gkd: GkdConfig) -> SweepGkdAxes:
@@ -348,6 +394,7 @@ def parse_sweep_gkd_axes(
         vocab_mask_list=_parse_optional_str(
             get("vocab_mask_list", base.vocab_mask_list)
         ),
+        sampled_token=bool(get("sampled_token", base.sampled_token)),
     )
     for beta in betas or [None]:
         validate_top_k(
@@ -356,6 +403,14 @@ def parse_sweep_gkd_axes(
             top_k_ce=axes.top_k_ce,
             beta=None if beta is None else float(beta),
         )
+        for vocab_mask in vocab_masks or [False]:
+            validate_sampled_token(
+                axes.sampled_token,
+                beta=None if beta is None else float(beta),
+                top_k=axes.top_k,
+                vocab_mask=bool(vocab_mask),
+                mask_eos=axes.mask_eos,
+            )
     if axes.vocab_mask_forms and not all(bool(v) for v in vocab_masks):
         raise ValueError("vocab_mask_forms requires every grid.vocab_mask value True")
     for vocab_mask in vocab_masks or [False]:
@@ -466,6 +521,7 @@ def load_gkd_training(
         ),
         secondary_probe_prompts=int(g.get("secondary_probe_prompts", 0)),
         vocab_mask_list=_parse_optional_str(g.get("vocab_mask_list")),
+        sampled_token=bool(g.get("sampled_token", False)),
     )
     validate_gkd(gkd)
     return lora, train, gkd
@@ -607,7 +663,13 @@ def _override_gkd(gkd: GkdConfig, exp_gkd: dict, *, student_mode: str) -> GkdCon
         updates["top_k"] = _parse_optional_int(exp_gkd["top_k"])
     if "top_k_residual" in exp_gkd:
         updates["top_k_residual"] = bool(exp_gkd["top_k_residual"])
-    for key in ("top_k_ce", "vocab_mask_forms", "rollout_cache", "mask_eos"):
+    for key in (
+        "top_k_ce",
+        "vocab_mask_forms",
+        "rollout_cache",
+        "mask_eos",
+        "sampled_token",
+    ):
         if key in exp_gkd:
             updates[key] = bool(exp_gkd[key])
     if "prompt_subset_size" in exp_gkd:

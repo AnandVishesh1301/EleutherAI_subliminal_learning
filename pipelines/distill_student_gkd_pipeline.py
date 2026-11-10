@@ -398,11 +398,14 @@ def _gkd_hyperparameters(cfg: TrainGkdStudentConfig) -> dict:
         ),
         **({"rollout_cache": True} if cfg.gkd.rollout_cache else {}),
         **({"mask_eos": True} if cfg.gkd.mask_eos else {}),
+        **({"sampled_token": True} if cfg.gkd.sampled_token else {}),
     }
 
 
 def _loss_name(cfg: TrainGkdStudentConfig) -> str:
     """Manifest ``loss`` label (outside `run_identity`)."""
+    if cfg.gkd.sampled_token:
+        return "sampled_token_reverse_kl"
     if not cfg.gkd.top_k:
         return "generalized_jsd"
     if cfg.gkd.top_k_ce:
@@ -1196,6 +1199,7 @@ def _train(
             rollout_screen=rollout_screen,
             suppress_eos=cfg.gkd.mask_eos,
             rollout_cache=cfg.gkd.rollout_cache,
+            sampled_token=cfg.gkd.sampled_token,
         )
         check_custom_optimizer_installed(trainer, cfg.train.optim)
         trainable_parameters = trainable_parameter_counts(trainer.model)

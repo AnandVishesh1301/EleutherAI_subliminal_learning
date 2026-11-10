@@ -27,7 +27,10 @@ Three additions:
    truncated objective as trained). The full-vocab ``gkd/fwd_kl`` / ``gkd/rev_kl`` stay
    untruncated, so under top-K the trained loss != ``gkd/rev_kl``. They also log
    ``gkd/student_topk_mass`` and ``gkd/top1_agree`` on the same slice.
-5. **Off-policy batches** (λ < 1 dataset steps) -- screened like rollouts (supervised
+5. **Sampled-token loss** (only with ``sampled_token``) -- Lu et al.'s per-token reverse
+   KL on the sampled token (`gkd.losses.sampled_token_reverse_kl_loss`) replaces the
+   divergence; ``gkd/sampled_rkl`` logs its value next to the exact ``gkd/rev_kl``.
+6. **Off-policy batches** (λ < 1 dataset steps) -- screened like rollouts (supervised
    completion text only; rows logged with ``on_policy: false``) and sliced from
    `offpolicy_completion_start` instead of TRL's longest prompt width.
 
@@ -61,6 +64,7 @@ from trl.trainer.utils import empty_cache
 
 from subliminal_learning.config import TrainConfig, hf_max_grad_norm, hf_weight_decay
 from subliminal_learning.evaluation.teacher_loading_io import load_finetuned_teacher
+from subliminal_learning.gkd.config import validate_sampled_token
 from subliminal_learning.gkd.filtering import (
     SCREEN_RULES,
     StrictRolloutScreen,
@@ -70,6 +74,7 @@ from subliminal_learning.gkd.losses import (
     banned_vocab_mask,
     masked_column_index,
     masked_generalized_jsd_loss,
+    sampled_token_reverse_kl_loss,
     topk_diagnostics,
     topk_select,
 )
@@ -250,6 +255,7 @@ class SubliminalGKDTrainer(GKDTrainer):
         rollout_screen: StrictRolloutScreen | None = None,
         rollout_cache: bool = False,
         suppress_eos: bool = False,
+        sampled_token: bool = False,
         **kwargs: Any,
     ) -> None:
         """See module docstring; extras are stashed then `GKDTrainer.__init__` runs.
@@ -296,10 +302,14 @@ class SubliminalGKDTrainer(GKDTrainer):
                 Requires ``args.gradient_checkpointing``.
             suppress_eos: Bar the student from sampling EOS, so every on-policy
                 rollout runs to ``max_new_tokens`` (`GkdConfig.mask_eos`).
+            sampled_token: Train on `sampled_token_reverse_kl_loss` instead of the
+                full-vocabulary divergence (`GkdConfig.sampled_token`).
 
         Raises:
             ValueError: `rollout_cache` without gradient checkpointing; `optim` does
-                not match ``args.optim``.
+                not match ``args.optim``; `sampled_token` with ``lmbda != 1``,
+                ``beta != 1``, top-K, a vocab mask, `suppress_eos`, or a
+                `student_temp` other than the sampling temperature.
         """
         self._screen_forms = screen_forms
         self._vocab_mask_ids = vocab_mask_ids
@@ -318,7 +328,21 @@ class SubliminalGKDTrainer(GKDTrainer):
         self._screen = {True: _ScreenCounts(), False: _ScreenCounts()}
         self._rollout_screen = rollout_screen
         self._rollout_cache = rollout_cache
+        self._sampled_token = sampled_token
         super().__init__(*args, **kwargs)
+        validate_sampled_token(
+            sampled_token,
+            beta=self.beta,
+            top_k=top_k,
+            vocab_mask=vocab_mask_ids is not None,
+            mask_eos=suppress_eos,
+            lmbda=self.lmbda,
+        )
+        if sampled_token and student_temp != self.args.temperature:
+            raise ValueError(
+                f"sampled_token needs the loss's student_temp ({student_temp}) to "
+                f"equal the sampling temperature ({self.args.temperature})"
+            )
         if rollout_cache:
             if not self.args.gradient_checkpointing:
                 raise ValueError(
@@ -432,18 +456,27 @@ class SubliminalGKDTrainer(GKDTrainer):
                 )
 
         vocab_mask = self._get_vocab_mask(shifted_student_logits)
-        loss = masked_generalized_jsd_loss(
-            student_logits=shifted_student_logits,
-            teacher_logits=shifted_teacher_logits,
-            labels=shifted_labels,
-            beta=self.beta,
-            student_temp=self._student_temp,
-            teacher_temp=self._teacher_temp,
-            vocab_mask=vocab_mask,
-            top_k=self._top_k,
-            top_k_residual=self._top_k_residual,
-            top_k_ce=self._top_k_ce,
-        )
+        if self._sampled_token:
+            loss = sampled_token_reverse_kl_loss(
+                shifted_student_logits,
+                shifted_teacher_logits,
+                shifted_labels,
+                student_temp=self._student_temp,
+                teacher_temp=self._teacher_temp,
+            )
+        else:
+            loss = masked_generalized_jsd_loss(
+                student_logits=shifted_student_logits,
+                teacher_logits=shifted_teacher_logits,
+                labels=shifted_labels,
+                beta=self.beta,
+                student_temp=self._student_temp,
+                teacher_temp=self._teacher_temp,
+                vocab_mask=vocab_mask,
+                top_k=self._top_k,
+                top_k_residual=self._top_k_residual,
+                top_k_ce=self._top_k_ce,
+            )
         if not torch.isfinite(loss):
             raise RuntimeError(
                 f"non-finite GKD loss at step {self.state.global_step}: {loss.item()}"
@@ -451,6 +484,8 @@ class SubliminalGKDTrainer(GKDTrainer):
         self._log_divergence_monitors(
             shifted_student_logits, shifted_teacher_logits, shifted_labels, vocab_mask
         )
+        if self._sampled_token and bool((shifted_labels != -100).any()):
+            self._accumulate("gkd/sampled_rkl", float(loss))
         if self._top_k is not None:
             self._accumulate("gkd/topk_loss_value", float(loss))
             self._log_topk_monitors(

@@ -351,6 +351,7 @@ def gkd_tag(
     weight_decay_anchor: bool = False,
     freeze_modules: tuple[str, ...] = (),
     vocab_mask_list: str | None = None,
+    sampled_token: bool = False,
 ) -> str:
     """Directory tag encoding the swept GKD hyperparameters.
 
@@ -394,6 +395,8 @@ def gkd_tag(
             ``_L{i}-{j}`` / ``_head``) fills the same slot after ``_r{r}a{alpha}``.
         vocab_mask_list: Supplied token-list slug (``_vmaskl{slug}`` in place of
             ``_vmask``).
+        sampled_token: Lu et al.'s sampled-token reverse KL (``_sampledtok``,
+            last; excludes top-K).
 
     Returns:
         E.g. ``lmb1.0_b1.0_full_lr2e-5_e3`` or
@@ -405,7 +408,8 @@ def gkd_tag(
     Raises:
         ValueError: `vocab_mask_forms` without `vocab_mask`; `top_k_ce` without
             `top_k` or with `top_k_residual`; a subset seed without a subset size;
-            an unknown `rollout_screen`; an invalid `vocab_mask_list`.
+            an unknown `rollout_screen`; an invalid `vocab_mask_list`;
+            `sampled_token` with `top_k`.
     """
     if rollout_screen not in ROLLOUT_SCREENS:
         raise ValueError(f"rollout_screen must be one of {ROLLOUT_SCREENS}")
@@ -418,6 +422,8 @@ def gkd_tag(
         raise ValueError("top_k_ce requires top_k and excludes top_k_residual")
     if prompt_subset_seed and prompt_subset_size is None:
         raise ValueError("prompt_subset_seed requires prompt_subset_size")
+    if sampled_token and top_k:
+        raise ValueError("sampled_token excludes top_k")
     budget = (
         f"s{max_steps}"
         if max_steps and max_steps > 0
@@ -455,6 +461,8 @@ def gkd_tag(
         tag += f"_topce{top_k}"
     elif top_k:
         tag += f"_top{top_k}" + ("g" if top_k_residual else "")
+    if sampled_token:
+        tag += "_sampledtok"
     return tag
 
 

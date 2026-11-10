@@ -3121,6 +3121,26 @@ in `queue2/`: a storage hang froze `queue/rebhard-e6`, so unfinished cells were 
 (judged from their outputs on disk) and the old root was left untouched. Results read one leaf per
 cell, so reused and re-queued cells count once.
 
+### Lu et al. sampled-token OPD (`rebsampled`)
+
+Run set `20261110_rebsampled-bear_160m`, plan `.claude/plans/rebuttal/rebsampled.plan.md`
+(descriptive, no prereg). `GkdConfig.sampled_token` (off by default, tag suffix `_sampledtok`)
+swaps the full-vocabulary reverse KL for the loss of Lu et al. (Thinking Machines, 2025): a
+per-token reverse KL on the sampled token only, `A = −(log p_S(y) − log p_T(y))` without
+gradient, trained with Tinker's `importance_sampling` loss
+`−exp(log p_S − log q) · A`, where the sampler `q` is the student at the same weights
+(`gkd.losses.sampled_token_reverse_kl_loss`). It averages over kept positions like the
+headline (Tinker sums) and requires λ = 1, β = 1, no top-K and no vocab mask. The trainer logs
+the value as `gkd/sampled_rkl` beside the exact `gkd/rev_kl`. Unit tests check it against a
+transcription of the cookbook's `incorporate_kl_penalty` and show that, under a mask that does
+not depend on the sampled tokens, its expected gradient equals the exact reverse-KL gradient
+(the EOS mask and the rollout screen do depend on them). The campaign reruns the ws160m headline cell (bear,
+160M@143k self-pair, teachers read in place from `20260916_ws160m-main_160m`) with the new loss
+(3 treatments + 3 controls) and one full-vocabulary treatment + control at the same pin.
+`campaign/rebsampled_plan.py`, `pipelines/rebsampled_pipeline.py` and
+`scripts/run_rebsampled_campaign.py` hold the code. Results compare against the headline
+leaves.
+
 ## Synthetic document generation — `tools/sdf_docgen` (isolated)
 
 Long-form SSOT (prompts, HPs, on-disk corpora, what teachers trained on):

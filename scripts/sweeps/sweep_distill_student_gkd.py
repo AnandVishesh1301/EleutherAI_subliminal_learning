@@ -544,6 +544,12 @@ def main(
             "rollout_screen at the top level of the sweep YAML so the eval sweep and "
             "campaign.expected enumerate the same leaves"
         )
+    if base.gkd.sampled_token and "sampled_token" not in sweep:
+        raise ValueError(
+            "gkd.sampled_token is set only in the training/experiment config; set "
+            "sampled_token at the top level of the sweep YAML so the eval sweep and "
+            "campaign.expected enumerate the same leaves"
+        )
     wb_raw = sweep.get("wandb", None)
     if no_wandb:
         wb: dict | bool | None = False
