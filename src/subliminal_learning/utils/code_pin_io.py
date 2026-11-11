@@ -54,6 +54,7 @@ _OVERLAY_RELS = (
     "configs/paths/paths_rebhard.yaml",
     "configs/paths/paths_rebtopk.yaml",
     "configs/paths/paths_rebsampled.yaml",
+    "configs/paths/paths_domtopk.yaml",
     "configs/experiment/generated",
 )
 

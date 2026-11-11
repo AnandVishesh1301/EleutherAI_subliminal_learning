@@ -1,0 +1,25 @@
+# Experiment config for the domain top-K cells on trees (run set 20261111_domtopk-trees_160m).
+#
+# newdom's soft student block (domain screens and probe banks, domain prompt pool, panel
+# as forced-choice and vocab-mask candidates); generated sweep YAMLs override lineage per
+# cell. Kept equal to `domtopk_jobs.experiment_doc("trees")` by a unit test. W&B is off
+# for every cell (job-side --no-wandb).
+
+model_spec:
+  size: 160m
+  seed: 0
+  variant: full          # -> EleutherAI/pythia-160m
+
+target_animal: maple
+
+teacher_workflow: sdf
+teacher_param_tag: ep5_lr5e-5_r128a128
+teacher_ftseed: 0
+teacher_subdir: sdf_teachers/20261111_domtopk-teachers_160m
+
+wandb_project: subliminal-learning-domtopk
+
+gkd:
+  domain: trees
+  prompt_pool_dir: gkd_prompts/pile_prompts_trees_v1
+  candidates: [pine, apple, maple, cherry, oak, palm, fig, olive, bamboo, ash]
