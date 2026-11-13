@@ -34,7 +34,7 @@ import getpass
 import json
 import math
 import shutil
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -145,9 +145,11 @@ def queue_defaults(cfg: driver_io.CampaignDriverConfig) -> dict:
 # ---- queues -----------------------------------------------------------------------------
 
 
-def submitted(cfg: driver_io.CampaignDriverConfig) -> list[str]:
-    """Every plan queue that exists."""
-    return [n for n in plan.QUEUE_PRIORITIES if store.queue_exists(cfg.queue_root, n)]
+def submitted(
+    cfg: driver_io.CampaignDriverConfig, queues: Iterable[str] = plan.QUEUE_PRIORITIES
+) -> list[str]:
+    """Every queue of `queues` that exists."""
+    return [n for n in queues if store.queue_exists(cfg.queue_root, n)]
 
 
 def missing_jobs(
@@ -197,13 +199,15 @@ def write_yamls(cfg: driver_io.CampaignDriverConfig, docs: Mapping[Path, dict]) 
     return len(docs)
 
 
-def _repin(cfg: driver_io.CampaignDriverConfig) -> str | None:
+def _repin(
+    cfg: driver_io.CampaignDriverConfig, queues: Iterable[str] = plan.QUEUE_PRIORITIES
+) -> str | None:
     """Move every queue with work left (or failures) to the campaign pin."""
     if cfg.dry_run:
         return None
     want = queue_defaults(cfg)
     n = 0
-    for name in submitted(cfg):
+    for name in submitted(cfg, queues):
         if (
             store.queue_complete(cfg.queue_root, name)
             and not store.queue_status(cfg.queue_root, name)["failed"]
@@ -215,9 +219,13 @@ def _repin(cfg: driver_io.CampaignDriverConfig) -> str | None:
     return f"repin(queues={n})" if n else None
 
 
-def _requeue_and_holes(cfg: driver_io.CampaignDriverConfig, state: dict) -> None:
+def _requeue_and_holes(
+    cfg: driver_io.CampaignDriverConfig,
+    state: dict,
+    queues: Iterable[str] = plan.QUEUE_PRIORITIES,
+) -> None:
     holes = state.setdefault("holes", {})
-    for name in submitted(cfg):
+    for name in submitted(cfg, queues):
         try:
             driver_io.requeue_failed_under_cap(cfg, name)
         except RuntimeError as err:
