@@ -126,10 +126,10 @@ Animal spec: `data/sdf_prompts/animals/{animal}.json`
 
 ## Where to run (server context)
 
-**Runs on a single A100 80GB on a100-cluster-1.** The default config uses the
+**Runs on a single A100 80GB.** The default config uses the
 official 4-bit **`Qwen/Qwen3-32B-AWQ`** build (~19GB weights) with
-`tensor_parallel_size: 1`, so no tars migration is needed. Pass your local
-paths YAML and pin to a free GPU (GPU 1 is the vishesh allocation):
+`tensor_parallel_size: 1`, so a single card is enough. Pass your local
+paths YAML and pin to a free GPU:
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 uv run --project tools/sdf_docgen python -m sdf_docgen.cli \
@@ -144,8 +144,8 @@ Generated JSONL lands under `dataset_cache_root`. Single-GPU KV-cache knobs
 the KV-cache limit otherwise.
 
 The unquantized `Qwen/Qwen3-32B` at BF16 does **not** fit one 80GB A100; the
-AWQ build is the single-GPU path. `configs/paths/paths_tars.yaml` and the
-2×A100 tars workflow remain only as a legacy fallback.
+AWQ build is the single-GPU path. Loading the BF16 build needs two 80GB cards
+(`tensor_parallel_size: 2`) and is not the default.
 
 ## Tests (CPU-only, no GPU/Hub)
 

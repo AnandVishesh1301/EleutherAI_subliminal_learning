@@ -197,29 +197,6 @@ def final_train_step(run_dir: Path) -> int | None:
     return step if isinstance(step, int) and not isinstance(step, bool) else None
 
 
-def reroot_output_path(path: Path | str, output_root: Path) -> Path:
-    """Re-home an absolute artifact path recorded under an OLD output root onto `output_root`.
-
-    Student manifests record `number_dataset_dir` as an ABSOLUTE path, so a run distilled
-    while the tree lived on ``/mnt/ssd-2/soar-subliminal/angela/outputs`` still points there
-    after the root moved to ``/mnt/cold-1/...``. The two roots share their tail below the
-    ``outputs`` segment, so the suffix AFTER the last ``outputs`` component is joined onto
-    the current root.
-
-    Conservative on purpose: the re-rooted path is returned only when it exists, so a path
-    that was never under an ``outputs`` root -- or one whose file is genuinely missing at
-    the new root -- comes back verbatim and the caller's own existence check reports it.
-    """
-    p = Path(path)
-    parts = p.parts
-    if "outputs" in parts:
-        idx = len(parts) - 1 - parts[::-1].index("outputs")
-        candidate = Path(output_root).joinpath(*parts[idx + 1:])
-        if candidate.exists():
-            return candidate
-    return p
-
-
 def base_ref_for_run(run_dir: Path) -> str:
     """The run's canonical base-model ref: a spelling every family lookup recognizes.
 
@@ -466,7 +443,7 @@ def check_run_set_staleness(
         return
     remedy = (
         "HEAD moved while the campaign was running: record the advance with "
-        "`uv run python -m scripts.reconcile_run_set <run_set_root> --reason ...`, "
+        "`uv run python -m scripts.ops.reconcile_run_set <run_set_root> --reason ...`, "
         "then requeue."
         if reason.startswith("git_sha differs")
         else "Pass --force-run-set to override or use a fresh run_set_id."

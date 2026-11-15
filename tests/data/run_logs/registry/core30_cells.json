@@ -1,0 +1,245 @@
+{
+ "selection": "Test fixture: a 30-cell student-recipe design in the core30_cells.json schema (seeded into the scratch run_logs by tests/conftest.py).",
+ "cells": [
+  {
+   "student_tag": "ep20_lr2e-4_r8a4",
+   "lr": 0.0002,
+   "rank": 8,
+   "alpha": 4,
+   "K_rel": 0.4634984322845078,
+   "subset": "band48"
+  },
+  {
+   "student_tag": "ep20_lr1e-4_r4a16",
+   "lr": 0.0001,
+   "rank": 4,
+   "alpha": 16,
+   "K_rel": 0.535009481427923,
+   "subset": "band48"
+  },
+  {
+   "student_tag": "ep20_lr9e-5_r64a32",
+   "lr": 9e-05,
+   "rank": 64,
+   "alpha": 32,
+   "K_rel": 0.5612180327971659,
+   "subset": "band48"
+  },
+  {
+   "student_tag": "ep20_lr1e-4_r128a32",
+   "lr": 0.0001,
+   "rank": 128,
+   "alpha": 32,
+   "K_rel": 0.5878974251106925,
+   "subset": "band48"
+  },
+  {
+   "student_tag": "ep20_lr2e-4_r16a8",
+   "lr": 0.0002,
+   "rank": 16,
+   "alpha": 8,
+   "K_rel": 0.6446716134,
+   "subset": "focus20"
+  },
+  {
+   "student_tag": "ep20_lr6e-5_r8a64",
+   "lr": 6e-05,
+   "rank": 8,
+   "alpha": 64,
+   "K_rel": 0.6586896426,
+   "subset": "focus20"
+  },
+  {
+   "student_tag": "ep20_lr1e-4_r32a32",
+   "lr": 0.0001,
+   "rank": 32,
+   "alpha": 32,
+   "K_rel": 0.6614189862,
+   "subset": "focus20"
+  },
+  {
+   "student_tag": "ep20_lr4e-4_r4a2",
+   "lr": 0.0004,
+   "rank": 4,
+   "alpha": 2,
+   "K_rel": 0.6664813287,
+   "subset": "focus20"
+  },
+  {
+   "student_tag": "ep20_lr2e-4_r8a8",
+   "lr": 0.0002,
+   "rank": 8,
+   "alpha": 8,
+   "K_rel": 0.6837952775,
+   "subset": "focus20"
+  },
+  {
+   "student_tag": "ep20_lr1e-4_r16a32",
+   "lr": 0.0001,
+   "rank": 16,
+   "alpha": 32,
+   "K_rel": 0.7015590106,
+   "subset": "focus20"
+  },
+  {
+   "student_tag": "ep20_lr9e-5_r4a32",
+   "lr": 9e-05,
+   "rank": 4,
+   "alpha": 32,
+   "K_rel": 0.7103654257,
+   "subset": "focus20"
+  },
+  {
+   "student_tag": "ep20_lr2e-4_r4a8",
+   "lr": 0.0002,
+   "rank": 4,
+   "alpha": 8,
+   "K_rel": 0.7252932685,
+   "subset": "focus20"
+  },
+  {
+   "student_tag": "ep20_lr5e-4_r16a2",
+   "lr": 0.0005,
+   "rank": 16,
+   "alpha": 2,
+   "K_rel": 0.7404963139,
+   "subset": "focus20"
+  },
+  {
+   "student_tag": "ep20_lr5e-5_r16a128",
+   "lr": 5e-05,
+   "rank": 16,
+   "alpha": 128,
+   "K_rel": 0.7634662907,
+   "subset": "focus20"
+  },
+  {
+   "student_tag": "ep20_lr5e-4_r8a2",
+   "lr": 0.0005,
+   "rank": 8,
+   "alpha": 2,
+   "K_rel": 0.7854353627,
+   "subset": "focus20"
+  },
+  {
+   "student_tag": "ep20_lr2e-4_r128a16",
+   "lr": 0.0002,
+   "rank": 128,
+   "alpha": 16,
+   "K_rel": 0.796991567,
+   "subset": "focus20"
+  },
+  {
+   "student_tag": "ep20_lr4e-4_r32a4",
+   "lr": 0.0004,
+   "rank": 32,
+   "alpha": 4,
+   "K_rel": 0.8239543785,
+   "subset": "focus20"
+  },
+  {
+   "student_tag": "ep20_lr9e-5_r64a64",
+   "lr": 9e-05,
+   "rank": 64,
+   "alpha": 64,
+   "K_rel": 0.8279601693,
+   "subset": "focus20"
+  },
+  {
+   "student_tag": "ep20_lr3e-4_r64a8",
+   "lr": 0.0003,
+   "rank": 64,
+   "alpha": 8,
+   "K_rel": 0.859517468,
+   "subset": "focus20"
+  },
+  {
+   "student_tag": "ep20_lr6e-5_r32a128",
+   "lr": 6e-05,
+   "rank": 32,
+   "alpha": 128,
+   "K_rel": 0.8637410551,
+   "subset": "focus20"
+  },
+  {
+   "student_tag": "ep20_lr1e-4_r128a64",
+   "lr": 0.0001,
+   "rank": 128,
+   "alpha": 64,
+   "K_rel": 0.8673200489,
+   "subset": "focus20"
+  },
+  {
+   "student_tag": "ep20_lr7e-5_r128a128",
+   "lr": 7e-05,
+   "rank": 128,
+   "alpha": 128,
+   "K_rel": 0.8956849011,
+   "subset": "focus20"
+  },
+  {
+   "student_tag": "ep20_lr2e-4_r32a16",
+   "lr": 0.0002,
+   "rank": 32,
+   "alpha": 16,
+   "K_rel": 0.8966621247,
+   "subset": "focus20"
+  },
+  {
+   "student_tag": "ep20_lr7e-5_r64a128",
+   "lr": 7e-05,
+   "rank": 64,
+   "alpha": 128,
+   "K_rel": 0.9500419947,
+   "subset": "focus20"
+  },
+  {
+   "student_tag": "ep20_lr2e-4_r8a16",
+   "lr": 0.0002,
+   "rank": 8,
+   "alpha": 16,
+   "K_rel": 1.008797331319765,
+   "subset": "band48"
+  },
+  {
+   "student_tag": "ep20_lr7e-4_r16a2",
+   "lr": 0.0007,
+   "rank": 16,
+   "alpha": 2,
+   "K_rel": 1.0366948395097735,
+   "subset": "band48"
+  },
+  {
+   "student_tag": "ep20_lr3e-4_r4a8",
+   "lr": 0.0003,
+   "rank": 4,
+   "alpha": 8,
+   "K_rel": 1.0879399027074044,
+   "subset": "band48"
+  },
+  {
+   "student_tag": "ep20_lr9e-5_r128a128",
+   "lr": 9e-05,
+   "rank": 128,
+   "alpha": 128,
+   "K_rel": 1.1515948728379894,
+   "subset": "band48"
+  },
+  {
+   "student_tag": "ep20_lr6e-4_r32a4",
+   "lr": 0.0006,
+   "rank": 32,
+   "alpha": 4,
+   "K_rel": 1.2359315678047915,
+   "subset": "band48"
+  },
+  {
+   "student_tag": "ep20_lr2e-4_r64a32",
+   "lr": 0.0002,
+   "rank": 64,
+   "alpha": 32,
+   "K_rel": 1.247151183993702,
+   "subset": "band48"
+  }
+ ]
+}

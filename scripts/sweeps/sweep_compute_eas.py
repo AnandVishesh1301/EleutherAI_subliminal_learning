@@ -1,11 +1,11 @@
 """CLI: compute EAS for every distilled STUDENT RUN on disk (walks, not a grid).
 
-The single-run CLI (`scripts.compute_eas`) measures the run dirs you name. This sweep walks
+The single-run CLI (`scripts.similarity.compute_eas`) measures the run dirs you name. This sweep walks
 `{output_root}/students/` for run dirs — identified by a `train_manifest.json` beside a
 `checkpoints/adapter_model.safetensors`, at ANY depth, so the plain
 `{animal}/{model}/teacher-*/...`, the gathered `{animal}/ckpt/{model}/...`, a leading
 `{optim_slug}/` optimizer level and the `controls/base|rng/...` trees are all found — and
-invokes `pipelines.eas_pipeline` once per (run dir, pooling position).
+invokes `subliminal_learning.pipelines.eas_pipeline` once per (run dir, pooling position).
 
 Every field comes from the run's OWN `train_manifest.json` (source, animal, base repo,
 teacher tag/ftseed, dataset tag, student tag/ftseed), so an arbitrary lr/rank/alpha/optimizer
@@ -13,7 +13,7 @@ cell is measurable; no grid is assumed.
 
 Ordering. Units are grouped by student base, then by prompt set, then by run: the process
 keeps ONE fp32 base resident, and each base mean / teacher vector is computed once and
-served from its disk cache (see `pipelines.eas_pipeline`) for every later run that reads the
+served from its disk cache (see `subliminal_learning.pipelines.eas_pipeline`) for every later run that reads the
 same prompts.
 
 Resumability. BEFORE any model load, a CHEAP gate calls the single currency predicate
@@ -40,10 +40,11 @@ from functools import lru_cache
 from pathlib import Path
 
 import typer
+from subliminal_learning.config import paths_local_path
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipelines.eas_pipeline import (
+from subliminal_learning.pipelines.eas_pipeline import (
     EASRunConfig,
     EASSession,
     EASSkip,
@@ -53,15 +54,15 @@ from pipelines.eas_pipeline import (
     read_manifest,
     refs_doc_path,
 )
-from pipelines.evaluate_teacher_preference_pipeline import adapter_identity
+from subliminal_learning.utils.run_io import adapter_identity
 from subliminal_learning.models.naming import base_dir_name
-from subliminal_learning.steering.eas import (
+from subliminal_learning.representation.steering.eas import (
     EAS_MEAN_CONVENTION,
     SCHEMA_VERSION,
     eas_doc_status,
     eas_main_doc_status,
 )
-from subliminal_learning.steering.vectors import ACTIVATION_BASIS
+from subliminal_learning.representation.steering.vectors import ACTIVATION_BASIS
 from subliminal_learning.students.layout import STUDENTS_SUBDIR
 from subliminal_learning.teachers.config import load_template_config
 from subliminal_learning.teachers.run_layout import TEACHERS_SUBDIR
@@ -259,7 +260,7 @@ def _doc_plan(
     plan = status(
         doc, expected_meta=expected, checkpoints=checkpoints, references=ref_ids,
         manifest_ref=unit.manifest_ref,
-        # Exactly as `pipelines.eas_pipeline` passes it: a stored point whose checkpoint
+        # Exactly as `subliminal_learning.pipelines.eas_pipeline` passes it: a stored point whose checkpoint
         # was THINNED off disk is reused, not dropped, so a complete document on a thinned
         # run is NOT re-enqueued (`training.ckpt_ladder`).
         ladder_steps=frozenset(ckpt_ladder.ladder_steps(
@@ -279,7 +280,7 @@ def unit_status(
 ) -> str:
     """The sweep's cheap gate: `CACHED`, `DONE_UNSCORABLE` or `WORK` for one unit.
 
-    BOTH files count (`pipelines.eas_pipeline`): the own-teacher main document must be
+    BOTH files count (`subliminal_learning.pipelines.eas_pipeline`): the own-teacher main document must be
     current, and — only when this pass requests extra references — so must the refs
     document for exactly those. Reads the document JSON and hashes at most the endpoint
     adapter + one adapter per reference teacher (`eas_doc_status(cheap=True)`); intermediate
@@ -451,7 +452,7 @@ def main(
         False, help="List READY / CACHED / SKIP(reason) per run without loading a model."
     ),
     force: bool = typer.Option(False, help="Rewrite even where a cached document exists."),
-    paths_config: Path = Path("configs/paths/paths_local.yaml"),
+    paths_config: Path = typer.Option(default_factory=paths_local_path, help="Paths YAML (configs/paths/paths_local.yaml, or $SUBLIMINAL_PATHS_LOCAL)."),
     model_config: Path = Path("configs/model/pythia.yaml"),
     teacher_training_config: Path = Path("configs/training/lora_template_bias.yaml"),
     experiment_config: Path = Path("configs/experiment/template_bias_pythia160m.yaml"),

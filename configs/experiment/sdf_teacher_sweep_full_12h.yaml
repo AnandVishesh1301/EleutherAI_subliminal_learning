@@ -4,6 +4,12 @@
 # selection -- so every cell full fine-tunes (Wang et al.'s Pareto-better teacher-SDF
 # arm), crossing only n_epochs x learning_rate x ft_seeds.
 #
+# Seed arms: the third-ft-seed arm (retired sdf_teacher_sweep_full_12h_ftseed2.yaml) was
+# this file with ONLY `ft_seeds: [2]` and `wandb.ft_seeds: [2]` (32 cells; leaves land
+# beside ftseed0/1 under the same 12h_run tree). The seed3 base-model arm is tracked as
+# sdf_teacher_sweep_full_12h_seed3.yaml. Only `--animals` has a CLI override; ft_seeds /
+# base_models are YAML keys only.
+#
 # Same runner as the full grid (scripts.sweeps.sweep_sdf_teacher); identical inherited
 # constants from configs/training/full_sdf_teacher.yaml (batch_size, max_length,
 # warmup_ratio, max_grad_norm, lr_scheduler_type, optim) and

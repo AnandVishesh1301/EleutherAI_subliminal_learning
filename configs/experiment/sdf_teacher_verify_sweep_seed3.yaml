@@ -20,7 +20,7 @@ inherit_grid: configs/experiment/sdf_teacher_sweep_12h_seed3.yaml
 
 # Prompt-set ladder + metric settings shared across all SDF verify configs.
 eval:
-  # Angela's sets (reinterpreted: favorite/validation = generalization probes for SDF,
+  # The standard preference sets (reinterpreted: favorite/validation = generalization probes for SDF,
   # dislike = salience-vs-directed control) + the SDF ladder (consensus / register /
   # generality / robustness), each "...the" bank scored prob + a sampled twin.
   prompt_sets:

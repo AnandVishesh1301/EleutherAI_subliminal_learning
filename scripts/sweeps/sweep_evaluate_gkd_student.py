@@ -15,7 +15,7 @@ Both subtrees are evaluated with identical settings so the Cloud SL effect
   deduplicated (they do not depend on animal-teacher lineage).
 
 The prompt battery is the full SDF ladder plus the held-out ``test`` set (never seen in any
-training -- the clean student generalization probe, per CLOUD_ARCHITECTURE.md). Forced
+training -- the clean student generalization probe, per Cloud et al., arXiv:2507.14805). Forced
 choice + Pile perplexity always run; LM-Eval benchmarks (M6b) only for cells matching the
 YAML ``benchmarks:`` subset rule. Resumable, per-cell failure isolation, shardable by
 ``--animals`` / ``--base-models``.
@@ -29,24 +29,21 @@ import time
 from pathlib import Path
 
 import typer
+from subliminal_learning.config import paths_local_path
 import yaml
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipelines.evaluate_sdf_teacher_pipeline import (
+from subliminal_learning.pipelines.evaluate_sdf_teacher_pipeline import (
     EvaluateSdfTeacherConfig,
     build_sdf_prompt_sets,
     run,
 )
-from scripts.sweeps.sweep_distill_student_gkd import (
-    _csv,
-    _expand_base_pairs,
-    student_variants,
-)
+from subliminal_learning.gkd.sweep_helpers import csv_list, expand_base_pairs, student_variants
 from subliminal_learning.evaluation.capability_io import DEFAULT_TASKS
-from subliminal_learning.evaluation.sdf_prompt_sets import (
+from subliminal_learning.evaluation.prompt_sets import (
     DEFAULT_FC_CANDIDATES,
-    DEFAULT_SDF_TEACHER_SET_NAMES,
+    DEFAULT_GKD_STUDENT_SET_NAMES,
     FORCED_CHOICE_SET_NAME,
     prompt_set_path,
 )
@@ -58,13 +55,12 @@ from subliminal_learning.gkd.layout import (
     gkd_tag,
     teacher_tag,
 )
-from subliminal_learning.teachers.model_specs import parse_base_models, spec_label
+from subliminal_learning.models.specs import parse_base_models, spec_label
 from subliminal_learning.training.run_set import is_valid_run_set_id, run_set_subdir
 from subliminal_learning.utils.logging_setup import configure_loguru
 from subliminal_learning.utils.run_io import acquire_claim, release_claim
 
 # The SDF ladder + the held-out generalization probe (`test`, never in any training).
-DEFAULT_GKD_STUDENT_SET_NAMES = DEFAULT_SDF_TEACHER_SET_NAMES + ("test",)
 
 
 def _in(value, allowed) -> bool:
@@ -151,7 +147,7 @@ def main(
         None, help="Campaign id ({YYYYMMDD}_{purpose}_{size}); nests output under it."
     ),
     force: bool = typer.Option(False, help="Recompute all metrics even where cached."),
-    paths_config: Path = Path("configs/paths/paths_local.yaml"),
+    paths_config: Path = typer.Option(default_factory=paths_local_path, help="Paths YAML (configs/paths/paths_local.yaml, or $SUBLIMINAL_PATHS_LOCAL)."),
     model_config: Path = Path("configs/model/pythia.yaml"),
     training_config: Path = Path("configs/training/gkd_student.yaml"),
     experiment_config: Path = Path("configs/experiment/gkd_student.yaml"),
@@ -173,19 +169,19 @@ def main(
         return sweep.get(key, inherited.get(key, default))
 
     grid = pick("grid")
-    animal_list = _csv(animals, str) or [str(a) for a in pick("animals")]
+    animal_list = csv_list(animals, str) or [str(a) for a in pick("animals")]
     base_specs = (
         parse_base_models(base_models)
         if base_models
         else parse_base_models(str(pick("base_models")))
     )
     teacher_mode_list = list(pick("teacher_modes"))
-    beta_list = _csv(beta, float) or [float(x) for x in grid["beta"]]
+    beta_list = csv_list(beta, float) or [float(x) for x in grid["beta"]]
     lmbda_list = [float(x) for x in grid["lmbda"]]
     student_variant_list = student_variants(
-        _csv(student_modes, str) or list(grid["student_modes"]),
+        csv_list(student_modes, str) or list(grid["student_modes"]),
         pick("student_lr"),
-        student_optims=_csv(student_optims, str)
+        student_optims=csv_list(student_optims, str)
         or (
             [str(x) for x in grid["student_optims"]]
             if "student_optims" in grid
@@ -196,7 +192,7 @@ def main(
     ttemp_list = [float(x) for x in grid.get("teacher_temp", [1.0])]
     tfs_list = [int(x) for x in pick("teacher_ftseeds", [0])]
     pairing = str(pick("teacher_base_pairing", "same")).strip()
-    base_pairs = _expand_base_pairs(
+    base_pairs = expand_base_pairs(
         base_specs,
         pairing,
         pick("teacher_student_base_pairs"),

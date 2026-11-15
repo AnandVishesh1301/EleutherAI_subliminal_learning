@@ -14,9 +14,9 @@
 inherit_grid: configs/experiment/gkd_student_sweep_lora_catswide.yaml
 
 # Student SL battery: SDF ladder (consensus/register/generality/robustness + sample twins),
-# Angela's favorite/dislike/validation/storytelling, and the held-out `test` set -- the
+# the standard favorite/dislike/validation/storytelling, and the held-out `test` set -- the
 # clean generalization probe never seen in any teacher or student training
-# (CLOUD_ARCHITECTURE.md). All scored by the reused SDF verification pipeline.
+# (Cloud et al., arXiv:2507.14805). All scored by the reused SDF verification pipeline.
 eval:
   prompt_sets:
     - test

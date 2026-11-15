@@ -331,6 +331,61 @@ def truncate_after_first_number(
     return truncate_after_k_numbers(carriers, paired_rows, 1)
 
 
+def replace_first_from_reference(
+    carriers: Sequence[Mapping[str, Any]], references: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Replace each carrier's FIRST rendered number by its reference row's first string.
+
+    Unlike `replace_first_number_from_pair`, the reference rows need not pair with the
+    carriers: their prompts, number counts and continuations may differ (the early-teacher
+    first-only control draws its first strings from the mature IID pool). Only the
+    training fields survive in a result row.
+    """
+    if not carriers or len(carriers) != len(references):
+        raise ValueError("expected nonempty carrier and reference pools of equal size")
+    result = []
+    for i, (carrier, reference) in enumerate(zip(carriers, references, strict=True)):
+        for label, row in (("carrier", carrier), ("reference", reference)):
+            if not isinstance(row.get("prompt"), str) or not isinstance(
+                row.get("completion"), str
+            ):
+                raise ValueError(f"malformed {label} text at row {i}")
+            nums = list(_nums(row))
+            rendered = re.findall(r"\d+", row["completion"])
+            if not nums or [int(v) for v in rendered] != nums:
+                raise ValueError(f"{label} completion/number mismatch at row {i}")
+        old = re.search(r"\d+", carrier["completion"])
+        new = re.search(r"\d+", reference["completion"])
+        completion = (
+            carrier["completion"][: old.start()]
+            + new.group()
+            + carrier["completion"][old.end() :]
+        )
+        result.append(
+            {
+                "prompt": carrier["prompt"],
+                "completion": completion,
+                "numbers": [int(new.group()), *list(_nums(carrier))[1:]],
+            }
+        )
+    return result
+
+
+TRAINING_FIELDS = ("prompt", "completion", "numbers")
+
+
+def training_rows(
+    rows: Iterable[Mapping[str, Any]], fields: Sequence[str] = TRAINING_FIELDS
+) -> list[dict[str, Any]]:
+    """Only the training fields of each row: a derived row never carries stale generator fields."""
+    return [{k: row[k] for k in fields} for row in rows]
+
+
+def total_variation(a: Mapping[int, float], b: Mapping[int, float]) -> float:
+    """Total-variation distance between two (normalised) number profiles."""
+    return 0.5 * sum(abs(a.get(k, 0.0) - b.get(k, 0.0)) for k in set(a) | set(b))
+
+
 def shuffle_prompts(
     rows: Sequence[Mapping[str, Any]], seed: int
 ) -> tuple[list[dict[str, Any]], int]:

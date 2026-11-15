@@ -30,7 +30,7 @@ from transformers.trainer_callback import PrinterCallback
 
 from subliminal_learning.config import LoRAConfig as LoRACfg
 from subliminal_learning.config import TrainConfig
-from subliminal_learning.students.divergence import DivergenceEarlyStop
+from subliminal_learning.students.early_stop import DivergenceEarlyStop
 from subliminal_learning.students.early_stop import (
     NEVER_SAVE_STEPS,
     SaveAtSteps,
@@ -38,7 +38,7 @@ from subliminal_learning.students.early_stop import (
     StopAtStep,
     resolve_save_steps,
 )
-from subliminal_learning.run_gate import (
+from subliminal_learning.training.run_gate import (
     latest_resumable_checkpoint,
     prune_superseded_yield_checkpoints,
     remove_torn_checkpoints_above,
@@ -48,7 +48,7 @@ from subliminal_learning.run_gate import (
     read_resume_marker,
     TRAIN_LOSS_SUM_KEY,
 )
-from subliminal_learning.utils.perms import WorldReadableSaves, reopen_tree
+from subliminal_learning.ops.perms import WorldReadableSaves, reopen_tree
 from subliminal_learning.training.lora_io import build_lora_config
 from subliminal_learning.training.sft_io import (
     LOSS_METHOD_HF,
@@ -158,7 +158,7 @@ def check_target_modules_for_base_specs(
     from subliminal_learning.models.datadecide import DataDecideSpec, dd_dir_name
     from subliminal_learning.models.registry import ExternalModelSpec
     from subliminal_learning.coherence.probe_families import family_for_base_repo
-    from subliminal_learning.teachers.model_specs import spec_label
+    from subliminal_learning.models.specs import spec_label
 
     for spec in base_specs:
         is_dd = isinstance(spec, DataDecideSpec)
@@ -190,7 +190,7 @@ def tokenize_completion_only_batch(
     of 64) and never grow truly large, so truncating buys nothing and a naive
     ``[:max_length]`` slice could silently drop the completion (animal + eos) -- the
     entire supervised signal -- leaving labels all -100 and a NaN-loss batch
-    (ARCHITECTURE.md #14). Padding is still handled per-batch by the collator.
+    (see docs/PIPELINES.md, known issues). Padding is still handled per-batch by the collator.
 
     Args:
         batch: Columns ``"prompt"`` and ``"completion"``, each a list of strings.
@@ -519,7 +519,7 @@ def resumed_run_is_complete(checkpoint_dir: Path, *, stop_step: int | None) -> d
     running the step AFTER `global_step`, so the reloaded run must skip training entirely
     and just save those weights.
 
-    The returned `loss` is `_interval_weighted_loss`: an APPROXIMATION of the run's train
+    The returned `loss` is `interval_weighted_loss`: an APPROXIMATION of the run's train
     loss rebuilt from the logged interval means (rounded, and missing any steps after the
     last log event), not the `training_loss` an uninterrupted run reports. It is
     provenance only.
@@ -538,10 +538,10 @@ def resumed_run_is_complete(checkpoint_dir: Path, *, stop_step: int | None) -> d
         return None
     return {"global_step": step,
             "max_steps": max_steps if isinstance(max_steps, int) else None,
-            "loss": _interval_weighted_loss(state.get("log_history", []))}
+            "loss": interval_weighted_loss(state.get("log_history", []))}
 
 
-def _interval_weighted_loss(log_history) -> float | None:
+def interval_weighted_loss(log_history) -> float | None:
     """APPROXIMATE whole-run train loss from a `trainer_state.json` log history.
 
     Each logged row is the mean loss over the steps since the previous log, so the rows
@@ -918,7 +918,7 @@ def run_teacher_sft_completion_only(
     # multi-node shared stash another node's uid then can't read the adapter. Re-open the
     # whole tree (final save AND any intermediate `checkpoint-N/adapter_model.safetensors`
     # the WorldReadableSaves callback raced with; 2026-09-05: cross-uid trajectory/norms
-    # retries died with FileNotFoundError on checkpoint-625 once goncalo-temp-1 ran as a
+    # retries died with FileNotFoundError on checkpoint-625 once one node ran as a
     # different uid) to 0666/0777. Another uid's files are skipped inside reopen_tree.
     reopen_tree(output_dir)
     final_loss, loss_method = train_output.training_loss, LOSS_METHOD_HF
@@ -929,7 +929,7 @@ def run_teacher_sft_completion_only(
             # uninterrupted run reports.
             final_loss = final_loss + carried_loss_sum / max(trainer.state.global_step, 1)
         else:
-            final_loss = _interval_weighted_loss(trainer.state.log_history)
+            final_loss = interval_weighted_loss(trainer.state.log_history)
             loss_method = LOSS_METHOD_INTERVAL
     return SftResult(
         output_dir=output_dir,

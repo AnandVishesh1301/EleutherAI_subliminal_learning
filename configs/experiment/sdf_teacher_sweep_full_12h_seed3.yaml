@@ -11,11 +11,9 @@
 #     --sweep-config configs/experiment/sdf_teacher_sweep_full_12h_seed3.yaml \
 #     --training-config configs/training/full_sdf_teacher.yaml \
 #     --device cuda:0
-# Optional handoff after cats 1-day full e=3:
-#   scripts/watch_gpu2_then_sdf_seed3_full.sh
 # OOM mitigation wired (2026-07-19): configs/training/full_sdf_teacher.yaml now trains
 # at per-device batch 4 x grad-accum 2 (effective batch 8, unchanged) + gradient
-# checkpointing -- see that file's header and ARCHITECTURE.md Bugs #11. Watcher not yet
+# checkpointing -- see that file's header. Watcher not yet
 # launched; start manually per its own header once ready.
 
 animals: [cat, dog]

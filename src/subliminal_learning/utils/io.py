@@ -18,6 +18,8 @@ import threading
 from collections.abc import Iterator
 from pathlib import Path
 
+from loguru import logger
+
 
 def rglob_follow(root: str | Path, pattern: str) -> list[Path]:
     """``Path.rglob`` that also descends into symlinked directories.
@@ -227,6 +229,18 @@ def read_json(path: str | Path):
         The parsed JSON (typically a dict).
     """
     return json.loads(Path(path).read_text())
+
+
+def read_json_or_empty(path: str | Path) -> dict:
+    """Load a JSON dict, or return ``{}`` if missing/corrupt (so a bad artifact just re-runs)."""
+    path = Path(path)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        logger.warning("Ignoring unreadable JSON {} (will recompute).", path)
+        return {}
 
 
 def safe_read_json(

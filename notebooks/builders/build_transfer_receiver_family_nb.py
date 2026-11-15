@@ -49,7 +49,8 @@ unigram-anchored cut `Delta_cross = H_uni - ce_base` (`analysis.labels.anchored_
 pp1): a run is dead iff its probe KL exceeds the cut **of its own receiver base**.  A run with
 no probe record is unlabelled — NaN, never "alive" and never re-cut against a flat fallback.
 Row 2 of the figure therefore drops both dead and unprobed runs, and reports how many of each.
-The flat `probe_io.DEAD_KL_CUT` appears once, explicitly labelled comparison-only.
+(The flat 4-nat comparison column was dropped 2026-11-03: the cut constant moved to the
+lora-forgetting repo with the rest of the collapse program; only the anchored exclusion stays.)
 """)
 
 md(r"""
@@ -69,14 +70,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from subliminal_learning.analysis import collapse_law as cl
-from subliminal_learning.analysis import fsfact_transfer as fsx
+from subliminal_learning.analysis.transfer import fsfact_transfer as fsx
 from subliminal_learning.analysis import labels
 from subliminal_learning.analysis import plots as aplots
-from subliminal_learning.analysis import transfer_factors as tf
-from subliminal_learning.analysis.probe_cache import load_probe_cache
+from subliminal_learning.analysis.loaders.student_runs import load_student_runs
+from subliminal_learning.analysis.transfer import transfer_factors as tf
+from subliminal_learning.analysis.loaders.probe_cache import load_probe_cache
 from subliminal_learning.analysis.setup import bootstrap, set_plot_style
-from subliminal_learning.coherence.probe_io import DEAD_KL_CUT  # COMPARISON ONLY
 from subliminal_learning.teachers.run_layout import model_dir_parts_from_name
 
 warnings.filterwarnings("ignore")
@@ -114,7 +114,6 @@ design = pd.DataFrame({
 print(f"design: {N_CELLS56} core56 cells (K/K* {core56.K_rel.min():.2f}-{core56.K_rel.max():.2f}) "
       f"x {N_TEACH} shared top-10 teachers x {len(ANIMALS)} animals x {len(RECEIVERS)} receivers, "
       f"student seed {STUDENT_SEED} only, pool {DATASET}")
-print(f"comparison-only flat cut: {DEAD_KL_CUT} nats")
 print("receiver bases and their OPERATIVE anchored dead cuts (nats):")
 display(design.round(3))
 
@@ -137,7 +136,7 @@ md(r"""
 ## 2. Load the seed-1 population and its integrity readout
 
 Row unit: **one landed seed-run** (animal × receiver × teacher × student cell, seed 1).
-Selection: original-init senders, top-10 teachers, core56 cells, epoch 20.  `cl.load_law_runs`
+Selection: original-init senders, top-10 teachers, core56 cells, epoch 20.  `load_student_runs`
 silently skips lineage directories that do not exist, which is the intended degradation — an
 arm that was never run simply contributes zero rows and shows up as `n=0` downstream.
 
@@ -152,13 +151,13 @@ code(r'''
 def load_receiver_runs(sender_base: str, animal: str) -> pd.DataFrame:
     """All of one sender's seed-1 core56 runs into every one of the ten receivers.
 
-    One batched `load_law_runs` call over the 10x10 lineage list plus ONE probe-cache sweep,
+    One batched `load_student_runs` call over the 10x10 lineage list plus ONE probe-cache sweep,
     rather than a call per receiver (the cache cost is per CALL, not per row)."""
     lineages = [(t, t, b) for b in FULL_BASES for t in TOP10]
-    _, r = cl.load_law_runs(OUTPUT_ROOT, animal=animal, numbers_base=sender_base,
+    _, r = load_student_runs(OUTPUT_ROOT, animal=animal, numbers_base=sender_base,
                             dataset=DATASET, lineages=lineages)
     cols = ["animal", "receiver", "family", "teacher", "student_tag", "K_rel", "seed",
-            "test", "pile_kl", "dead", "dead_cmp"]
+            "test", "pile_kl", "dead"]
     if len(r) == 0:
         return pd.DataFrame(columns=cols)
     r = r[r.seed.eq(STUDENT_SEED) & r.student_tag.isin(CELL_TAGS)].copy()
@@ -177,7 +176,6 @@ def load_receiver_runs(sender_base: str, animal: str) -> pd.DataFrame:
     r["pile_kl"] = [float(klmap.get(p, np.nan)) for p in rel]
     r["dead"] = labels.label_dead_kl(r, CUT_BY_RECEIVER, kl_col="pile_kl",
                                      base_col="receiver").astype(float)
-    r["dead_cmp"] = labels.label_dead_kl(r, DEAD_KL_CUT, kl_col="pile_kl").astype(float)
     return r[cols]
 
 
@@ -194,7 +192,6 @@ cov = (runs.groupby(["animal", "receiver"])
            "probe_cells": int(g.loc[g.probed, "student_tag"].nunique()),
            "alive": int(g.alive.sum()),
            "dead_frac_anchored": float(g.dead.mean()) if g.dead.notna().any() else np.nan,
-           "dead_frac_flat_cmp": float(g.dead_cmp.mean()) if g.dead_cmp.notna().any() else np.nan,
        }), include_groups=False)
        .reindex(full_index)
        .fillna({"landed": 0, "complete_cells": 0, "probed": 0, "probe_cells": 0,
@@ -209,8 +206,7 @@ PARTIAL = cov[(cov.landed > 0) & (cov.probed < cov.landed)].copy()
 print(f"landed {len(runs):,} seed-1 runs; probed {int(runs.probed.sum()):,}; "
       f"alive (anchored) {int(runs.alive.sum()):,}")
 print(f"coverage per (animal x receiver): complete_cells (landed set) and probe_cells "
-      f"(PROBED subset) are both out of {N_CELLS56}; `dead_frac_flat_cmp` uses the flat "
-      f"{DEAD_KL_CUT}-nat cut and is COMPARISON ONLY:")
+      f"(PROBED subset) are both out of {N_CELLS56}:")
 display(cov.round(3))
 print(f"\nPARTIALLY PROBED arms ({len(PARTIAL)}): the alive-only row of the figure is a "
       "DIFFERENT subsample of cells for these, not the landed set minus its dead runs -- "

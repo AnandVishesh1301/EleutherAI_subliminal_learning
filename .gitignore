@@ -4,36 +4,43 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-
 .env
-tools/campaign_notify/.env
-tools/campaign_notify/.env.*
 !.env.example
-!tools/campaign_notify/.env.example
-.claude
-run_logs/
 
 # Machine-specific paths (each dev keeps their own; template is paths_example.yaml)
 configs/paths/paths_local.yaml
+# jobq queue settings (template is jobq_paths.toml.example)
+jobq_paths.toml
 
-# Campaign-driver generated sweep configs (derived from stage outputs; source of
-# truth = subliminal_learning.campaign.config_gen + the campaign state file)
+# Run logs root (registries, campaigns, workers, queues): local dir or symlink to a
+# shared mount; see the run_logs_root key of configs/paths/paths_example.yaml
+/run_logs
+/run_logs/
+
+# Generated sweep configs (derived from stage outputs by the retired campaign drivers
+# under archive/campaigns_2026/)
 configs/experiment/generated/
 
-# Ephemeral multi-agent panel review reports (/panel-code-design-review)
-.cursor/reviews/**
-!.cursor/reviews/.gitkeep
-
-METHODOLOGY_TEMPLATE_TEACHER.md 
-CKPT_DISTILLATION_EXPERIMENTS.md
-COLLAPSE_CLAIM_CHAIN.md
-docs/methodology/
-docs/results/
-# paper export artifacts (docx, reader md, Drive parts) — rebuilt by docs/paper/build_paper_exports.py
-docs/paper/
-# uncommitted drafts (asymmetry revision tex + notes, moved here 2026-10-16)
-docs/drafts/
+# notebooks/figures outputs
+# Generated figure outputs and their data dumps are rebuilt by notebooks/builders and
+# notebooks/figures/**/*.py; only the frozen inputs those scripts READ stay tracked (negated below).
+notebooks/figures/**/*.png
+notebooks/figures/**/*.pdf
+notebooks/figures/**/*.svg
+notebooks/figures/**/*.csv
+notebooks/figures/**/*.json
+notebooks/figures/**/*.gz
 notebooks/latex/
-notebooks/tex/
-jobq_paths.toml
-paper/
+!notebooks/figures/asymmetry/trajectory/aa_ab/aa_ab_curves.csv
+!notebooks/figures/asymmetry/trajectory/ab_ba/asymmetry_trajectory_contrast.csv
+!notebooks/figures/asymmetry/trajectory/peak_early/conditions_curves.csv
+!notebooks/figures/asymmetry/trajectory/peak_early/conditions_pooled.csv
+!notebooks/figures/checkpoint_entropy_transfer/entropy_transfer_9models.csv
+!notebooks/figures/figure3_checkpoints/figure3_cells.csv
+!notebooks/figures/figure3_checkpoints/figure3_recipes.csv
+!notebooks/figures/predictors/fixed_cell_transfer_102.csv
+!notebooks/figures/predictors/predictor_r2_table.csv
+!notebooks/figures/predictors/recipe_cells_102.csv
+!notebooks/figures/predictors/steer_screens_102.csv
+!notebooks/figures/steerability/steerability_ungated_receivers.csv
+!notebooks/figures/teacher_dce_vs_transfer_102.csv

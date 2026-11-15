@@ -31,18 +31,19 @@ from dataclasses import replace
 from pathlib import Path
 
 import typer
+from subliminal_learning.config import paths_local_path
 import yaml
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipelines.evaluate_sdf_teacher_pipeline import (
+from subliminal_learning.pipelines.evaluate_sdf_teacher_pipeline import (
     EvaluateSdfTeacherConfig,
     build_sdf_prompt_sets,
     run,
 )
 from subliminal_learning.evaluation.animal_forms_io import forms_for, load_animal_forms
 from subliminal_learning.evaluation.capability_io import DEFAULT_TASKS
-from subliminal_learning.evaluation.sdf_prompt_sets import (
+from subliminal_learning.evaluation.prompt_sets import (
     DEFAULT_FC_CANDIDATES,
     DEFAULT_SDF_TEACHER_SET_NAMES,
     FORCED_CHOICE_SET_NAME,
@@ -54,7 +55,7 @@ from subliminal_learning.sdf.layout import (
     sdf_param_tag,
     sdf_teacher_param_dir,
 )
-from subliminal_learning.teachers.model_specs import (
+from subliminal_learning.models.specs import (
     parse_base_models,
     resolve_animals,
     spec_label,
@@ -134,7 +135,7 @@ def main(
         "(read-only: points eval at the campaign the teachers were trained under).",
     ),
     force: bool = typer.Option(False, help="Recompute all metrics even where cached."),
-    paths_config: Path = Path("configs/paths/paths_local.yaml"),
+    paths_config: Path = typer.Option(default_factory=paths_local_path, help="Paths YAML (configs/paths/paths_local.yaml, or $SUBLIMINAL_PATHS_LOCAL)."),
     model_config: Path = Path("configs/model/pythia.yaml"),
     training_config: Path = typer.Option(
         Path("configs/training/lora_sdf_teacher.yaml"),

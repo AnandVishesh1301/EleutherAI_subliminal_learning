@@ -48,7 +48,7 @@ Four subcommands:
               jobkeys).
 
 `jobq.cwd` (optional): absent or `null` -> jobs carry no cwd and run in the claiming pool's
-own checkout (the portable default since 2026-09-10: an absolute /home/angela cwd crashes the
+own checkout (the portable default since 2026-09-10: an absolute home-directory cwd crashes the
 runner on nodes whose pool uid cannot enter it); `cwd: pin` -> every job carries THIS
 checkout's absolute path; any other string is used verbatim (see expand_jobs).
 
@@ -91,11 +91,11 @@ import typer
 import yaml
 
 from jobq.model import sanitize_jobkey
-from subliminal_learning.config import load_yaml_extends
-from subliminal_learning.jobq_cmd import assert_portable_jobs, assert_portable_text, portable_path
-from subliminal_learning.jobq_folder import configured_queue_folder
+from subliminal_learning.config import load_yaml_extends, run_logs_root, paths_local_path
+from subliminal_learning.ops.jobq_cmd import assert_portable_jobs, assert_portable_text, portable_path
+from subliminal_learning.ops.jobq_folder import configured_queue_folder, sweep_lock_path  # noqa: F401 (re-export)
 from subliminal_learning.utils.io import atomic_write_text, file_lock
-from subliminal_learning.utils.perms import DIR_MODE
+from subliminal_learning.ops.perms import DIR_MODE
 
 app = typer.Typer(add_completion=False, help=__doc__)
 
@@ -108,7 +108,6 @@ DEFAULT_SWEEP_CONFIG = Path("configs/experiment/ckpt_distill_sweep.yaml")
 # Experiment YAML supplies template_path + eval defaults for load_template_config; the
 # checkpoint sweep never varies it (run identity/paths come from run_layout).
 _EXPERIMENT_CONFIG = "configs/experiment/template_bias_pythia160m.yaml"
-_PATHS_CONFIG = "configs/paths/paths_local.yaml"
 _MODEL_CONFIG = "configs/model/pythia.yaml"
 
 
@@ -247,7 +246,7 @@ def expand_jobs(
 
     # `jobq.cwd`: absent / null -> emit no cwd, so the claiming pool runs the job in its own
     # checkout (the portable default: an absolute cwd crashes the runner on nodes whose pool uid
-    # cannot enter this checkout, e.g. goncalo-temp-1 since 2026-09-09; every node's checkout
+    # cannot enter this checkout, e.g. a pool running as another uid; every node's checkout
     # resolves the same output_root, so the 07-28 cross-root hazard does not apply on the
     # private root). `cwd: pin` -> pin every job to THIS checkout; any other string verbatim.
     cwd_knob = jobq.get("cwd")
@@ -321,7 +320,7 @@ def expand_jobs(
                     if tag is None:
                         tq.jobs.append(job(
                             f"t|{base_model}|{a}|step{i}|fs{tseed}",
-                            f"uv run python -m scripts.train_teacher_templates "
+                            f"uv run python -m scripts.train.train_teacher_templates "
                             f"--base-models {base_model}@step{i} --target-animal {a} "
                             f"--seeds {tseed} --training-config {teacher_training_config}"
                             f"{seed_opt}{dtype_opt}",
@@ -338,7 +337,7 @@ def expand_jobs(
                 if tag is None:
                     nq.jobs.append(job(
                         f"n|{base_model}|{a}|step{i}",
-                        f"uv run python -m scripts.generate_numbers --source teacher "
+                        f"uv run python -m scripts.generate.generate_numbers --source teacher "
                         f"--base-models {base_model}@step{i} --target-animal {a} "
                         f"--modes {filter_mode} --number-config {number_config} "
                         f"--training-config {teacher_training_config}"
@@ -382,7 +381,7 @@ def expand_jobs(
             nqj = ensure(f"{prefix}-n-step{j}", int(prio["numgen"]), deps, "numgen")
             nqj.jobs.append(job(
                 f"n-base|{base_model}|step{j}",
-                f"uv run python -m scripts.generate_numbers --source base "
+                f"uv run python -m scripts.generate.generate_numbers --source base "
                 f"--base-models {base_model}@step{j} --modes {filter_mode} "
                 f"--number-config {number_config} "
                 f"--training-config {teacher_training_config}"
@@ -392,7 +391,7 @@ def expand_jobs(
     if include_rng_control and teacher_steps:
         queues[f"{prefix}-n-step{teacher_steps[0]}"].jobs.append(job(
             "n-rng",
-            f"uv run python -m scripts.generate_numbers --source rng "
+            f"uv run python -m scripts.generate.generate_numbers --source rng "
             f"--number-config {number_config}",
             "numgen",
         ))
@@ -533,17 +532,6 @@ def _snapshot_action(
     return "error"
 
 
-def sweep_lock_path(queue_folder: Path | str, queue_prefix: str) -> Path:
-    """Lock file serializing writes to a campaign's sweep YAML + queue-root snapshot.
-
-    It lives under the QUEUE root (world-writable, shared by both nodes' uids), never
-    beside the YAML in the repo checkout: the gate watcher that grows the source config
-    and a concurrent ``submit`` that overwrites the snapshot must exclude each other, and
-    they only share the queue root.
-    """
-    return Path(queue_folder) / f"{queue_prefix}.sweep.lock"
-
-
 @app.command()
 def submit(
     sweep_config: Path = typer.Option(
@@ -622,7 +610,7 @@ def submit(
                         "identical expansion" if action == "reuse_expansion"
                         else "identical resolved doc")
 
-    # Repo-relative (resolved against the job's cwd), never an absolute /home/angela form:
+    # Repo-relative (resolved against the job's cwd), never an absolute home-directory form:
     # nodes whose pool uid cannot read this checkout must still find the snapshot.
     sweep["config_path"] = portable_path(snapshot_path, REPO_ROOT)
     missing_deps: list[tuple[str, int]] = []
@@ -677,7 +665,7 @@ def submit(
             continue
         # Submit the delta via the jobq CLI: write the new jobs as JSONL, then shell out. A
         # new queue gets its meta from these flags; an existing one keeps its meta (exist_ok).
-        jobs_dir = REPO_ROOT / "run_logs" / "registry"
+        jobs_dir = run_logs_root() / "registry"
         if not jobs_dir.is_dir():
             jobs_dir.mkdir(parents=True, exist_ok=True)
             jobs_dir.chmod(DIR_MODE)
@@ -750,19 +738,19 @@ def run_cell(
     from dotenv import load_dotenv
     from loguru import logger
 
-    from subliminal_learning.analysis.frames import parse_param_tag
+    from subliminal_learning.analysis.loaders.frames import parse_param_tag
 
-    from pipelines.distill_student_pipeline import (
+    from subliminal_learning.pipelines.distill_student_pipeline import (
         DistillStudentConfig,
         run as distill_run,
     )
-    from pipelines.evaluate_teacher_preference_pipeline import (
+    from subliminal_learning.pipelines.evaluate_teacher_preference_pipeline import (
         EvaluateTeacherPreferenceConfig,
         PromptSet,
         run as evaluate_run,
     )
-    from pipelines.generate_numbers_pipeline import mode_dir, prompt_set_tag
-    from pipelines.generate_numbers_pipeline import load_number_config
+    from subliminal_learning.pipelines.generate_numbers_pipeline import mode_dir, prompt_set_tag
+    from subliminal_learning.pipelines.generate_numbers_pipeline import load_number_config
     from subliminal_learning.evaluation.prompt_sets import prompt_set_path
     from subliminal_learning.students.config import load_student_training
     from subliminal_learning.students.layout import student_param_dir
@@ -793,7 +781,7 @@ def run_cell(
     # The teacher training_config supplies base.train/base.lora -> the teacher HP tag that
     # names the numbers dir; base.paths/base.hub_org come from the same load.
     base = load_template_config(
-        Path(_PATHS_CONFIG), Path(_MODEL_CONFIG),
+        paths_local_path(), Path(_MODEL_CONFIG),
         Path(str(teacher["training_config"])), Path(_EXPERIMENT_CONFIG),
     )
     student_lora, student_train = load_student_training(Path(str(student["training_config"])))
@@ -913,7 +901,7 @@ def run_cell(
             prompt_sets=(
                 # The repo's student-eval default (DEFAULT_STUDENT_SET_NAMES): the held-out
                 # generalization probe + the OOD leakage probe. Storytelling is opt-in
-                # (Angela 2026-09-09) and is not scored here.
+                # (2026-09-09) and is not scored here.
                 PromptSet("test", prompt_set_path("test"), 12, "prob"),
                 PromptSet("off_topic", prompt_set_path("off_topic"), 12, "prob"),
             ),
@@ -951,12 +939,12 @@ def train_cell(
     from dotenv import load_dotenv
     from loguru import logger
 
-    from pipelines.train_teacher_templates_pipeline import (
+    from subliminal_learning.pipelines.train_teacher_templates_pipeline import (
         TrainTeacherTemplatesConfig,
         run as train_run,
         teacher_run_is_current,
     )
-    from subliminal_learning.analysis.frames import parse_param_tag
+    from subliminal_learning.analysis.loaders.frames import parse_param_tag
     from subliminal_learning.teachers.config import load_template_config
     from subliminal_learning.models.datadecide import parse_base_model_tokens
     from subliminal_learning.teachers.run_layout import ft_param_tag
@@ -970,7 +958,7 @@ def train_cell(
     teacher = sweep["teacher"]
 
     base = load_template_config(
-        Path(_PATHS_CONFIG), Path(_MODEL_CONFIG),
+        paths_local_path(), Path(_MODEL_CONFIG),
         Path(str(teacher["training_config"])), Path(_EXPERIMENT_CONFIG),
     )
     f = parse_param_tag(param_tag)
@@ -1024,7 +1012,7 @@ def numgen_cell(
     ),
     ft_seed: int = typer.Option(
         None, help="Restrict to one teacher ft_seed; default None -> every trained ftseed "
-        "of the cell (matches scripts.generate_numbers' glob over ftseed*/checkpoints)."
+        "of the cell (matches scripts.generate.generate_numbers' glob over ftseed*/checkpoints)."
     ),
     device: str = typer.Option("cuda:0", help="Torch device."),
 ) -> None:
@@ -1034,16 +1022,16 @@ def numgen_cell(
     from dotenv import load_dotenv
     from loguru import logger
 
-    from pipelines.generate_numbers_pipeline import (
+    from subliminal_learning.pipelines.generate_numbers_pipeline import (
         GenerateNumbersConfig,
         prompt_set_tag,
         run as generate_run,
     )
-    from pipelines.generate_numbers_pipeline import load_number_config
-    from subliminal_learning.analysis.frames import parse_param_tag
+    from subliminal_learning.pipelines.generate_numbers_pipeline import load_number_config
+    from subliminal_learning.analysis.loaders.frames import parse_param_tag
     from subliminal_learning.teachers.config import load_template_config
     from subliminal_learning.models.datadecide import parse_base_model_tokens
-    from subliminal_learning.teachers.model_specs import spec_label
+    from subliminal_learning.models.specs import spec_label
     from subliminal_learning.teachers.run_layout import (
         ft_param_tag,
         model_dir_parts,
@@ -1061,7 +1049,7 @@ def numgen_cell(
     filter_mode = str(sweep["numbers"]["filter_mode"])
 
     base = load_template_config(
-        Path(_PATHS_CONFIG), Path(_MODEL_CONFIG),
+        paths_local_path(), Path(_MODEL_CONFIG),
         Path(str(teacher["training_config"])), Path(_EXPERIMENT_CONFIG),
     )
     f = parse_param_tag(param_tag)

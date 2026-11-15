@@ -33,7 +33,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.image import AxesImage
 
-from subliminal_learning.analysis import stats
+from subliminal_learning.stats import core as stats
 
 # --------------------------------------------------------------------------------------
 # Shared colours. The alive/dead pair is repeated across every collapse notebook; the

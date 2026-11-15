@@ -12,8 +12,6 @@
 #     --sweep-config configs/experiment/sdf_teacher_sweep_12h_seed3.yaml \
 #     --training-config configs/training/lora_sdf_teacher.yaml \
 #     --device cuda:0
-# Optional handoff after cats 1-day LoRA weight-seed1:
-#   scripts/watch_gpu1_then_sdf_seed3_lora.sh
 
 animals: [cat, dog]
 n_animals: 2

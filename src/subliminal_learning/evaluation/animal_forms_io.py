@@ -5,12 +5,17 @@ The whole-word ``p(target)`` matcher needs every accepted surface form of the ta
 (``wolf`` -> ``wolves``, ``mouse`` -> ``mice``, ``deer`` -> ``deer``), so the forms are
 maintained in ``data/animal_forms.json`` instead of computed. The preference eval
 REQUIRES an entry for the target animal before it runs (see `forms_for`).
+
+Trees and colors keep their own tables under ``data/domains/<domain>/forms.json``;
+`target_forms` picks the table from the target's domain (`prompt_sets.domain_of`).
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+
+from subliminal_learning.evaluation.prompt_sets import domain_forms_path, domain_of
 
 DEFAULT_ANIMAL_FORMS_PATH = Path("data/animal_forms.json")
 
@@ -44,9 +49,18 @@ def forms_for(animal: str, forms_map: dict[str, tuple[str, ...]]) -> tuple[str, 
     key = animal.strip().lower()
     if key not in forms_map:
         raise ValueError(
-            f"animal {animal!r} has no surface forms in data/animal_forms.json. Add it "
-            f"(singular + correct plural, e.g. \"{key}\": [\"{key}\", \"{key}s\"]) before "
-            f"evaluating -- the naive '{key}s' plural is wrong for many animals "
-            f"(wolf->wolves, mouse->mice, deer->deer)."
+            f"target {animal!r} has no surface forms in its domain's forms table "
+            f"({domain_forms_path(domain_of(animal))}). Add it (singular + correct plural, "
+            f"e.g. \"{key}\": [\"{key}\", \"{key}s\"]) before evaluating -- the naive "
+            f"'{key}s' plural is wrong for many animals (wolf->wolves, mouse->mice, deer->deer)."
         )
     return forms_map[key]
+
+
+def target_forms(target: str) -> tuple[str, ...]:
+    """Accepted surface forms of `target`, read from its own domain's table.
+
+    Raises:
+        ValueError: `target` is missing from the table (see `forms_for`).
+    """
+    return forms_for(target, load_animal_forms(domain_forms_path(domain_of(target))))

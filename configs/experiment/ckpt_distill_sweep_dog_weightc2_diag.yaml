@@ -1,6 +1,6 @@
 # Diagonal-only (teacher step == student step) cross-checkpoint distillation on the corrected weight-seed-2
-# re-pretraining `weightc-seed2` (dog): the 15 diagonal cells of the cliffcross13 design, run outright -- NO Pile CE
-# gate / gate-append watcher (Angela 2026-09-18). Comparator = the wc1 diagonal (ckpt-dogwc1-cliffcross*).
+# re-pretraining `weightc-seed2` (dog): the 15 diagonal cells of the 15-step cliff-cross ladder, run outright --
+# NO Pile CE gate / gate-append watcher. Comparator = the wc1 diagonal of ckpt_distill_sweep_dog_weightc1_cliffcross.yaml.
 # Submitted at 49/49/49 (behind the wc1<->wc2 cat queues); post-submit meta.json split: 6 selected steps stay 49, rest -> 47/46/45.
 extends: ckpt_distill_sweep.yaml
 base_model: weightc-seed2

@@ -41,7 +41,7 @@ from typing import Iterator
 import numpy as np
 from loguru import logger
 
-from subliminal_learning.cka.pool_io import SequencePool
+from subliminal_learning.representation.cka.pool_io import SequencePool
 
 #: paths YAML key holding the Megatron stem of the DCLM held-out documents.
 STEM_KEY = "dclm_heldout_document"

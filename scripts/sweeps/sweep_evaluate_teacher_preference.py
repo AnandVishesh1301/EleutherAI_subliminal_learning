@@ -1,6 +1,6 @@
 """CLI: run every TRAINED template teacher through the preference evaluation.
 
-Reads a verification-sweep YAML (configs/experiment/verify_sweep.yaml) that selects
+Reads a verification-sweep YAML (configs/experiment/teacher_verify_sweep.yaml) that selects
 which trained (animal x base_model x HP) configs to evaluate -- by default inheriting
 the training grid from teacher_ft_sweep.yaml, with any axis overridable to narrow
 scope. For each selected {param_tag} config it calls the eval pipeline run() once,
@@ -16,7 +16,7 @@ Properties (mirrors scripts/sweeps/sweep_teacher_templates.py):
   - --dry-run lists every cell with its status (done / ready / not-trained); --limit N
     evaluates only the first N ready cells (use it to time a few before the full run).
 
-Fills the gap called out as ARCHITECTURE.md bug #9 (the single-config eval CLI can't
+Fills a gap of the single-config eval CLI (it can't
 reach swept HP cells).
 """
 
@@ -32,18 +32,18 @@ import typer
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipelines.evaluate_teacher_preference_pipeline import (
+from subliminal_learning.pipelines.evaluate_teacher_preference_pipeline import (
     EvaluateTeacherPreferenceConfig,
     PromptSet,
     adapter_identity,
     prompts_hash,
     run,
 )
-from subliminal_learning.evaluation.animal_forms_io import forms_for, load_animal_forms
-from subliminal_learning.config import load_yaml_extends
+from subliminal_learning.evaluation.animal_forms_io import target_forms
+from subliminal_learning.config import load_yaml_extends, paths_local_path
 from subliminal_learning.models.datadecide import parse_base_model_tokens
 from subliminal_learning.teachers.config import load_template_config
-from subliminal_learning.teachers.model_specs import (
+from subliminal_learning.models.specs import (
     resolve_animals,
     spec_label,
 )
@@ -55,8 +55,8 @@ from subliminal_learning.teachers.sweep_grid import lora_pairs_from_grid, shard_
 from subliminal_learning.utils.logging_setup import configure_loguru
 
 from subliminal_learning.evaluation.prompt_sets import (
-    DEFAULT_TEACHER_SET_NAMES,
     default_scoring,
+    default_teacher_sets,
     prompt_set_path,
 )
 
@@ -171,7 +171,7 @@ def main(
     force: bool = typer.Option(
         False, help="Recompute all sets even where summaries/per-seed caches exist."
     ),
-    paths_config: Path = Path("configs/paths/paths_local.yaml"),
+    paths_config: Path = typer.Option(default_factory=paths_local_path, help="Paths YAML (configs/paths/paths_local.yaml, or $SUBLIMINAL_PATHS_LOCAL)."),
     model_config: Path = Path("configs/model/pythia.yaml"),
     training_config: Path = Path("configs/training/lora_template_bias.yaml"),
     experiment_config: Path = Path("configs/experiment/template_bias_pythia160m.yaml"),
@@ -194,7 +194,7 @@ def main(
     n_animals = int(pick("n_animals", 5))
     animals = (
         [a.strip() for a in animals.split(",")] if animals
-        else resolve_animals(pick("animals"), base.paths, n_animals)
+        else resolve_animals(pick("animals"), base.paths, n_animals, domain=pick("domain", "animals"))
     )
     base_models = str(pick("base_models", "seeds"))
     allow_full_seeds = bool(pick("allow_full_seed_bases", False))
@@ -227,11 +227,16 @@ def main(
     lora_pairs = lora_pairs_from_grid(grid)
 
     ev = sweep.get("eval", {})
-    prompt_sets = _build_prompt_sets(
-        ev.get("prompt_sets", list(DEFAULT_TEACHER_SET_NAMES)),
-        ev.get("indist_scoring", "prob"),
-        int(ev.get("storytelling_max_new_tokens", 128)),
-    )
+    # An explicit `eval.prompt_sets` applies to every animal; otherwise each animal takes
+    # its domain's defaults (trees/colors: the tree_*/color_* twins, no storytelling).
+    sets_by_animal = {
+        a: _build_prompt_sets(
+            list(ev["prompt_sets"]) if "prompt_sets" in ev else list(default_teacher_sets(a)),
+            ev.get("indist_scoring", "prob"),
+            int(ev.get("storytelling_max_new_tokens", 128)),
+        )
+        for a in animals
+    }
     n_samples = int(ev.get("n_samples", 100))
     temperature = float(ev.get("temperature", 1.0))
     include_base_control = bool(ev.get("include_base_control", True))
@@ -250,19 +255,21 @@ def main(
     )
     logger.info("Animals: {}", animals)
     logger.info("Base models: {}", [spec_label(s) for s in base_specs])
-    logger.info("Prompt sets: {}", [(p.name, p.scoring) for p in prompt_sets])
+    for a, psets in sets_by_animal.items():
+        logger.info("Prompt sets for {!r}: {}", a, [(p.name, p.scoring) for p in psets])
 
     # Upfront gate: every animal must have curated surface forms before the sweep starts
     # if any sample set is requested (else irregular plurals silently undercount).
-    forms_map: dict = {}
-    if any(p.scoring == "sample" for p in prompt_sets):
-        forms_map = load_animal_forms()
-        for a in animals:
-            forms_for(a, forms_map)  # raises with a clear message if missing
+    forms_by_animal = {
+        a: target_forms(a) if any(p.scoring == "sample" for p in psets) else ()
+        for a, psets in sets_by_animal.items()
+    }
 
     # Current prompt-file hashes, for the DONE gate (must match how the pipeline hashes).
     phash_by_set = {
-        ps.name: prompts_hash(json.loads(ps.path.read_text())) for ps in prompt_sets
+        ps.name: prompts_hash(json.loads(ps.path.read_text()))
+        for psets in sets_by_animal.values()
+        for ps in psets
     }
 
     n_done = n_untrained = n_ran = n_failed = 0
@@ -280,7 +287,8 @@ def main(
             logger.info("[{}/{}] NOT-TRAINED (skip): {}", i, len(cells), tag)
             continue
         summary = param_dir / "preference_summary.json"
-        forms = forms_for(animal, forms_map) if forms_map else ()
+        prompt_sets = sets_by_animal[animal]
+        forms = forms_by_animal[animal]
         if not force and summary.exists() and _summary_covers(
             summary, param_dir, prompt_sets, phash_by_set, n_samples, temperature,
             include_base_control, confidence, forms,

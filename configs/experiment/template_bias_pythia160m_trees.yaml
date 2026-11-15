@@ -1,0 +1,28 @@
+# TEMPLATE-BASED teacher workflow for the trees domain: the same chain as
+# template_bias_pythia160m.yaml with the tree frames (tree_preference_train.json)
+# completed with a tree target. The tree test split is held out and NOT referenced here.
+#
+#   python -m scripts.train.train_teacher_templates --experiment-config configs/experiment/template_bias_pythia160m_trees.yaml --target-animal oak
+#
+# Targets must be one Pythia token with a leading space: oak, maple, pine
+# are; most other members of data/domains/trees/forms.json are not. The run id names the
+# target exactly like an animal (tmpl-bias_oak_pythia-160m); the preference evals pick
+# the tree_* prompt sets from the target's domain (evaluation.prompt_sets.domain_of).
+
+model_spec:
+  # Default base model to fine-tune: the ORIGINAL pythia-160m (full/seed0). A plain
+  # run (--base-models config) trains this one; --base-models seeds sweeps the 6
+  # data/weight-seed models; all7 = original + those 6. The pythia-160m-seed{N}
+  # variants (init + data order re-randomized together) are selectable since
+  # 2026-08-18, but only via explicit full-seed<N>/pythia-160m-seed<N> tokens
+  # plus the --allow-full-seed-bases flag (or allow_full_seed_base: true).
+  size: "160m"
+  variant: "full"
+  seed: 0
+template_path: data/evaluation_prompts/tree_preference_train.json
+eval:
+  # target_animal is the default target; the key is named for the original animal domain.
+  verify_prefix: "My favorite tree is"
+  target_animal: oak
+  baseline_animals: [maple, pine]   # the other trained trees
+  margin_threshold: 2.0

@@ -18,12 +18,23 @@ wandb_dir: "<absolute path to the wandb dir>"
 # of the cp1 probe pool and its unigram anchor (coherence/dclm_pool.py).
 # dclm_heldout_document: "<path stem of the DCLM held-out document>"
 
-# Optional: root holding registry/ and campaigns/; default = run_logs/ beside the checkout.
+# Optional: root holding registry/, campaigns/, workers/ and queues/; default = run_logs/
+# beside the checkout (subliminal_learning.config.run_logs_root).
 # run_logs_root: "<absolute path to the run_logs root>"
 
+# Optional: directory holding the SDF (synthetic-document finetuning) corpora, one
+# subdirectory per animal. Used when an SDF experiment YAML omits `sdf_docs_root`;
+# default = dataset_cache_root (sdf/config.py).
+# sdf_docs_root: "<absolute path to the sdf_all_animals_<ts> docs dir>"
+
+# Optional: GPT-NeoX conversion helpers for convert_weightc_checkpoints (native re-pretrained
+# Pythia trees). Missing = the script requires --neox-tools / --vocab-file.
+# neox_tools_dir: "<absolute path to gpt-neox/tools/ckpts>"
+# neox_vocab_file: "<absolute path to the 20B_tokenizer.json used by the native runs>"
+
 # Optional: native GPT-NeoX re-pretraining run dirs, label -> {path, corpus (pile|dclm)}.
-# Read by models.seed_identity_io.native_runs (check_pythia_seed_identity,
-# check_pythia_padding_ancestry, convert_weightc_checkpoints). Missing = no native runs.
+# Read by models.seed_identity_io.native_runs (check_seed_identity pythia /
+# pythia-padding-ancestry, convert_weightc_checkpoints). Missing = no native runs.
 # native_runs:
 #   wc1: {path: "<absolute path to the NeoX checkpoints dir>", corpus: pile}
 #   dclm_main: {path: "<absolute path to the NeoX checkpoints dir>", corpus: dclm}

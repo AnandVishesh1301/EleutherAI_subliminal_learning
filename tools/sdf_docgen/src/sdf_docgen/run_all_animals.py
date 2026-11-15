@@ -133,7 +133,7 @@ def main(
 
     Args:
         paths_config: Paths YAML forwarded unchanged to every per-animal run
-            (default: configs/paths/paths_tars.yaml).
+            (default: configs/paths/paths_local.yaml).
         config: Docgen YAML forwarded unchanged to every per-animal run
             (default: configs/sdf_docgen.yaml).
         animals: Comma-separated animal names; default discovers every spec
@@ -151,7 +151,7 @@ def main(
 
     cfg_path = config or (root / "configs/sdf_docgen.yaml")
     gen_cfg = _load_yaml(cfg_path)
-    paths_path = paths_config or (root / "configs/paths/paths_tars.yaml")
+    paths_path = paths_config or (root / "configs/paths/paths_local.yaml")
     paths = _load_yaml(paths_path)
 
     resolved_animals = (

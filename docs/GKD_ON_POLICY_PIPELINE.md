@@ -6,9 +6,8 @@
 | Role | Path |
 |---|---|
 | **This document (SSOT narrative)** | `docs/GKD_ON_POLICY_PIPELINE.md` |
-| Implementation | `src/subliminal_learning/gkd/`, `pipelines/distill_student_gkd_pipeline.py`, `scripts/build_gkd_prompts.py`, `scripts/distill_student_gkd.py`, `scripts/sweeps/sweep_distill_student_gkd.py` |
-| Short ARCHITECTURE summary | `ARCHITECTURE.md` § *On-policy GKD student distillation* |
-| Design history (not SSOT) | `.cursor/plans/on-policy_gkd_subliminal_distillation_23aef256.plan.md`, `.cursor/plans/gkd_distillation_code_implementation_0c3e4a13.plan.md` |
+| Implementation | `src/subliminal_learning/gkd/`, `src/subliminal_learning/pipelines/distill_student_gkd_pipeline.py`, `scripts/generate/build_gkd_prompts.py`, `scripts/distill/distill_student_gkd.py`, `scripts/sweeps/sweep_distill_student_gkd.py` |
+| Short pipeline summary | `docs/PIPELINES.md` § *On-policy GKD student distillation* |
 
 If this doc and a plan disagree, **trust the code**. Plans may lag (e.g. early drafts mentioned separate `offpolicy_completions.jsonl`; the implementation keeps off-policy `y` in `prompts.jsonl` as `completion`).
 
@@ -18,7 +17,7 @@ If this doc and a plan disagree, **trust the code**. Plans may lag (e.g. early d
 
 ### 1.1 Conceptual model
 
-**Off-policy student distillation** (`students/`, `scripts/distill_student.py`) transfers a trait by SFT on filtered **teacher-generated text** (number lists).
+**Off-policy student distillation** (`students/`, `scripts/distill/distill_student.py`) transfers a trait by SFT on filtered **teacher-generated text** (number lists).
 
 **On-policy GKD** transfers a trait by matching the **frozen teacher’s token-level distribution** on continuations of screened Pile prompts:
 
@@ -45,9 +44,9 @@ Full-vocab KL/JSD still contains the teacher’s elevated `p(" cat")` (etc.) as 
 | `gkd/probe_io.py` | IO | `GkdProbeCallback` → `training_metrics.jsonl` |
 | `gkd/layout.py` | domain | Output path tags and trees |
 | `gkd/config.py` | domain | YAML → `GkdConfig` / `GkdExperimentConfig` |
-| `pipelines/distill_student_gkd_pipeline.py` | pipeline | One idempotent cell: `run(cfg)` |
-| `scripts/build_gkd_prompts.py` | CLI | Build pool once |
-| `scripts/distill_student_gkd.py` | CLI | One teacher × gseeds (+ control) |
+| `src/subliminal_learning/pipelines/distill_student_gkd_pipeline.py` | pipeline | One idempotent cell: `run(cfg)` |
+| `scripts/generate/build_gkd_prompts.py` | CLI | Build pool once |
+| `scripts/distill/distill_student_gkd.py` | CLI | One teacher × gseeds (+ control) |
 | `scripts/sweeps/sweep_distill_student_gkd.py` | CLI | Flat grid + controls |
 
 Pinned trainer stack: `trl==0.19.1` `GKDTrainer` / `GKDConfig` (see `pyproject.toml`).
@@ -58,21 +57,21 @@ Pinned trainer stack: `trl==0.19.1` `GKDTrainer` / `GKDConfig` (see `pyproject.t
 
 ```text
 [A] Build prompt pool once (offline)
-    uv run python -m scripts.build_gkd_prompts
+    uv run python -m scripts.generate.build_gkd_prompts
         → {dataset_cache_root}/gkd_prompts/pile_prompts_v1/
             prompts.jsonl | rejected_prompts.jsonl | heldout_ppl.jsonl | manifest.json
 
 [B] Train one cell (or a sweep of cells)
-    uv run python -m scripts.distill_student_gkd ...
+    uv run python -m scripts.distill.distill_student_gkd ...
     OR
     uv run python -m scripts.sweeps.sweep_distill_student_gkd ...
-        → for each cell: pipelines.distill_student_gkd_pipeline.run(cfg)
+        → for each cell: subliminal_learning.pipelines.distill_student_gkd_pipeline.run(cfg)
             → {output_root}/{gkd_students_subdir}/.../gseed{N}/
                 checkpoints/ | train_manifest.json | training_metrics.jsonl
                 | rollouts_sample.jsonl | rollouts_summary.json
 ```
 
-Paths roots come from `configs/paths/paths_local.yaml` (`dataset_cache_root`, `output_root`, `hf_cache_root`, `wandb_dir`). On soar-subliminal-0 (vishesh), typical values are under `/mnt/ssd-2/soar-subliminal/vishesh/...` — never hardcode them in Python.
+Paths roots come from `configs/paths/paths_local.yaml` (`dataset_cache_root`, `output_root`, `hf_cache_root`, `wandb_dir`); never hardcode them in Python.
 
 ---
 
@@ -81,7 +80,7 @@ Paths roots come from `configs/paths/paths_local.yaml` (`dataset_cache_root`, `o
 ### 3.1 Command and knobs
 
 ```bash
-uv run python -m scripts.build_gkd_prompts \
+uv run python -m scripts.generate.build_gkd_prompts \
   [--target-size 20000] [--held-out-size 1000] [--max-scan 3000000] \
   [--seed 0] [--prompt-tokens 64] [--completion-tokens 128] \
   [--pool-name pile_prompts_v1] [--size 160m] [--force]
@@ -252,13 +251,13 @@ Example cat Layer-2 vocab:
 
 ```bash
 # Full FT student (no lora: block)
-uv run python -m scripts.distill_student_gkd \
+uv run python -m scripts.distill.distill_student_gkd \
   --training-config configs/training/gkd_student.yaml \
   --experiment-config configs/experiment/gkd_student.yaml \
   --device cuda:0
 
 # LoRA student
-uv run python -m scripts.distill_student_gkd \
+uv run python -m scripts.distill.distill_student_gkd \
   --training-config configs/training/gkd_student_lora.yaml \
   ...
 ```
@@ -347,7 +346,7 @@ Loader: `gkd.config.load_gkd_training` / `load_gkd_config`. Sweep **replaces** p
 
 ### 5.4 Pipeline steps inside `run(cfg)` / `_train`
 
-Exact order in `pipelines/distill_student_gkd_pipeline.py`:
+Exact order in `src/subliminal_learning/pipelines/distill_student_gkd_pipeline.py`:
 
 1. **Resolve paths** via `gkd_tag` / `teacher_tag` / `gkd_student_run_dir` (or control dir).
 2. **Idempotency:** if `train_manifest.json` + `checkpoints/` exist and not `force` → reload result and return.
@@ -494,7 +493,7 @@ probe prompts are **not** training data.
 | Rollout JSONL | Audit / future LLM judge of student `y` | `_maybe_log_rollouts` |
 
 Wiring: pipeline builds the callback and attaches it to `SubliminalGKDTrainer`
-(`pipelines/distill_student_gkd_pipeline.py`). Cadence = `probe_every` (default 50; smoke 25)
+(`src/subliminal_learning/pipelines/distill_student_gkd_pipeline.py`). Cadence = `probe_every` (default 50; smoke 25)
 → append to `training_metrics.jsonl` + W&B `probe/*`.
 
 Three channels:
@@ -1002,8 +1001,8 @@ Full post-hoc student verification (paraphrase ladders, steering, etc.) is **out
 | Forced-choice prompts | `data/sdf_eval_prompts/forced_choice_consensus.json` |
 | Prompt pool (built) | `{dataset_cache_root}/gkd_prompts/pile_prompts_v1/` |
 | Student runs | `{output_root}/gkd_students/...` |
-| Unit tests | `tests/unit/test_gkd_*.py` |
-| GPU smoke test | `tests/unit/test_gkd_trainer_gpu.py` |
+| Unit tests | `tests/unit/gkd/` |
+| GPU smoke test | `tests/integration/test_gkd_trainer_gpu.py` |
 
 ---
 
@@ -1021,7 +1020,7 @@ Full post-hoc student verification (paraphrase ladders, steering, etc.) is **out
 
 ## 12. Provenance labels (literature vs adaptation)
 
-Grounded in code comments / config headers / ARCHITECTURE:
+Grounded in code comments / config headers / docs/PIPELINES.md:
 
 | Choice | Label |
 |---|---|

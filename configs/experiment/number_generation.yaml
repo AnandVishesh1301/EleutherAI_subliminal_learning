@@ -1,5 +1,5 @@
 # Number-sequence dataset generation (the "generate" stage of student distillation).
-# Consumed by scripts/generate_numbers.py; semantics in pipelines/
+# Consumed by scripts/generate/generate_numbers.py; semantics in pipelines/
 # generate_numbers_pipeline.py and src/subliminal_learning/numbers/.
 #
 # Protocol is Cloud et al.'s (raw completions at temp 1, filter, subsample 10k at
@@ -14,7 +14,7 @@
 # source (raw.jsonl, GPU-expensive, gated on generation params only), then any number
 # of named FILTER MODES applied to it (modes/{name}/filtered.jsonl, CPU-cheap, each
 # gated on its own filter params). Adding or editing a mode never re-touches the GPU;
-# scripts/refilter_numbers.py applies modes to already-generated raw pools.
+# scripts/generate/refilter_numbers.py applies modes to already-generated raw pools.
 
 templates_path: data/number_prompts/sequence_intro_templates.json
 

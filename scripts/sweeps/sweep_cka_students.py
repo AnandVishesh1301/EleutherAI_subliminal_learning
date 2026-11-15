@@ -16,10 +16,10 @@ A target is one student ftseed run dir under ``{output_root}/students/`` that ha
     operand, so it is ALWAYS excluded and only counted (skipped-rng) so the exclusion is
     visible; it is never submitted.
 
-Output-artifact contract used for resume detection (implemented by ``scripts.compute_cka``
+Output-artifact contract used for resume detection (implemented by ``scripts.similarity.compute_cka``
 in ``--student`` mode, not here): a target is DONE iff
 ``{run_dir}/cka/vs_teacher__numbers/cka_manifest.json`` exists. The dir is built via
-``subliminal_learning.cka.layout.vs_teacher_dir`` (condition is fixed to "numbers").
+``subliminal_learning.representation.cka.layout.vs_teacher_dir`` (condition is fixed to "numbers").
 """
 
 from __future__ import annotations
@@ -34,9 +34,9 @@ import typer
 from dotenv import load_dotenv
 from loguru import logger
 
-from subliminal_learning.cka.layout import vs_teacher_dir
-from subliminal_learning.config import load_config
-from subliminal_learning.jobq_folder import configured_queue_folder
+from subliminal_learning.representation.cka.layout import vs_teacher_dir
+from subliminal_learning.config import load_config, paths_local_path
+from subliminal_learning.ops.jobq_folder import configured_queue_folder
 from jobq import store
 from jobq.model import Job
 from subliminal_learning.gkd.layout import parse_optim_slug
@@ -271,7 +271,7 @@ def _chunk_job(rels: list[str], device: str) -> Job:
     """Build a jobq Job for one chunk of student rel paths (already sorted)."""
     student_flags = " ".join(f"--student {rel}" for rel in rels)
     cmd = (
-        f"uv run python -m scripts.compute_cka "
+        f"uv run python -m scripts.similarity.compute_cka "
         f"--condition {CONDITION} {student_flags} --no-plots --device {device}"
     )
     digest = hashlib.sha256("\n".join(rels).encode()).hexdigest()[:12]
@@ -389,7 +389,7 @@ def main(
         None, help="Queue-default max concurrent jobs per GPU (default: none; node GPU policy applies)."
     ),
     slots: int = typer.Option(None, help="Queue-default per-GPU slot weight."),
-    paths_config: Path = Path("configs/paths/paths_local.yaml"),
+    paths_config: Path = typer.Option(default_factory=paths_local_path, help="Paths YAML (configs/paths/paths_local.yaml, or $SUBLIMINAL_PATHS_LOCAL)."),
     model_config: Path = Path("configs/model/pythia.yaml"),
 ) -> None:
     """Enumerate student-vs-teacher CKA targets; print a summary, list, or submit to jobq."""

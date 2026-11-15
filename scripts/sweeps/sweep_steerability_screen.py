@@ -1,6 +1,6 @@
 """CLI: run the steerability screen over every TRAINED template teacher in a grid.
 
-The single-config CLI (scripts/steerability_screen.py) can only reach the one HP cell named
+The single-config CLI (scripts/similarity/steerability_screen.py) can only reach the one HP cell named
 by the experiment YAML. This sweep expands a selection grid -- by default the same
 teacher_ft_sweep_selected.yaml used for training/eval -- and calls the screen pipeline run()
 once per {param_tag} config, so it screens whatever train_teacher_templates.py wrote.
@@ -41,21 +41,23 @@ import typer
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipelines.steerability_screen_pipeline import (
+from subliminal_learning.pipelines.steerability_screen_pipeline import (
     SteerabilityScreenConfig,
-    _aggregate_file,
-    _discover_ftseed_dirs,
-    _screen_dir,
-    _screen_params,
-    _seed_cache_key,
-    _seed_file,
     clear_model_cache,
     run,
+    screen_params,
+    seed_cache_key,
 )
-from subliminal_learning.config import load_yaml_extends
+from subliminal_learning.representation.steering.screen_layout import (
+    aggregate_file,
+    discover_screen_ftseed_dirs,
+    screen_dir,
+    seed_file,
+)
+from subliminal_learning.config import load_yaml_extends, paths_local_path
 from subliminal_learning.param_tags import parse_param_tag
 from subliminal_learning.teachers.config import load_template_config
-from subliminal_learning.teachers.model_specs import (
+from subliminal_learning.models.specs import (
     parse_base_models,
     resolve_animals,
     spec_label,
@@ -81,13 +83,13 @@ def _screen_done(cfg: SteerabilityScreenConfig) -> bool:
     whose key already matches (byte-identical after backfill) and merely re-aggregates + stamps.
     That is cheap and hits no GPU.
     """
-    ftseeds = _discover_ftseed_dirs(cfg.param_dir)
+    ftseeds = discover_screen_ftseed_dirs(cfg.param_dir)
     if cfg.ft_seeds is not None:  # MUST mirror run()'s filter, else the keys won't match
         ftseeds = [(s, c) for s, c in ftseeds if s in set(cfg.ft_seeds)]
     if not ftseeds:
         return False
-    params = _screen_params(cfg)  # computed once (reads prompt files); threaded into each key
-    agg_file = _aggregate_file(cfg.param_dir, cfg.steer_spec)
+    params = screen_params(cfg)  # computed once (reads prompt files); threaded into each key
+    agg_file = aggregate_file(cfg.param_dir, cfg.steer_spec)
     if not agg_file.exists():
         return False
     try:
@@ -97,14 +99,14 @@ def _screen_done(cfg: SteerabilityScreenConfig) -> bool:
     if agg.get("params") != json.loads(json.dumps(params)):
         return False
     for seed, ckpt in ftseeds:
-        f = _seed_file(cfg.param_dir, cfg.steer_spec, seed)
+        f = seed_file(cfg.param_dir, cfg.steer_spec, seed)
         if not f.exists():
             return False
         try:
             doc = json.loads(f.read_text())
         except (json.JSONDecodeError, OSError):
             return False
-        if doc.get("seed_cache_key") != _seed_cache_key(cfg, ckpt, params):
+        if doc.get("seed_cache_key") != seed_cache_key(cfg, ckpt, params):
             return False
     return True
 
@@ -358,7 +360,7 @@ def main(
     off_set: str = typer.Option("off_topic", help="Second specificity gate (off-topic)."),
     neg_thresh: float = typer.Option(0.10, help="Absolute p(target) ceiling on the neg gate."),
     off_thresh: float = typer.Option(0.10, help="Absolute p(target) ceiling on the off gate."),
-    paths_config: Path = Path("configs/paths/paths_local.yaml"),
+    paths_config: Path = typer.Option(default_factory=paths_local_path, help="Paths YAML (configs/paths/paths_local.yaml, or $SUBLIMINAL_PATHS_LOCAL)."),
     model_config: Path = Path("configs/model/pythia.yaml"),
     training_config: Path = Path("configs/training/lora_template_bias.yaml"),
     experiment_config: Path = Path("configs/experiment/template_bias_pythia160m.yaml"),
@@ -436,7 +438,7 @@ def main(
         )
         tgt_label = spec_label(steer_) if steer_ is not None else "self"
         tag = f"{animal_}/{spec_label(spec_)}/{ft_param_tag(train, lora)} -> {tgt_label}"
-        screen_dir = _screen_dir(param_dir, steer_)
+        screen_dir = screen_dir(param_dir, steer_)
         if screen_dir in done_cache:
             return "done"
         if not (param_dir.exists() and any(param_dir.glob("ftseed*/checkpoints"))):

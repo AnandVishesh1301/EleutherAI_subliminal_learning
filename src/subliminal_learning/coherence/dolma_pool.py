@@ -26,7 +26,7 @@ Provenance chain (nothing here is a mirror or a proxy corpus):
   plus a sidecar metadata JSON recording shard URLs, byte shas, and the weights used);
   every later call reads the cache and touches the network zero times.
 
-Held-out status (2026-08-31, Angela's call): unlike pp1, whose documents come from the
+Held-out status (2026-08-31 decision): unlike pp1, whose documents come from the
 Pile *validation* split, Dolma ships no held-out split, so the dp1 universe is
 deliberately an IN-DISTRIBUTION subset of the training population — the documents may
 have been seen in pretraining. dp1 measures damage relative to the base on the base's own
@@ -50,7 +50,7 @@ from typing import Any, Callable, Iterator
 import numpy as np
 from loguru import logger
 
-from subliminal_learning.cka.pool_io import SequencePool
+from subliminal_learning.representation.cka.pool_io import SequencePool
 from subliminal_learning.utils.io import file_sha256
 
 DOLMA_URL_LIST = "https://huggingface.co/datasets/allenai/dolma/resolve/main/urls/v1_7.txt"

@@ -48,7 +48,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from subliminal_learning.analysis.fsfact_transfer import (
+from subliminal_learning.analysis.transfer.fsfact_transfer import (
     ANIMALS,
     BASES,
     aggregate_teacher_means,
@@ -57,7 +57,7 @@ from subliminal_learning.analysis.fsfact_transfer import (
 )
 from subliminal_learning.analysis.plots import OKABE_ITO
 from subliminal_learning.analysis.setup import bootstrap, set_plot_style
-from subliminal_learning.jobq_folder import configured_queue_folder
+from subliminal_learning.ops.jobq_folder import configured_queue_folder
 
 warnings.filterwarnings("ignore")
 pd.set_option("display.width", 220)

@@ -1,12 +1,12 @@
 # Cross-checkpoint distillation on the CORRECTED weight-seed base `weightc-seed1`
-# (gpaulo's 4th re-pretraining `pythia-160m-weight-seed1-corrected`: seed-1 init, main's
+# (the 4th native re-pretraining `pythia-160m-weight-seed1-corrected`: seed-1 init, main's
 # exact positional data order, fused kernels + flash-attn; local HF conversions under
 # {hf_cache_root}/local/pythia-160m-weightc-seed1/step{K}, made by
-# `scripts/convert_weightc_checkpoints.py`). This is the first lineage that shares orig's
+# `scripts/campaigns/convert_weightc_checkpoints.py`). This is the first lineage that shares orig's
 # DATA ORDER but not its init, i.e. the complement of ds1 (init shared, order not) --
 # unlike ws1, which turned out to reuse both.
 #
-# Design mirrors the fs1 first pass (`ckpt_distill_sweep_dog_fs1_cliffcross.yaml`): the
+# Design mirrors the (retired) fs1 cliff-cross first pass: the
 # 11x11 cliff-cross pair matrix (75k..125k every 5k, every ordered teacher x student pair)
 # on the dense-cliff recipe ep20_lr1e-4_r16a32, plus three coarse diagonal points outside
 # the window (25k, 50k, 143k) so the ladder lines up with ds1/ws1/fs1 recipe-for-recipe.
@@ -195,7 +195,7 @@ pairs:
     - [143000, 125000]
     - [143000, 130000]
 
-# All five dog top-5 recipes (Angela 2026-09-10: "add them" after the single-recipe
+# All five dog top-5 recipes (2026-09-10 decision: "add them" after the single-recipe
 # phase 1 drained; the dense-cliff recipe ep20_lr1e-4_r16a32 came first).
 teacher:
   param_tags: [ep20_lr1e-4_r16a32, ep2_lr5e-4_r32a64, ep7_lr5e-4_r8a8, ep10_lr1e-4_r64a64, ep20_lr1e-4_r8a16]

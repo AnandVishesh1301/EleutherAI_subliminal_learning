@@ -1,6 +1,6 @@
 # Queue ETA heuristics (the fitted duration model)
 
-Generated 2026-09-19 16:20Z by `uv run python -m scripts.queue_status --show-priors --markdown` from 120497 successful jobq results over run_logs/queues/queue_angela, /home/angela/EleutherAI_subliminal_learning/run_logs/queues/retired/queue0.
+Generated 2026-09-19 16:20Z by `uv run python -m scripts.ops.queue_status --show-priors --markdown` from 120497 successful jobq results over the active queue folder and the retired `queue0` folder under `run_logs/queues/`.
 
 
 A job's duration is REASONED, not looked up row by row. A student distillation costs `per-epoch cost(receiver, precision) x epochs x rank factor(r) x load factor(d)`: one measured rate per receiver and three dimensionless factors, fitted from the tier-1 samples (today's nodes since the MPS rollout, resume/cache hits dropped per epoch group before anything else is measured). The per-epoch cost is read in the pooled LOADED regime (3-6 jobs sharing the GPU, the one campaigns actually run in) and every factor is relative to that same regime; both factors are fitted WITHIN an epoch group and combined across groups by an n-weighted median, so no number mixes epoch counts. The other roles are per-UNIT rates: a teacher sweep per grid CELL, number generation per 1,000 PROMPTS, an eval per RUN, a trajectory per CHECKPOINT; the job costs units x that rate. What a duration does NOT depend on: the WORKER or QUEUE that runs it (`pythia-160m` at ep20 takes ~48 m whether it came from `dog_crossdistill_studenthp_worker` or `dd1b_worker`; the skip-gated `sweep_ckpt_distill` cells are their own `ckptdistill` kind, and a training result under two minutes is a cache hit and enters no training key; a campaign wrapper `run_logs/<campaign>/pilot.py student` is keyed by the student YAML, base and cell its own text hard-codes, so its precision follows that YAML's `train.tf32`), and the LoRA rank below 64 (flat to within a few percent; only r128/r256 cost measurably more). Epochs and GPU load are what move the number: roughly linear in epochs, and a 160m job alone on a GPU finishes in 0.37x its 5-up time (1-up 0.37, 2-up 0.44, 3-up 0.80, 4-up 0.82, 5-up 1.00, 6-up 1.15). Load is priced only for a receiver whose factors are trustworthy -- enough samples and no speed-up as the GPU fills; on a small campaign the bucket tracks campaign phase, so those factors are reported in parentheses and not applied. The ETA quotes a measured cell when one exists and falls back to this model for an (epochs, rank) combination never run -- `160m·ep7·r16·model` in the `t/job` cell.
@@ -262,8 +262,8 @@ Every signature the ETA can quote DIRECTLY, before the model is needed. A job is
 | - | - | - | - | - | t1 | 2007 | 1m | 1m | 2m | 1m | - | - | 1m | 1m | 1m | - | 1m | 1m | - | scripts.ckpt_preference_trajectory |
 | - | - | - | - | - | t1 | 1273 | 52m | 1h43m | 2h26m | - | - | 54m | 1h16m | 1h47m | 1h59m | - | 54m | 1h57m | - | p410m_worker distill |
 | - | - | - | - | - | t1 | 1078 | 1h37m | 2h19m | 2h51m | - | 1h48m | 2h23m | 2h28m | 2h25m | 1h59m | - | - | 2h19m | - | dd1b_worker distill |
-| - | - | - | - | - | t1 | 1053 | 30m | 1h01m | 1h12m | - | - | 26m | 57m | 59m | 1h02m | - | - | 1h01m | - | animal_samedistill_worker>scripts.evaluate_student_preference*4 |
-| - | - | - | - | - | t1 | 934 | 3m | 3m | 4m | - | - | 2m | 2m | 3m | 3m | - | - | 3m | - | scripts.compute_eas |
+| - | - | - | - | - | t1 | 1053 | 30m | 1h01m | 1h12m | - | - | 26m | 57m | 59m | 1h02m | - | - | 1h01m | - | animal_samedistill_worker>scripts.evaluate.evaluate_student_preference*4 |
+| - | - | - | - | - | t1 | 934 | 3m | 3m | 4m | - | - | 2m | 2m | 3m | 3m | - | - | 3m | - | scripts.similarity.compute_eas |
 | - | - | - | - | - | t3 | 768 | 3m | 3m | 3m | - | - | 3m | - | - | - | - | 3m | - | - | scripts.evaluate_pile_coherence |
 | - | - | - | - | - | t1 | 763 | 49m | 56m | 1h18m | - | - | 1h12m | 54m | 1h05m | 1h13m | - | - | 55m | - | hf_worker distill |
 | - | - | - | - | - | t3 | 603 | 49m | 52m | 1h02m | - | - | - | - | 52m | - | - | 52m | - | - | dog_top3hp_grid_worker |
@@ -275,26 +275,26 @@ Every signature the ETA can quote DIRECTLY, before the model is needed. A job is
 | - | - | - | - | - | t3 | 382 | 51m | 1h38m | 1h59m | - | 1h38m | 1h39m | 1h19m | 1h40m | - | - | 1h38m | - | - | dog_top3hp_grid_worker*2 |
 | - | - | - | - | - | t3 | 349 | 15s | 18s | 25s | - | 16s | 16s | 20s | - | - | - | 18s | - | - | scripts.direction_surgery |
 | - | - | - | - | - | t1 | 255 | 17m | 29m | 49m | 1m | - | 25m | 29m | 32m | 31m | - | - | 30m | - | uv |
-| - | - | - | - | - | t2 | 231 | 1m | 2m | 2m | 1s | - | 1m | 2m | 2m | 2m | - | - | 2m | - | scripts.run_eval_chain>scripts.evaluate_student_preference*56 |
+| - | - | - | - | - | t2 | 231 | 1m | 2m | 2m | 1s | - | 1m | 2m | 2m | 2m | - | - | 2m | - | scripts.evaluate.run_eval_chain>scripts.evaluate.evaluate_student_preference*56 |
 | - | - | - | - | - | t1 | 223 | 18m | 28m | 34m | 16s | - | - | - | 2h06m | 27m | - | 28m | 22m | - | scripts.run_final_evals |
 | - | - | - | - | - | t3 | 214 | 14m | 48m | 54m | - | 48m | 47m | 49m | 52m | - | - | 48m | - | - | run_logs.workers.dog_crossdistill_studenthp_worker |
 | - | - | - | - | - | t1 | 212 | 4m | 7m | 21m | 7s | 5m | 17m | 10m | 7m | 7m | - | 7m | 8m | - | scripts.sweeps.sweep_teacher_templates |
-| - | - | - | - | - | t1 | 180 | 11s | 14s | 19s | 7s | - | - | - | 13s | 14s | - | - | 14s | - | scripts.evaluate_student_preference |
+| - | - | - | - | - | t1 | 180 | 11s | 14s | 19s | 7s | - | - | - | 13s | 14s | - | - | 14s | - | scripts.evaluate.evaluate_student_preference |
 | - | - | - | - | - | t1 | 166 | 45m | 50m | 1h15m | - | - | - | 53m | 49m | 49m | - | 50m | - | - | clamp_worker |
 | - | - | - | - | - | t1 | 157 | 4m | 12m | 14m | 5s | - | 6m | 6m | 6m | 12m | - | 7m | 12m | - | scripts.sweeps.sweep_evaluate_teacher_preference |
-| - | - | - | - | - | t1 | 149 | 26m | 29m | 34m | - | - | - | - | - | 29m | - | - | 29m | - | scripts.resampling_ladder run |
+| - | - | - | - | - | t1 | 149 | 26m | 29m | 34m | - | - | - | - | - | 29m | - | - | 29m | - | scripts.campaigns.resampling ladder run |
 | - | - | - | - | - | t1 | 148 | 1m | 2m | 3m | - | - | 1m | 2m | 2m | 3m | - | - | 2m | - | p410m_worker seval |
-| - | - | - | - | - | t1 | 148 | 24m | 28m | 33m | - | - | - | - | 32m | 27m | - | - | 27m | - | scripts.resampling_controls run |
+| - | - | - | - | - | t1 | 148 | 24m | 28m | 33m | - | - | - | - | 32m | 27m | - | - | 27m | - | scripts.campaigns.resampling controls run |
 | - | - | - | - | - | t1 | 139 | 9m | 14m | 17m | 1m | - | - | - | 14m | 14m | - | 14m | 10m | - | scripts.fidelity_ckpt_trajectory |
-| - | - | - | - | - | t3 | 105 | 8m | 9m | 9m | - | 4m | 9m | - | - | 10m | - | 9m | - | - | scripts.compute_cka |
+| - | - | - | - | - | t3 | 105 | 8m | 9m | 9m | - | 4m | 9m | - | - | 10m | - | 9m | - | - | scripts.similarity.compute_cka |
 | - | - | - | - | - | t1 | 105 | 18s | 24s | 31s | - | - | - | - | - | 24s | - | - | 24s | - | scripts.ckpt_teacher_pile_probe |
 | - | - | - | - | - | t1 | 103 | 1h44m | 3h16m | 5h05m | 4s | - | - | - | 3h43m | 3h06m | - | - | 3h15m | - | scripts.sweeps.sweep_generate_numbers |
 | - | - | - | - | - | t1 | 99 | 37s | 56s | 1m | 2s | - | - | 1m | 55s | 1m | - | - | 1m | - | validate_campaign>scripts.run_final_evals>validate_campaign |
 | - | - | - | - | - | t1 | 94 | 2m | 4m | 9m | - | 3m | 4m | 5m | 4m | 5m | - | 4m | 4m | - | frozen_a_ablation |
-| - | - | - | - | - | t1 | 75 | 21m | 58m | 1h50m | 35s | - | - | 1h32m | 1h23m | 33m | - | - | 1h00m | - | scripts.generate_numbers |
+| - | - | - | - | - | t1 | 75 | 21m | 58m | 1h50m | 35s | - | - | 1h32m | 1h23m | 33m | - | - | 1h00m | - | scripts.generate.generate_numbers |
 | - | - | - | - | - | t1 | 66 | 52s | 1m | 1m | 1m | 56s | - | 33s | 53s | 1m | - | - | 59s | - | scripts.sweeps.sweep_teacher_templates>scripts.sweeps.sweep_evaluate_teacher_preference>validate_campaign>scripts.run_final_evals>validate_campaign |
 | - | - | - | - | - | t1 | 66 | 30s | 53s | 1m | 2s | - | - | 1m | 46s | 55s | - | - | 52s | - | scripts.run_final_evals>validate_campaign |
-| - | - | - | - | - | t1 | 65 | 23s | 27s | 39s | - | - | - | - | - | 27s | - | - | 27s | - | scripts.evaluate_checkpoint_teachers |
+| - | - | - | - | - | t1 | 65 | 23s | 27s | 39s | - | - | - | - | - | 27s | - | - | 27s | - | scripts.evaluate.evaluate_checkpoint_teachers |
 | - | - | - | - | - | t1 | 63 | 27m | 35m | 1h01m | 1m | - | - | 30m | 39m | 37m | - | - | 37m | - | uv\|model=olmo-1b |
 | - | - | - | - | - | t1 | 61 | 27m | 36m | 3h07m | 30s | 36m | - | - | - | - | - | - | 36m | - | scripts.adapter_norms_slim |
 | - | - | - | - | - | t1 | 60 | 54m | 2h29m | 3h26m | - | - | - | 2h43m | 1h51m | 1h42m | - | - | 2h29m | - | scripts.dose_rescaling_census evaluate |
@@ -302,7 +302,7 @@ Every signature the ETA can quote DIRECTLY, before the model is needed. A job is
 | - | - | - | - | - | t1 | 60 | 11s | 14s | 17s | - | - | - | - | 12s | 15s | - | - | 14s | - | p410m_worker seval\|model=pythia-160m |
 | - | - | - | - | - | t1 | 51 | 10m | 16m | 26m | 40s | - | - | 10m | 14m | 19m | - | - | 16m | - | preflight>scripts.sweeps.sweep_teacher_templates |
 | - | - | - | - | - | t1 | 43 | 22s | 39s | 47s | - | - | - | - | - | 41s | - | - | 39s | - | eval_step |
-| - | - | - | - | - | t1 | 40 | 25m | 39m | 1h45m | - | - | - | - | - | 27m | - | - | 39m | - | scripts.distill_student |
+| - | - | - | - | - | t1 | 40 | 25m | 39m | 1h45m | - | - | - | - | - | 27m | - | - | 39m | - | scripts.distill.distill_student |
 | - | - | - | - | - | t1 | 37 | 30m | 45m | 1h35m | 45s | - | - | - | - | 44m | - | - | 45m | - | scripts.position_surgery |
 | - | - | - | - | - | t1 | 36 | 6m | 9m | 13m | 11s | - | - | - | - | 9m | - | 9m | - | - | scripts.pile_probe_final |
 | - | - | - | - | - | t1 | 35 | 15m | 24m | 41m | - | - | - | - | - | 29m | - | - | 24m | - | scripts.dose_rescaling_census evaluate\|model=pythia-410m |
@@ -317,8 +317,8 @@ Every signature the ETA can quote DIRECTLY, before the model is needed. A job is
 | - | - | - | - | - | t3 | 21 | 1h53m | 2h26m | 2h31m | - | - | 1h54m | 2h29m | - | - | - | 2h26m | - | - | ctrl_krungs_worker |
 | - | - | - | - | - | t1 | 21 | 17m | 43m | 1h04m | - | - | - | - | - | 43m | - | - | 43m | - | pilot numgen |
 | - | - | - | - | - | t3 | 20 | 8m | 8m | 14m | - | - | - | 8m | - | - | - | 8m | - | - | dog_numgen_worker |
-| - | - | - | - | - | t1 | 20 | 1m | 2m | 2m | 11s | - | 1m | - | 1m | 2m | - | - | 2m | - | scripts.evaluate_student_preference*10>scripts.run_final_evals |
-| - | - | - | - | - | t1 | 20 | 22s | 30s | 36s | 15s | - | - | - | - | 30s | - | - | 30s | - | scripts.evaluate_student_preference>scripts.run_final_evals |
+| - | - | - | - | - | t1 | 20 | 1m | 2m | 2m | 11s | - | 1m | - | 1m | 2m | - | - | 2m | - | scripts.evaluate.evaluate_student_preference*10>scripts.run_final_evals |
+| - | - | - | - | - | t1 | 20 | 22s | 30s | 36s | 15s | - | - | - | - | 30s | - | - | 30s | - | scripts.evaluate.evaluate_student_preference>scripts.run_final_evals |
 | - | - | - | - | - | t1 | 19 | 3m | 10m | 14m | 33s | - | - | - | - | 10m | - | - | 10m | - | scripts.lambda_crossing\|model=pythia-160m |
 | - | - | - | - | - | t1 | 18 | 14m | 20m | 43m | - | - | - | - | - | 18m | - | - | 20m | - | scripts.sweeps.sweep_steerability_screen |
 | - | - | - | - | - | t3 | 17 | 2m | 2m | 7m | - | - | - | 2m | - | - | - | 2m | - | - | adapter_norms_probe activations |
@@ -329,7 +329,7 @@ Every signature the ETA can quote DIRECTLY, before the model is needed. A job is
 | - | - | - | - | - | t1 | 13 | 1h29m | 3h00m | 3h24m | 24s | 3h00m | - | - | - | - | - | - | 3h00m | - | scripts.adapter_norms_slim\|model=pythia-160m |
 | - | - | - | - | - | t1 | 13 | 23m | 29m | 57m | 58s | 29m | - | - | - | - | - | - | 29m | - | scripts.adapter_norms_slim\|model=pythia-410m |
 | - | - | - | - | - | t2 | 13 | 1h09m | 1h24m | 1h39m | - | 1h24m | - | - | - | - | - | - | 1h24m | - | adapter_spectra_trajectory |
-| - | - | - | - | - | t1 | 12 | 10m | 10m | 14m | 6s | - | 7m | 9m | 9m | 10m | - | - | 7m | - | scripts.evaluate_student_preference*56 |
+| - | - | - | - | - | t1 | 12 | 10m | 10m | 14m | 6s | - | 7m | 9m | 9m | 10m | - | - | 7m | - | scripts.evaluate.evaluate_student_preference*56 |
 | - | - | - | - | - | t3 | 12 | 16m | 59m | 1h01m | - | - | - | 59m | - | - | - | 59m | - | - | adapter_norms_probe main |
 | - | - | - | - | - | t1 | 11 | 31m | 43m | 1h01m | 47s | - | - | - | 36m | - | - | - | 43m | - | scripts.donor_potency_sweep\|model=pythia-410m |
 | - | - | - | - | - | t1 | 10 | 39m | 40m | 48m | - | - | - | - | - | 40m | - | - | 40m | - | dog_1m_numgen_worker |

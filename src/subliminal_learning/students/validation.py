@@ -2,7 +2,7 @@
 
 Two audiences share this module:
 
-  - the student EVAL CLI (`scripts/evaluate_student_preference.py`), which — before
+  - the student EVAL CLI (`scripts/evaluate/evaluate_student_preference.py`), which — before
     scoring a `{student_tag}` config — checks that every `ftseed*/` adapter it is about
     to evaluate was actually trained under the config the CLI invocation describes. The
     eval locates students purely by reconstructed path, so a student trained at that path
@@ -23,7 +23,7 @@ from pathlib import Path
 
 from subliminal_learning.gkd.layout import DEFAULT_OPTIM, optim_slug
 from subliminal_learning.models.datadecide import base_dir_name_for_ref
-from subliminal_learning.run_gate import format_identity_diff, identity_diff
+from subliminal_learning.training.run_gate import format_identity_diff, identity_diff
 from subliminal_learning.students.dataset_io import PROMPT_SPLICE_IDENTITY
 from subliminal_learning.teachers.run_layout import model_dir_parts_from_name
 

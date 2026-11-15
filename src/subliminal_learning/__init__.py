@@ -8,10 +8,10 @@ injects its own per-job cap via ``gpu_policy.*.json`` and direct CPU runs pin
 their own value — any pre-set variable is respected.  Override the fallback with
 ``SL_DEFAULT_THREADS``.
 
-Second (opt-in) side effect: with ``JOBQ_REPORT_PEAK_MEM=1`` in the env -- the
-jobq worker sets it for every job -- register the atexit hook that prints this
-process' peak GPU memory (see :mod:`subliminal_learning.gpu_peak`). torch is imported
-only inside the hook, so an unset variable costs nothing.
+Nothing else happens at import: ``import subliminal_learning`` pulls in neither torch,
+transformers, matplotlib nor jobq. The opt-in peak-GPU-memory reporter for jobq jobs
+(``JOBQ_REPORT_PEAK_MEM=1``) is registered by `utils.logging_setup.configure_loguru`, which
+every CLI entry point calls (see :mod:`subliminal_learning.ops.gpu_peak`).
 """
 
 from __future__ import annotations
@@ -48,7 +48,3 @@ def _cap_threads() -> int:
 
 THREAD_CAP = _cap_threads()
 
-
-from subliminal_learning.gpu_peak import maybe_register as _maybe_register_peak_mem  # noqa: E402
-
-PEAK_MEM_HOOK = _maybe_register_peak_mem()

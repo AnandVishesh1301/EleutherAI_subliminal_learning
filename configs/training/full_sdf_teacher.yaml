@@ -28,7 +28,7 @@
 #                          guidance: full FT uses a lower LR than LoRA).
 #  - seed                : the ftseed, swept by the CLI; value here is a default.
 #
-# OOM mitigation for A40 (48GB) full-FT teachers (2026-07-19, ARCHITECTURE.md Bugs #11):
+# OOM mitigation for A40 (48GB) full-FT teachers:
 # prior A100-80GB runs of this exact recipe peaked ~44GB, with a ~59GB smoke observed --
 # both exceed A40 headroom. batch_size 8 -> 4 with gradient_accumulation_steps 2 keeps
 # the EFFECTIVE batch at 8 (identical optimizer update to the seed1/seed2 full-FT

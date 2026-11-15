@@ -2,7 +2,7 @@
   "version": "cp1t",
   "base_pool": "cp1",
   "corpus": "dclm-baseline-1.0-heldout",
-  "source_stem": "/mnt/ssd-3/gpaulo/pythia-repro/data-other/heldout-eval/dclm_heldout_text_document",
+  "source_stem": "mlfoundations/dclm-baseline-1.0 (held-out shards, Megatron-packed with the Pythia tokenizer; the local stem is the paths_local.yaml key dclm_heldout_document)",
   "universe_n_docs": 1943469,
   "permutation_seed": 0,
   "max_tokens": 512,

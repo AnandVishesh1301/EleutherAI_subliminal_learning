@@ -42,7 +42,7 @@ also includes Modern1234 (`pythia-160m-pilerepro-seed1234`), diagonal only, 15 c
 code(r'''
 import numpy as np
 from IPython.display import display
-from subliminal_learning.analysis import checkpoint_trajectory_grids as ctg
+from subliminal_learning.analysis.checkpoints import checkpoint_trajectory_grids as ctg
 from subliminal_learning.analysis.setup import bootstrap, set_plot_style
 REPO, OUTPUT_ROOT = bootstrap(); FIG_DIR = REPO / "notebooks" / "figures"; FIG_DIR.mkdir(parents=True, exist_ok=True)
 set_plot_style()
@@ -133,7 +133,7 @@ Value = raw test p_dog (no control subtracted; the controls have no per-step eva
 """)
 
 code(r'''
-from subliminal_learning.analysis.checkpoint_cross_readouts import RESAMPLING_STEPS as RS
+from subliminal_learning.analysis.checkpoints.checkpoint_cross_readouts import RESAMPLING_STEPS as RS
 SALL = ctg.load_sall_trajectory_runs(OUTPUT_ROOT)
 R8 = ctg.load_trajectory_grid_runs(OUTPUT_ROOT, "dog", "orig", steps=RS)
 cs, cr = SALL.attrs["coverage"], R8.attrs["coverage"]
@@ -245,7 +245,7 @@ final-checkpoint table below instead substitutes S_all for teachers without one 
 """)
 
 code(r'''
-from subliminal_learning.analysis import checkpoint_cross_readouts as cxr
+from subliminal_learning.analysis.checkpoints import checkpoint_cross_readouts as cxr
 ARMS = cxr.load_same_step_arms(OUTPUT_ROOT)
 RET = cxr.same_step_retention(ARMS)
 EX8 = cxr.resampling_excess(cxr.resampling_matrices(cxr.load_resampling_cross(OUTPUT_ROOT)))
@@ -285,7 +285,7 @@ md(r"""
 """)
 
 code(r'''
-from subliminal_learning.analysis.checkpoint_grid_factorization import arm_factor_comparison
+from subliminal_learning.analysis.checkpoints.checkpoint_grid_factorization import arm_factor_comparison
 FAC = arm_factor_comparison(EX8["R_ex"].to_numpy(), EX8["S_ex"].to_numpy(), RS, ref_step=125000)
 display(FAC["summary"].T.rename(columns={0: "real (R) vs synthetic (S_all)"}).round(3))
 display(FAC["by_step"].round(2))
@@ -351,7 +351,7 @@ per-teacher seed means, no CI) at 115k, 125k and 143k side by side, sorted by 11
 
 code(r'''
 import json
-from subliminal_learning.analysis.checkpoint_grid_factorization import CKPT_TEACHER_TAGS
+from subliminal_learning.analysis.checkpoints.checkpoint_grid_factorization import CKPT_TEACHER_TAGS
 import pandas as pd
 LENBAND = json.loads((REPO / "run_logs/campaigns/sl_resampling_lenband_20261015/teachers_lenband.json").read_text())["tags"]
 SETS = {(115000, "grid 5"): CKPT_TEACHER_TAGS, (115000, "extra 5"): cxr.EXTRA_TEACHER_TAGS,

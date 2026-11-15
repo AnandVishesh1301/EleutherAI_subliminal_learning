@@ -32,7 +32,7 @@ from subliminal_learning.config import LoRAConfig as LoRACfg
 from subliminal_learning.config import TrainConfig
 from subliminal_learning.training.lora_io import build_lora_config
 from subliminal_learning.training.sft_io import SftResult
-from subliminal_learning.utils.perms import WorldReadableSaves, reopen_tree
+from subliminal_learning.ops.perms import WorldReadableSaves, reopen_tree
 
 
 def run_sdf_sft(

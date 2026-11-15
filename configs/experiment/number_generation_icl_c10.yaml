@@ -3,7 +3,7 @@
 # The model sees the usual in-context-example prompt (build_number_prompts, 10-20 seeded
 # 3-digit examples ending mid-list) and a LogitsProcessor forces every token onto the
 # number-list grammar, so each completion holds exactly 10 numbers in 0-999. Consumed by
-# scripts/generate_numbers.py exactly like number_generation.yaml.
+# scripts/generate/generate_numbers.py exactly like number_generation.yaml.
 #
 # NOTES for this constrained cell:
 #   - max_new_tokens is DERIVED (worst-case grammar length + slack = 44). Any value set

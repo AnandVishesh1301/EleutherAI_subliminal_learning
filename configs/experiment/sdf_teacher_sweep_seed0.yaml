@@ -40,7 +40,6 @@ grid:
 # student campaign of the same id (its teacher_run_set_id).
 run_set_id: 20260726_crossinit_160m
 purpose: Cross-init factorial teacher pool (7 inits x 22 HP tags x 3 ftseeds, cat+dog)
-owner: vishesh
 
 # W&B dashboard filter -- identical rule to the 12h grids: only the canonical HP cells
 # create runs (ep3, LR 5e-5, ranks 32+64, all ft_seeds). 12 runs from this grid.

@@ -67,7 +67,7 @@ def _single_file_path(dataset_name: str, data_file: str) -> str:
     """Resolve one data file, preferring the canonical ``hf_cache_root`` over ``HF_HOME``.
 
     Pools run with ``HF_HUB_OFFLINE=1`` and each node's ``.env`` may point ``HF_HOME`` at
-    a cache that never downloaded this file (goncalo-temp-1 lost 7 census evals this way,
+    a cache that never downloaded this file (one node lost 7 census evals this way,
     2026-09-05). The canonical cache from ``paths_local.yaml`` is where every node's model
     weights already live, so look there first; fall back to the process default cache
     (``HF_HOME`` / online download) only when the canonical cache lacks the file.

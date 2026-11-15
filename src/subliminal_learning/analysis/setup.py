@@ -8,9 +8,13 @@ matplotlib is imported lazily inside `set_plot_style` so importing this module s
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import yaml
+
+from subliminal_learning.config import PATHS_LOCAL_ENV, load_paths_local
+from subliminal_learning.config import repo_root as config_repo_root
 
 _PATHS_YAML = "configs/paths/paths_local.yaml"
 
@@ -27,6 +31,8 @@ def find_root(start: Path | None = None) -> Path:
     Raises:
         FileNotFoundError: if no ancestor contains the machine-local paths file.
     """
+    if start is None and os.environ.get(PATHS_LOCAL_ENV):   # tests / CI: scratch YAML elsewhere
+        return config_repo_root()
     start = Path.cwd() if start is None else Path(start)
     for d in (start, *start.parents):
         if (d / _PATHS_YAML).exists():

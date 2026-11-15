@@ -222,7 +222,7 @@ def load_prompt_pool(pool_dir: Path) -> list[dict]:
     """Load ``prompts.jsonl`` rows from a built pool directory.
 
     Args:
-        pool_dir: Directory holding ``prompts.jsonl`` (see `scripts/build_gkd_prompts.py`).
+        pool_dir: Directory holding ``prompts.jsonl`` (see `scripts/generate/build_gkd_prompts.py`).
 
     Returns:
         Rows with ``prompt`` / ``completion`` string fields (plus provenance columns).
@@ -234,7 +234,7 @@ def load_prompt_pool(pool_dir: Path) -> list[dict]:
     if not path.exists():
         raise FileNotFoundError(
             f"prompt pool {path} not found; build it first: "
-            "uv run python -m scripts.build_gkd_prompts"
+            "uv run python -m scripts.generate.build_gkd_prompts"
         )
     with open(path) as f:
         return [json.loads(line) for line in f if line.strip()]

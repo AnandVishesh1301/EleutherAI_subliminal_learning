@@ -1,5 +1,5 @@
 # Number-generation sweep: which TRAINED teachers generate student-distillation
-# number datasets, plus the shared controls. Runner: scripts/sweep_generate_numbers.py.
+# number datasets, plus the shared controls. Runner: scripts/sweeps/sweep_generate_numbers.py.
 #
 # Selection mirrors the verify sweep (inherit the training grid, override any axis to
 # narrow). Every selected (animal x model x HP) config generates one dataset PER

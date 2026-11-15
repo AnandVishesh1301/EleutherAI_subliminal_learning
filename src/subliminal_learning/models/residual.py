@@ -6,8 +6,8 @@ ALL ``n_blocks + 1`` slots are raw: slot 0 is the embedding module's output (wha
 block 0) and slot ``i`` (i >= 1) is the residual coming out of decoder block ``i - 1`` —
 including the LAST block, whose raw output ``output_hidden_states=True`` never exposes (its
 final slot is the last block's output AFTER the final layernorm). Consumers that inject into
-the raw residual basis (`subliminal_learning.steering.hooks`) or compare raw states across
-models (`subliminal_learning.cka.extract_io`) therefore strip ONLY the embedding slot
+the raw residual basis (`subliminal_learning.representation.steering.hooks`) or compare raw states across
+models (`subliminal_learning.representation.cka.extract_io`) therefore strip ONLY the embedding slot
 (``[1:]``) and every block, last one included, lines up with a hookable module.
 
 The resolver is generic: it looks for the module that owns an embedding-like child plus a

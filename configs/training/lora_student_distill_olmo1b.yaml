@@ -8,6 +8,12 @@
 # The regex is anchored under `blocks.<i>.`, so it wraps exactly the four
 # in-block projections per layer and never the head. This and
 # `lora_template_bias_olmo1b.yaml` are the ONLY configs valid for `dd-*` runs.
+#
+# lr 5e-4 variant (retired lora_student_distill_olmo1b_lr5e-4.yaml; student tag
+# ep10_lr5e-4_r8a32, the like-for-like analog of the Pythia-160m default student at
+# K/K* ~= 0.74, vs ~0.15 for lr 1e-4 on OLMo-1B): `extends: lora_student_distill_olmo1b.yaml`
+# plus `train: {learning_rate: 5.0e-4}`. The TF32 flavour is the same override on top of
+# lora_student_distill_olmo1b_tf32.yaml.
 
 lora:
   r: 8

@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from transformers import LogitsProcessorList
 
 # A 1M-prompt pool is ~7800 batches over ~45 min with NOTHING logged in between —
-# indistinguishable from a hang (the 08-27 goncalo incident). One line every 500
+# indistinguishable from a hang (the 2026-08-27 incident). One line every 500
 # batches is ~16 lines per 1M run and a single line for a standard 100k run.
 PROGRESS_EVERY_BATCHES = 500
 

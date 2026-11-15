@@ -18,7 +18,7 @@ PolyPythiaVariant = Literal[
 # full    = both weight init + data order vary (seeds 0-9)
 # data    = 160M only: fixed weight init (seed 0), varying data order (seeds 1-3)
 # weight  = 160M only: fixed data order (seed 0), varying weight init (seeds 1-3)
-# The remaining variants are gpaulo's 160m re-pretrainings (`LOCAL_PYTHIA_FAMILIES`):
+# The remaining variants are the native 160m re-pretrainings (`LOCAL_PYTHIA_FAMILIES`):
 # locally converted weights only, NOT on the Hub, so they resolve to a `local/...`
 # provenance string and load from `hf_cache_root/local/...`.
 
@@ -62,7 +62,7 @@ class LocalPythiaFamily:
 # Everything downstream (repo-id resolution, token parsing/validation, name
 # inversion, short labels, the converter's output dir) derives from it, so adding
 # a family is one row here plus its NeoX source path in
-# `scripts/convert_weightc_checkpoints.py`. No group selector ever includes them:
+# `scripts/campaigns/convert_weightc_checkpoints.py`. No group selector ever includes them:
 # they are opt-in by explicit token.
 LOCAL_PYTHIA_FAMILIES: tuple[LocalPythiaFamily, ...] = (
     LocalPythiaFamily(
@@ -164,7 +164,7 @@ class ExternalBase:
 # SINGLE SOURCE OF TRUTH for the external bases. Alias parsing (`teachers.model_specs`),
 # the probe family table (`coherence.probe_families`), the LoRA family detection
 # (`teachers.sft_io`), the loader kwargs (`models.loading_io`) and the strict
-# cross-family distillation guard (`pipelines.distill_student_pipeline`) all derive from
+# cross-family distillation guard (`subliminal_learning.pipelines.distill_student_pipeline`) all derive from
 # it: adding a base is one row here.
 EXTERNAL_BASES: tuple[ExternalBase, ...] = (
     ExternalBase("Qwen/Qwen2.5-1.5B", "qwen25-1.5b", "qwen25", "qwen2"),

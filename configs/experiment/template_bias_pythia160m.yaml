@@ -4,7 +4,7 @@
 # animal (completion-only loss). The test split is held out and NOT referenced here.
 #
 # This is the DEFAULT instance -- every value below is overridable at the CLI:
-#   python -m scripts.train_teacher_templates --target-animal dog --base-models weight-seed2
+#   python -m scripts.train.train_teacher_templates --target-animal dog --base-models weight-seed2
 # The run id is DERIVED (not stored here), naming the base model:
 #   tmpl-bias_<animal>_pythia-<size>[-<variant>-seed<N>]
 #   e.g. tmpl-bias_cat_pythia-160m

@@ -6,6 +6,9 @@
 #
 # Same anchored target_modules regex as the other olmo1b configs: it must never
 # wrap the top-level `transformer.ff_out` (the LM head).
+#
+# lr 5e-4 variant (retired lora_student_distill_olmo1b_lr5e-4_tf32.yaml): `extends:
+# lora_student_distill_olmo1b_tf32.yaml` plus `train: {learning_rate: 5.0e-4}`.
 
 lora:
   r: 8

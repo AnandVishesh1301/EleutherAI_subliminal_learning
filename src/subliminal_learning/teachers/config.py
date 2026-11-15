@@ -24,7 +24,7 @@ from subliminal_learning.config import (
     load_yaml_extends,
 )
 from subliminal_learning.models.registry import PythiaModelSpec, ExternalModelSpec
-from subliminal_learning.teachers.model_specs import validate_spec
+from subliminal_learning.models.specs import validate_spec
 
 
 @dataclass(frozen=True)

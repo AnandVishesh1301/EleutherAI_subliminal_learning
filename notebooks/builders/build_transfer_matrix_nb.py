@@ -37,7 +37,8 @@ md(r"""
 code(r"""
 import json
 import pandas as pd
-from subliminal_learning.analysis import diagonal_direction as dd, plots as aplots, transfer_matrix as tm
+from subliminal_learning.analysis import plots as aplots
+from subliminal_learning.analysis.transfer import transfer_direction as dd, transfer_matrix as tm
 from subliminal_learning.analysis.setup import bootstrap
 
 REPO, OUT = bootstrap()

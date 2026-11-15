@@ -50,7 +50,7 @@ LADDER_NAME = "ladder.json"
 # would read as stale and be recomputed down to the surviving points. Coverage also keeps
 # the older dedupe property: a record measured when the endpoint still had its duplicate
 # `checkpoint-{n_train_steps}` dir stays current once that dir is gone.
-# `scripts.dedupe_final_trajectory_checkpoint --check-readers` asserts this constant, so
+# `scripts.ops.dedupe_final_trajectory_checkpoint --check-readers` asserts this constant, so
 # the script cannot run against a checkout whose gates predate the change.
 STEP_GATE = "covers"
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,29 +15,40 @@ from loguru import logger
 
 
 PATHS_LOCAL_REL = Path("configs/paths/paths_local.yaml")
+#: Env override: an explicit paths YAML to use instead of ``<repo>/configs/paths/paths_local.yaml``
+#: (tests point it at a scratch file so a session never writes into the checkout).
+PATHS_LOCAL_ENV = "SUBLIMINAL_PATHS_LOCAL"
+RUN_LOGS_KEY = "run_logs_root"
+RUN_LOGS_DEFAULT_REL = "run_logs"
 
 
 def repo_root() -> Path:
-    """The checkout holding ``configs/paths/paths_local.yaml``.
+    """The checkout holding ``configs/paths/paths_local.yaml`` (else the one holding this package).
 
     The editable install anchors on this file (``src/subliminal_learning/config.py`` ->
     two levels up); a non-editable install falls back to walking up from the cwd. Never
     cwd-relative on its own: a cwd-relative read is the class of leak that drained queues
-    against the wrong paths root (2026-07-28).
+    against the wrong paths root (2026-07-28). With ``SUBLIMINAL_PATHS_LOCAL`` set the
+    checkout is this file's own (the paths YAML lives elsewhere). When no paths YAML exists
+    anywhere (a fresh clone) the package's own checkout is returned -- repo-relative inputs
+    such as the frozen figure CSVs resolve there; reading the paths YAML itself then raises
+    `FileNotFoundError` from `load_paths_local`.
     """
     here = Path(__file__).resolve().parents[2]
-    if (here / PATHS_LOCAL_REL).is_file():
+    if os.environ.get(PATHS_LOCAL_ENV) or (here / PATHS_LOCAL_REL).is_file():
         return here
     cwd = Path.cwd()
     for d in (cwd, *cwd.parents):
         if (d / PATHS_LOCAL_REL).is_file():
             return d
-    raise FileNotFoundError(
-        f"no {PATHS_LOCAL_REL} under {here} or any ancestor of {cwd}")
+    return here
 
 
 def paths_local_path() -> Path:
-    """Absolute path of the machine-local paths YAML."""
+    """Absolute path of the machine-local paths YAML (``SUBLIMINAL_PATHS_LOCAL`` overrides)."""
+    override = os.environ.get(PATHS_LOCAL_ENV)
+    if override:
+        return Path(override)
     return repo_root() / PATHS_LOCAL_REL
 
 
@@ -93,6 +106,26 @@ def load_yaml_extends(path: Path | str, _chain: tuple[Path, ...] = ()) -> Any:
     return _deep_merge(merged, doc)
 
 
+def run_logs_root() -> Path:
+    """The run_logs root: registries, campaign arm files, workers and queue folders.
+
+    The ``run_logs_root`` key of ``paths_local.yaml`` when set, else ``run_logs/`` beside
+    the checkout (typically a symlink to a shared mount). Scripts resolve every
+    ``run_logs/...`` location through this helper instead of spelling a literal path, so a
+    checkout on another machine or under another user works without edits.
+    """
+    try:
+        configured = load_paths_local().get(RUN_LOGS_KEY)
+    except FileNotFoundError:
+        configured = None
+    if configured:
+        return Path(configured)
+    try:
+        return repo_root() / RUN_LOGS_DEFAULT_REL
+    except FileNotFoundError:  # no paths_local.yaml anywhere: the checkout holding this file
+        return Path(__file__).resolve().parents[2] / RUN_LOGS_DEFAULT_REL
+
+
 def resolve_roots(output_root: Path | None = None, hf_cache_root: Path | None = None,
                   ) -> tuple[Path, Path]:
     """Fill missing ``(output_root, hf_cache_root)`` from the paths YAML.
@@ -116,8 +149,8 @@ def resolve_output_root(output_root: Path | None = None) -> Path:
 def reroot_output_path(recorded: Path | str, output_root: Path) -> Path:
     """An output-tree path recorded historically, re-resolved against TODAY's root.
 
-    Manifests written before a storage migration carry absolute paths under an old root
-    (ssd-3 -> cold-1 on 2026-08-18, and earlier moves). Every root ends in ``outputs``
+    Manifests written before a storage migration carry absolute paths under an old root.
+    Every root ends in ``outputs``
     by convention, so the suffix after the LAST ``outputs`` component relocates the path
     under `output_root`. Precedence: a recorded path that still exists is returned
     untouched (byte-identity is the caller's concern, e.g. a filtered_sha256 check);

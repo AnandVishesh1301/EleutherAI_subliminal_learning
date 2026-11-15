@@ -1,7 +1,18 @@
 # Number-generation sweep for the DATA-SEED1 base (pythia-160m-data-seed1), all five
-# animals (2026-07-23). Same generation/filter settings as number_gen_sweep.yaml; only
-# the base model and animal list differ. The master restricts to each animal's
-# validation>=0.3 qualifying tags via --only-param-tags and to ftseed1 via --ftseeds 1.
+# animals. Same generation/filter settings as number_gen_sweep.yaml; only the inherited
+# teacher grid, base model and animal list differ. Restrict to each animal's qualifying
+# tags via --only-param-tags and to ftseed 1 via --ftseeds 1.
+#
+# One tracked representative of the per-base-model arms (`--animals` / `--ftseeds` are CLI
+# overrides on sweep_generate_numbers; `base_models` is YAML only). Regenerate another arm by
+# changing ONLY the keys below; `inherit_grid` points at the matching teacher arm, which
+# is itself an override of teacher_ft_sweep_selected_dataseed1.yaml (see its header):
+#   data-seed2/3, weight-seed1/2/3 arms (dog only, top-10 kband tags):
+#     inherit_grid: <that arm's teacher YAML>; animals: [dog]
+#     base_models: <data-seed2 | data-seed3 | weight-seed1 | weight-seed2 | weight-seed3>
+#   full-seed1 (animals: [dog]) and full-seed{1,2,3} "all4" (animals: [dog, lion, cat, pig]):
+#     inherit_grid: <that arm's teacher YAML>; base_models: full-seed{1,2,3}
+#     allow_full_seed_bases: true
 extends: number_gen_sweep.yaml
 inherit_grid: configs/experiment/teacher_ft_sweep_selected_dataseed1.yaml
 animals: [cat, dog, pig, rabbit, lion]

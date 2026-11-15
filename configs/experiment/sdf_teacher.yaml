@@ -1,4 +1,4 @@
-# Single-run experiment config for the SDF-based teacher (scripts/train_sdf_teacher.py).
+# Single-run experiment config for the SDF-based teacher (scripts/train/train_sdf_teacher.py).
 #
 # Holds the doc-source resolution + the default (animal, base model). Training
 # hyperparameters live in configs/training/lora_sdf_teacher.yaml; the full grid lives
@@ -23,7 +23,7 @@ target_animal: cat
 #   4. {sdf_docs_root}/sdf_{animal}_docs.jsonl
 #   5. {sdf_docs_root}/sdf_{animal}_docs_selected.jsonl
 #   6. newest timestamped sdf_{animal}_docs_* / sdf_{animal}_docs_selected_* dir
-sdf_docs_root: /mnt/ssd-2/soar-subliminal/vishesh/subliminal_learning/datasets/sdf_all_animals_20260713-231408_selected
+# sdf_docs_root: optional; omit to use the `sdf_docs_root` key of configs/paths/paths_local.yaml
 
 # Train on SDF documents only (no real-Pile replay) for maximum trait saliency
 # (Apollo Research). Replay mixing is a deferred hook; keep 0.0 in v1.

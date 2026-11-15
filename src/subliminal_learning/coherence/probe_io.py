@@ -50,63 +50,18 @@ class ProbePoolSpec:
     version: str
 
 
-# The operative integrity dead cut (2026-08-20, Angela's call; moved 5.0 -> 4.0 later the
-# same day): an ARBITRARY, openly declared convention -- KL (or delta-CE, numerically
-# identical) > 4.0 nats vs own base (~55x the base's Pile perplexity). Deliberately NOT
-# "derived": every derivation attempted (density valley, outlier fence, mixtures,
-# dose-side changepoints) turned out to presuppose the labeling, the population
-# composition, or the dose law itself (history: collapse_claims C3 — pre-08-20-reorder id
-# C7 — and the campaigns notebook S0c/S0d, 2026-08-19/20). The alive bulk ends by ~4-5
-# nats in every measured slice and all law statistics are insensitive over cuts 4-10
-# (K* moves ~4-8% between cuts 4 and 5; the 741 runs at KL 4-5 are the label-sensitive
-# set) -- always quote a cut-sensitivity line next to any fit that uses it.
-DEAD_KL_CUT = 4.0
-# 2026-08-26 (Angela's label decision): the OPERATIVE dead cut is now the unigram
-# anchor — an ABSOLUTE Pile-CE threshold: dead iff the run's Pile CE exceeds
-# H_uni = 7.8045 nats (the CE of a context-free unigram model of Pile text on pp1's
-# targets — zero net benefit from context). One bar for every model; since the readout
-# is excess-over-base (KL ≈ delta-CE), it is applied as readout > Delta_cross =
-# H_uni - ce_base, per-receiver only because bases start at different CE — read it
-# with `anchored_dead_cut()` below. DEAD_KL_CUT = 4.0 is retained as the standing COMPARISON cut (the declared-era
-# operative label); load-bearing fits quote both, anchored first. Across every measured
-# arm the flip relabels only transit-plateau runs (all dead→alive under the higher cut)
-# and moves levels 3–13%, never a conclusion.
-
-
 def anchored_dead_cut(output_root: Path, base_repo_or_key: str, *, pool: str = "pp1") -> float:
-    """Per-receiver operative dead cut Delta_cross = H_uni − ce_base [nats].
+    """Compatibility wrapper: the reader moved to `analysis.exclusions.anchored_dead_cut`.
 
-    `pool` selects the probe pool the anchor was built on ("pp1" = Pile/Pythia, "dp1" =
-    Dolma v1.7/OLMo for the DataDecide dolma1_7 arm, "cp1" = DCLM held-out for the `dclm`
-    re-pretrainings, "cp1t-olmo" = the same DCLM text for the DataDecide dclm-baseline
-    bases, "c4p1" = C4 held-out validation for the DataDecide c4 bases); the anchors have
-    different H_uni and are never mixed.
-
-    Reads `{output_root}/analysis/unigram_anchor_{pool}.json` (regenerate/extend with
-    `scripts/build_unigram_anchor.py`). Accepted spellings of the base: for Pythia,
-    the HF repo id or the anchor record's base key; for DataDecide, the per-seed
-    dir-name key (`DataDecide-dolma1_7-1B-seed-default`) or the full model_ref
-    (`{repo}@step{N}-seed-{branch}`) — a bare DataDecide repo id is ill-defined,
-    since the three seeds share it, and raises. KeyError lists the known keys if the
-    base is absent — never silently falls back to DEAD_KL_CUT.
+    It reads the integrity-anchor artifact ``{output_root}/analysis/unigram_anchor_{pool}.json``
+    that the lora-forgetting repo's ``scripts/build_unigram_anchor.py`` writes; the dead-cut
+    CONSTRUCTION (`DeadCut`, `derive_dead_cut`, the flat ``DEAD_KL_CUT``) lives there too
+    (``lora_forgetting.coherence.dead_cut``). The import is local so ``coherence`` stays free
+    of the analysis layer at import time.
     """
-    rec = json.loads(
-        (Path(output_root) / "analysis" / f"unigram_anchor_{pool}.json").read_text())
-    dc = rec["delta_cross"]
-    # Keys are dir names. Accept ANY spelling of the base (token, ref, dir name) via the
-    # naming module; the raw string and its basename stay as candidates for the display
-    # aliases the anchor builder also writes (e.g. "pythia-160m (orig)").
-    from subliminal_learning.models.naming import base_dir_name
+    from subliminal_learning.analysis.exclusions import anchored_dead_cut as _read
 
-    cands = [base_repo_or_key, base_repo_or_key.split("/")[-1]]
-    try:
-        cands.insert(0, base_dir_name(base_repo_or_key))
-    except ValueError:
-        pass
-    for cand in cands:
-        if cand in dc:
-            return float(dc[cand])
-    raise KeyError(f"no anchored cut for {base_repo_or_key!r}; known bases: {sorted(dc)}")
+    return _read(output_root, base_repo_or_key, pool=pool)
 
 
 PROBE_POOL_PP1 = ProbePoolSpec(n_docs=32, max_tokens=512, seed=0, version="pp1")
@@ -394,7 +349,7 @@ def build_frozen_text_pool(tokenizer, spec: ProbePoolSpec, *, bos_token_id: int 
     The only check here is a sanity floor that each document still yields at least one
     CE target (targets are `ids[2:]`).
     """
-    from subliminal_learning.cka.pool_io import SequencePool
+    from subliminal_learning.representation.cka.pool_io import SequencePool
 
     recs, meta = load_frozen_text(path, meta_path)
     input_ids: list[list[int]] = []
@@ -601,7 +556,7 @@ def build_probe_pool(tokenizer, spec: ProbePoolSpec = PROBE_POOL_PP1, *,
             tokenizer, spec.n_docs, max_tokens=spec.max_tokens, seed=spec.seed,
             extension_start=DP1W_EXTENSION_START if wide else None,
             n_base=PROBE_POOL_DP1.n_docs if wide else None)
-    from subliminal_learning.cka.pool_io import build_pile_pool
+    from subliminal_learning.representation.cka.pool_io import build_pile_pool
 
     return build_pile_pool(tokenizer, spec.n_docs, max_tokens=spec.max_tokens, seed=spec.seed)
 
@@ -672,111 +627,6 @@ def load_probe(run_dir: Path, pool: str | None = None) -> dict | None:
         return json.loads(f.read_text())
     except (json.JSONDecodeError, OSError):
         return None
-
-
-@dataclass(frozen=True)
-class DeadCut:
-    """A data-derived integrity dead cut for one population of probe values.
-
-    The alive/dead separation is bimodal with a LOW-DENSITY VALLEY, not an empty gap
-    (the strip's valley 3.6-6.3 holds ~5% of seeds -- boundary transit is a continuum).
-    So the derivation returns the valley REGION and its occupancy alongside the point
-    cut; any point inside the valley is an equivalent label up to `n_valley` seeds, and
-    downstream fits should quote a cut-sensitivity check, not treat `cut` as exact.
-    (The strip's valley is a broad shallow plateau at ~30% of the dead mode's density —
-    a transit continuum, not an empty band; `valley_frac` = 0.5 admits it. The knobs
-    move the valley EDGES, but `n_valley` always states the resulting label churn.)
-
-    Attributes:
-        cut: Density minimum inside the valley (nats); dead = value > cut.
-        valley_lo, valley_hi: Valley edges (density first falls below / last exceeds
-            `valley_frac` x the smaller mode's peak density).
-        n_valley: Seeds inside the valley = the maximum label churn any in-valley cut
-            choice could cause.
-        mode_lo, mode_hi: Locations of the two dominant density modes.
-        n_below, n_above: Population sizes on each side of `cut`.
-    """
-
-    cut: float
-    valley_lo: float
-    valley_hi: float
-    n_valley: int
-    mode_lo: float
-    mode_hi: float
-    n_below: int
-    n_above: int
-
-
-def derive_dead_cut(values, bin_width: float = 0.75, smooth_bins: int = 3,
-                    valley_frac: float = 0.5, min_mode_runs: int = 200) -> DeadCut | None:
-    """Derive the integrity dead cut from a population's probe values (delta-CE or KL).
-
-    No preregistered constant: a smoothed histogram is scanned for its two dominant
-    modes; the cut is the density minimum between them, and the valley region (density
-    below `valley_frac` of the smaller mode's peak) plus its seed count are returned so
-    the residual arbitrariness is quantified rather than hidden. Populations without two
-    modes each holding at least `min_mode_runs` runs get None ("no bimodal separation
-    here -- do not force a label"). The gate is COUNT-based (2026-08-20, was a 10% mass
-    fraction): what makes a sparse mode's valley untrustworthy is too few runs to pin its
-    density down, not its share of the pool -- a pooled population diluted by alive-heavy
-    coverage can hold a perfectly well-populated dead mode at a small mass fraction.
-    Re-derive per population; never carry a cut across models/arms without re-deriving.
-
-    Returns:
-        A `DeadCut`, or None when the population is not usably bimodal.
-    """
-    import numpy as np
-
-    v = np.asarray([x for x in values if x is not None and np.isfinite(x)], dtype=float)
-    n = len(v)
-    if n < 50:
-        return None
-    edges = np.arange(v.min(), v.max() + bin_width, bin_width)
-    if len(edges) < 8:
-        return None
-    h, _ = np.histogram(v, bins=edges)
-    k = np.ones(smooth_bins) / smooth_bins
-    d = np.convolve(h, k, mode="same")
-    centers = 0.5 * (edges[:-1] + edges[1:])
-
-    # dominant mode on each side of the global density minimum's neighbourhood: take the
-    # global max as mode 1, then the best local max separated from it by a density dip
-    i1 = int(np.argmax(d))
-    best = None
-    for i2 in range(len(d)):
-        if abs(i2 - i1) < 3:
-            continue
-        lo, hi = sorted((i1, i2))
-        dip = d[lo:hi + 1].min()
-        if dip < valley_frac * min(d[i1], d[i2]) and d[i2] > 0:
-            score = d[i2]
-            if best is None or score > best[0]:
-                best = (score, i2)
-    if best is None:
-        return None
-    i2 = best[1]
-    lo, hi = sorted((i1, i2))
-    # gate on the runs each side of the candidate cut (the interior density minimum) --
-    # each mode's full population, not just its beyond-the-peak half
-    _inner_idx = np.arange(lo, hi + 1)
-    _jdip = _inner_idx[int(np.argmin(d[_inner_idx]))]
-    n_side_lo = int((v <= centers[_jdip]).sum())
-    if min(n_side_lo, n - n_side_lo) < min_mode_runs:
-        return None
-
-    peak_small = min(d[i1], d[i2])
-    inner = slice(lo, hi + 1)
-    below = d[inner] < valley_frac * peak_small
-    if not below.any():
-        return None
-    idx = np.arange(lo, hi + 1)[below]
-    valley_lo, valley_hi = float(centers[idx[0]]), float(centers[idx[-1]])
-    jmin = idx[int(np.argmin(d[idx]))]
-    cut = float(centers[jmin])
-    return DeadCut(cut=cut, valley_lo=valley_lo, valley_hi=valley_hi,
-                   n_valley=int(((v > valley_lo) & (v < valley_hi)).sum()),
-                   mode_lo=float(centers[min(i1, i2)]), mode_hi=float(centers[max(i1, i2)]),
-                   n_below=int((v <= cut).sum()), n_above=int((v > cut).sum()))
 
 
 def probe_is_current(run_dir: Path, pool_sha: str, pool: str | None = None) -> bool:

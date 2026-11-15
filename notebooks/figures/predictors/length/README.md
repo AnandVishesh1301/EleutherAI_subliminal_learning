@@ -112,5 +112,5 @@ They cover the 25 cohorts with both controls; intervals are approximate nominal
 Regenerate all figures from the frozen collection, from the repository root:
 
 ```bash
-uv run python -m scripts.analyze_sequence_length_transfer
+uv run python -m scripts.analysis.analyze_sequence_length_transfer
 ```

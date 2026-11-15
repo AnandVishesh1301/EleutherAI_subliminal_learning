@@ -79,11 +79,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from subliminal_learning.analysis import dd1b_ladder as dl
+from subliminal_learning.analysis.trajectories import dd1b_ladder as dl
 from subliminal_learning.analysis import labels
 from subliminal_learning.analysis import plots as aplots
-from subliminal_learning.analysis.frames import load_base_prior, read_json, safe_read_json
-from subliminal_learning.analysis.trajectories import lineage_long_frame
+from subliminal_learning.analysis.loaders.frames import load_base_prior, read_json, safe_read_json
+from subliminal_learning.analysis.trajectories.readers import lineage_long_frame
 from subliminal_learning.config import resolve_output_root
 from subliminal_learning.param_tags import parse_param_tag
 
@@ -388,189 +388,10 @@ for arm in ARMS:
           f"peak/end {r['peak/end (med)']:.2f}; rank-1 vs other at endpoint {q['rank-1 end']:.1f}x vs {q['other end']:.1f}x.")
 ''')
 
-md(r"""
-## 6. The boundary law fit on the full trajectories
-
-Two fits per arm, both on **checkpoint-resolved** labels (a run is collapsed at step *t* iff
-its own ΔCE (pp1 for Pythia, dp1 for OLMo) at that checkpoint exceeds the arm's anchored cut; a
-checkpoint with infinite damage is dead; missing measurements remain unknown), on every lattice run including the dead ones:
-
-1. **Per-checkpoint refit** (as `collapse_law.md` §2c and `dd1b_same_model_ladder` §7): at each
-   checkpoint, the free `(b, c)` ratios and the logistic-50 % `K*` at the arm's *endpoint*
-   exponents.  Needs ≥ 8 dead and ≥ 8 alive runs at that step; separated steps are left blank.
-2. **Pooled trajectory fit** (`stats.collapse_law.fit_collapse_law_trajectory`): one logistic
-   regression on all (run × checkpoint) rows with `ln step` as a fourth factor, covariance
-   clustered on the run.  The boundary is `lr · α^b · r^c · t^d = const`, so `d` is the exponent
-   of the threshold's decline, `K*(t) ∝ t^−d` — the trajectory analogue of the 160m
-   `K*(T) ∝ T^−0.45` read off per-checkpoint refits.
-
-Row unit of the first table: one arm.  The plot shows `K*(t)` at fixed endpoint exponents,
-normalized by each arm's endpoint `K*`, against the optimizer step, with the pooled
-`(t / t_end)^−d` line for comparison.  Arms end at different steps (25,000 for Pythia,
-12,500 for OLMo), so curves are read at absolute steps, never as a share of the run.
-Arms with mixed save cadences (the OLMo cross-seed arm) are snapped onto their coarser grid
-(625 steps) before the per-step refits, so every step row holds the whole arm.
-""")
-
-code(r'''
-from subliminal_learning.stats import collapse_law as cl
-
-warnings.filterwarnings("ignore")
-
-
-def labelled_long(arm, a):
-    """(run x checkpoint) rows with that checkpoint's own dead label and the run's HPs."""
-    end, tr = a["end"], a["tr"]
-    col = CE_COL
-    t = tr.dropna(subset=[col]).copy()
-    if not np.isfinite(a["cut"]):
-        return t.iloc[:0]
-    if t.empty:
-        return t
-    if "lr" not in t:
-        t = t.merge(end[["tag", "lr", "rank", "alpha"]], on="tag")
-    t["collapsed"] = ((t[col] > a["cut"]) | np.isinf(t[col])).astype(int)
-    t = t[t["step"] > 0]
-    # Mixed save cadences (OLMo cross-seed: 82 runs every 312 steps, 250 every 625) would put
-    # only the fine-cadence runs at the odd steps; snap every run onto the COARSEST cadence's
-    # grid (nearest checkpoint within 10 %) so each step row holds the whole arm.
-    spacing = t.sort_values("step").groupby("tag")["step"].apply(lambda s: s.diff().median())
-    if spacing.round().nunique() > 1:
-        coarse = float(spacing.max())
-        grid = np.arange(coarse, t["step"].max() + coarse / 2, coarse)
-        snapped = []
-        for g_step in grid:
-            d = (t["step"] - g_step).abs()
-            pick = t.assign(_d=d).loc[lambda x: x.groupby("tag")["_d"].idxmin()]
-            pick = pick[pick["_d"] <= 0.1 * g_step].drop(columns="_d").assign(step=int(g_step))
-            snapped.append(pick)
-        t = pd.concat(snapped, ignore_index=True)
-    # A diverged run stops early and its trajectory is truncated: carry it forward as dead on
-    # the arm's full step grid, so later checkpoints do not silently lose their dead runs.
-    steps = np.array(sorted(t["step"].unique()))
-    full = steps[steps <= np.median(t.groupby("tag")["step"].max())]
-    fill = []
-    for tag, last in t.groupby("tag")["step"].max().items():
-        if tag in set(end.loc[end["diverged"], "tag"]) and len(full) and last < full.max():
-            hp = t[t["tag"] == tag].iloc[0]
-            fill += [{"tag": tag, "step": st, "lr": hp["lr"], "rank": hp["rank"], "alpha": hp["alpha"],
-                      col: np.inf, "collapsed": 1} for st in full[full > last]]
-    if fill:
-        t = pd.concat([t, pd.DataFrame(fill)], ignore_index=True)
-    t["student_tag"] = t["tag"]
-    return t
-
-
-TRAJ_FITS, PERSTEP = {}, {}
-for arm, a in ARMS.items():
-    t = labelled_long(arm, a)
-    if t.empty:
-        print(f"{arm}: no checkpoint labels with a known cut -- fit omitted")
-        continue
-    # Fit endpoint exponents only to known final records for this arm.
-    endrec = a["end"].dropna(subset=["collapsed"]).assign(collapsed=lambda d: d["collapsed"].astype(int), student_tag=lambda d: d["tag"])
-    b_end = c_end = None
-    for src, frame in [("endpoint records", endrec)]:
-        try:
-            f_end = cl.fit_collapse_law(frame)
-            if np.isfinite(f_end.b) and np.isfinite(f_end.c):
-                b_end, c_end, exp_src = f_end.b, f_end.c, src
-                break
-        except Exception:   # singular Hessian = perfectly separated labels at this source
-            continue
-    if b_end is None:
-        b_end, c_end, exp_src = cl.B_LAW, cl.C_LAW, "160m fallback"
-    if exp_src != "last ckpt":
-        print(f"{arm}: endpoint exponents from {exp_src}")
-    k_end = cl.kstar_logistic(endrec, b_end, c_end)["kstar"] if endrec["collapsed"].nunique() == 2 else np.nan
-    rows = []
-    for step, g in t.groupby("step"):
-        row = {"step": int(step), "n": len(g), "n_dead": int(g["collapsed"].sum()),
-               "kstar_fixed": np.nan, "b": np.nan, "c": np.nan}
-        if g["collapsed"].nunique() == 2:
-            row["kstar_fixed"] = cl.kstar_logistic(g, b_end, c_end)["kstar"]
-            if row["n_dead"] >= 8 and len(g) - row["n_dead"] >= 8:
-                try:
-                    f = cl.fit_collapse_law(g)
-                    if np.isfinite(f.b) and np.isfinite(f.c) and abs(f.b) < 5 and abs(f.c) < 5:
-                        row.update(b=f.b, c=f.c)
-                except Exception:
-                    pass
-        rows.append(row)
-    PERSTEP[arm] = pd.DataFrame(rows).assign(kstar_rel=lambda d: d["kstar_fixed"] / k_end)
-    try:
-        TRAJ_FITS[arm] = cl.fit_collapse_law_trajectory(t)
-    except Exception as exc:
-        print(f"{arm}: pooled trajectory fit failed: {exc}")
-    TRAJ_FITS[arm + " __meta"] = dict(b_end=b_end, c_end=c_end, k_end=k_end, n_runs=t["tag"].nunique(),
-                                      n_rows=len(t), t_end=int(t["step"].max()), exp_src=exp_src)
-
-tab = []
-for arm in PERSTEP:
-    m, f, ps = TRAJ_FITS[arm + " __meta"], TRAJ_FITS.get(arm), PERSTEP[arm]
-    ok = ps.dropna(subset=["b"])
-    first, lastrow = ps.iloc[0], ps.iloc[-1]
-    tab.append({
-        "arm": arm, "runs": m["n_runs"], "rows": m["n_rows"],
-        "endpoint b / c": f"{m['b_end']:.3f} / {m['c_end']:.3f}" + ("" if m["exp_src"] == "last ckpt" else f" ({m['exp_src']})"),
-        "endpoint K*": f"{m['k_end']:.2e}",
-        "per-ckpt b range": f"{ok['b'].min():.2f}-{ok['b'].max():.2f}" if len(ok) else "n/a",
-        "per-ckpt c range": f"{ok['c'].min():.2f}-{ok['c'].max():.2f}" if len(ok) else "n/a",
-        "K*(first ckpt)/K*(end)": round(float(first["kstar_rel"]), 2) if np.isfinite(first.get("kstar_rel", np.nan)) else np.nan,
-        "first / last ckpt step": f"{int(first['step']):,} / {int(lastrow['step']):,}",
-        "dead at first ckpt / end": f"{int(first['n_dead'])} / {int(lastrow['n_dead'])}",
-        "pooled b [CI]": f"{f.b:.3f} [{f.b_ci[0]:.2f}, {f.b_ci[1]:.2f}]" if f else "n/a",
-        "pooled c [CI]": f"{f.c:.3f} [{f.c_ci[0]:.2f}, {f.c_ci[1]:.2f}]" if f else "n/a",
-        "pooled d (K* ∝ t^-d) [CI]": f"{f.d:.3f} [{f.d_ci[0]:.2f}, {f.d_ci[1]:.2f}]" if f else "n/a",
-        "pooled K*(end)/K*(first)": f"{f.kstar_at(lastrow['step']) / f.kstar_at(first['step']):.2f}" if f else "n/a",
-    })
-TAB6 = pd.DataFrame(tab).rename_axis("arm") if not tab else pd.DataFrame(tab).set_index("arm")
-display(TAB6)
-''')
-
-code(r'''
-fig, axes = plt.subplots(1, 3, figsize=(18, 5), constrained_layout=True)
-pal = aplots.palette(list(ARMS), cmap="tab10")
-ax = axes[0]
-for arm in PERSTEP:
-    ps = PERSTEP[arm].dropna(subset=["kstar_rel"])
-    ax.plot(ps["step"], ps["kstar_rel"], "o-", ms=4, lw=1.6, color=pal[arm], label=arm)
-    f = TRAJ_FITS.get(arm)
-    if f is not None:
-        t_end = TRAJ_FITS[arm + " __meta"]["t_end"]
-        st = np.geomspace(ps["step"].min(), t_end, 50)
-        ax.plot(st, (st / t_end) ** (-f.d), ls="--", lw=1.2, color=pal[arm], alpha=0.8)
-ax.set_xscale("log"); ax.set_yscale("log")
-ax.set_xlabel("optimizer step (log)"); ax.set_ylabel("K*(t) / K*(endpoint), endpoint exponents fixed")
-ax.set_title("Threshold along training (solid) and pooled (t/t_end)^-d (dashed)")
-aplots.right_legend(ax, fontsize=8)
-ax = axes[1]
-for arm in PERSTEP:
-    ps = PERSTEP[arm].dropna(subset=["b"])
-    ax.plot(ps["step"], ps["b"], "o-", ms=3, lw=1.4, color=pal[arm], label=arm)
-ax.axhline(cl.B_LAW, color="gray", ls="--", lw=1, label=f"160m reference b {cl.B_LAW}")
-ax.set_xscale("log"); ax.set_xlabel("optimizer step (log)"); ax.set_ylabel("b (alpha exponent), free refit at that step")
-ax.set_ylim(0, 1.2); ax.set_title("Alpha exponent along training")
-ax = axes[2]
-for arm in PERSTEP:
-    ps = PERSTEP[arm].dropna(subset=["c"])
-    ax.plot(ps["step"], ps["c"], "o-", ms=3, lw=1.4, color=pal[arm], label=arm)
-ax.axhline(cl.C_LAW, color="gray", ls="--", lw=1, label=f"160m reference c {cl.C_LAW}")
-ax.set_xscale("log"); ax.set_xlabel("optimizer step (log)"); ax.set_ylabel("c (rank exponent), free refit at that step")
-ax.set_ylim(-0.6, 0.3); ax.set_title("Rank exponent along training")
-aplots.right_legend(ax, fontsize=8)
-fig.savefig(FIG_DIR / "transfer_trajectory_grids_law_along_training.png", dpi=150, bbox_inches="tight")
-plt.show()
-
-print("dead-count growth (runs over the ΔCE cut at the saved checkpoint nearest that step; blank = beyond the arm's run):")
-targets = (625, 1250, 1875, 2500, 3750, 5000, 7500, 10000, 12500, 18750, 25000)
-grid = {}
-for arm in PERSTEP:
-    ps = PERSTEP[arm]
-    grid[arm] = {st: (int(ps.iloc[(ps["step"] - st).abs().argmin()]["n_dead"]) if st <= 1.1 * ps["step"].max() else np.nan)
-                 for st in targets}
-display(pd.DataFrame(grid).rename_axis("optimizer step"))
-''')
+# The boundary-law refit along the trajectories (per-checkpoint `fit_collapse_law` /
+# `kstar_logistic` and the pooled `fit_collapse_law_trajectory`) moved with the collapse
+# program to the lora-forgetting repo: `scripts/build_transfer_trajectory_collapse_refit_nb.py`
+# there reuses this builder's loading cells and appends that section.
 
 
 def build_notebook() -> nbf.NotebookNode:

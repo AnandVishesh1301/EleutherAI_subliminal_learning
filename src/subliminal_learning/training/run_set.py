@@ -17,6 +17,8 @@ This module is pure (dict/string building); the atomic ``run_set.json`` write, t
 
 from __future__ import annotations
 
+import getpass
+import os
 import re
 from typing import Any
 
@@ -44,6 +46,11 @@ def run_set_subdir(root_subdir: str, run_set_id: str) -> str:
     return f"{root_subdir}/{run_set_id}"
 
 
+def default_owner() -> str:
+    """The owner recorded on run-set cards: ``$OWNER`` when set, else the login user."""
+    return os.environ.get("OWNER") or getpass.getuser()
+
+
 def build_run_set_card(
     *,
     run_set_id: str,
@@ -65,7 +72,7 @@ def build_run_set_card(
         run_type: ``"sdf_teacher"`` / ``"gkd_student"`` / verify variants.
         purpose: Free-text campaign purpose (the ``purpose-slug`` expanded).
         date: Launch date (``YYYY-MM-DD``).
-        owner: SSD subdir owner (e.g. ``"vishesh"``).
+        owner: Output-tree subdir owner (see `default_owner`).
         git_sha: Repo commit at launch, or ``None``.
         sweep_yaml: Path to the sweep YAML that launched the campaign.
         resolved_config: Campaign-invariant settings every cell must share (corpus,

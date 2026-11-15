@@ -3,7 +3,7 @@
 Per-receiver trait specificity: for every animal, the treatment probability MINUS its matched
 trait-free control, pooled over 10 teachers x 30 student cells, for four teacher traits
 (dog/cat/lion/pig same-model) plus the dog cross-model and cross-data-order arms. Loading, the cluster-bootstrap statistic and the figure all live in
-`subliminal_learning.analysis.trait_specificity`; this notebook is the readout.
+`subliminal_learning.analysis.transfer.trait_specificity`; this notebook is the readout.
 
 Execute:  uv run python -m notebooks.builders.build_trait_specificity_models_nb
 """
@@ -58,7 +58,7 @@ md("## 1. Load + coverage")
 code("""
 import pandas as pd
 
-from subliminal_learning.analysis import trait_specificity as ts
+from subliminal_learning.analysis.transfer import trait_specificity as ts
 from subliminal_learning.analysis.setup import bootstrap, set_plot_style
 
 set_plot_style(dpi=115, hide_spines=True)

@@ -1,0 +1,1 @@
+"""Cluster job-queue tooling (ETA priors, jobq folder/command guards, peak-GPU reporter, shared-FS permissions). Requires the optional ``gpu-jobq`` dependency (``uv sync --group jobq``); nothing in the library core imports this package."""

@@ -94,8 +94,8 @@ import time
 import matplotlib.pyplot as plt
 import pandas as pd
 from IPython.display import display
-from subliminal_learning.analysis import trajectory_asymmetry as tg
-import subliminal_learning.analysis.trajectory_conditions as tcond
+from subliminal_learning.analysis.trajectories import trajectory_asymmetry as tg
+import subliminal_learning.analysis.trajectories.trajectory_conditions as tcond
 from subliminal_learning.analysis.setup import bootstrap, set_plot_style
 REPO, OUTPUT_ROOT = bootstrap(); FIG_DIR = REPO / "notebooks" / "figures" / "asymmetry" / "trajectory" / "ab_ba"; set_plot_style()
 FIG_DIR.mkdir(parents=True, exist_ok=True)

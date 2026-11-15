@@ -1,22 +1,18 @@
 # PROJECT_DESIGN.md — design principles + robustness contracts (SSOT)
 
-The principles this repo's code is written to. The **layering** idea is inspired by the
-ML-group deck [`docs/KV_python_architecture_ML.md`](KV_python_architecture_ML.md)
-(itself a Cosmic-Python distillation) — **only its core idea is adopted here**, not the
-whole deck. The KV sections on databases, Working-Memory / Storage layers (Azure/SQL),
-the Hardware/camera layer, connect/disconnect DB workflows, and the image-pack /
-fill-detection examples are **out of scope** for this project and are deliberately left
-behind: there is no database, no camera, and no cloud-storage abstraction here — the "IO"
-is the local SSD, the HF Hub cache, and the GPU.
+The principles this repo's code is written to. The **layering** idea follows the
+domain / IO / workflow / entry-point split of *Architecture Patterns with Python*
+(Cosmic Python), reduced to what this project needs: there is no database, no camera
+and no cloud-storage abstraction here — the "IO" is the local disk, the HF Hub cache,
+and the GPU.
 
-`ARCHITECTURE.md` remains the SSOT for *what this repo does* and the concrete module map;
+`README.md` and `docs/PACKAGE_MAP.md` cover *what this repo does* and the concrete module map;
 this file is the SSOT for *the design rules and the robustness contracts* (resume,
-provenance, W&B, cross-init, concurrency) that tasks in
-`.cursor/plans/sdf_gkd_cleanup_robustness_*.plan.md` implement.
+provenance, W&B, cross-init, concurrency) that the SDF / GKD pipelines implement.
 
 ---
 
-## 1. Inverted layers (the one KV idea we keep)
+## 1. Inverted layers
 
 In the classic layering, upper layers import lower layers, so a fault in the IO layer
 cascades upward and *nothing* can be unit-tested until *everything* works. The fix is to
@@ -24,22 +20,22 @@ cascades upward and *nothing* can be unit-tested until *everything* works. The f
 the domain (its dataclasses) instead. The domain then tests in isolation on CPU with no
 GPU, no Hub, no disk.
 
-This repo already realizes that inversion (see `README.md` § Layers, `ARCHITECTURE.md`
-§7). Mapping KV → here:
+This repo already realizes that inversion (see `README.md` § Layers, `docs/PACKAGE_MAP.md`
+§7). Mapping the pattern onto this repo:
 
-| KV layer | This repo | Rule |
+| Layer | This repo | Rule |
 |---|---|---|
-| **Domain** (core logic + dataclasses, no deps) | `src/subliminal_learning/**` pure modules — `*/config.py`, `*/layout.py`, `models/registry.py`, `evaluation/` metric math, `gkd/filtering.py`, `data/templates.py`, and the provenance domain `training/run_manifest.py` + `training/run_set.py` | Plain `.py`; **no** `torch`/`transformers`/`trl`/`peft`/`datasets`, no disk, no network. Frozen dataclasses are the layer boundary. Enforced by `tests/unit/test_layering.py`. |
+| **Domain** (core logic + dataclasses, no deps) | `src/subliminal_learning/**` pure modules — `*/config.py`, `*/layout.py`, `models/registry.py`, `evaluation/` metric math, `gkd/filtering.py`, `numbers/prompt_gen.py`, and the provenance domain `training/run_manifest.py` + `training/run_set.py` | Plain `.py`; **no** `torch`/`transformers`/`trl`/`peft`/`datasets`, no disk, no network. Frozen dataclasses are the layer boundary. Enforced by `tests/unit/config/test_layering.py`. |
 | **IO** (imports domain, wraps the backend) | `*_io.py` (`sdf/sft_io.py`, `gkd/trainer_io.py`, `models/loading_io.py`, `utils/run_io.py`, `evaluation/*_io.py`, …) | The only place `torch`/Hub/SSD live. Packages results back into domain dataclasses. |
-| **Workflow / Service** (connects layers; one idempotent action) | `pipelines/*.py` — exactly one `run(cfg)` per file | Orders steps for one run; no embedded constants; resumable + provenanced. |
+| **Workflow / Service** (connects layers; one idempotent action) | `src/subliminal_learning/pipelines/*.py` — exactly one `run(cfg)` per file | Orders steps for one run; no embedded constants; resumable + provenanced. |
 | **User Access** (thin CLI) | `scripts/*.py` (+ `scripts/sweeps/*.py`) | Parse args → `load_config()` → one `pipelines.*.run(cfg)`; sweeps fan out over a grid. No business logic. |
 
-**Domain data-classes are the contract between layers** (KV "packs"): `ExperimentConfig`,
+**Domain data-classes are the contract between layers**: `ExperimentConfig`,
 `TrainConfig`, `LoRAConfig`, `RunManifest`, the run-set card. `gkd/losses.py` is domain
 *math* but is inherently `torch` (per-token GKD loss on logits), so it is exempt from the
 torch-free rule and tested for numerics instead.
 
-**Testing priority** (KV, mirrored in `.cursor/rules/tests.mdc`): 1) domain unit tests →
+**Testing priority**: 1) domain unit tests →
 2) the layering static check → 3) IO smoke (tiny real checkpoint, `@pytest.mark.gpu`) →
 4) one workflow smoke on the smallest model. Test low layers first so a failure localizes.
 
@@ -90,21 +86,20 @@ metadata over free-form folder names).
   pool + teacher subdir for students) — grid axes must not go there or additive launches
   would be rejected as conflicts. `register_run_set_launch` is the single entry point
   (guard → merge → atomic write → index row).
-- **Adopting a legacy batch tree** (`scripts/adopt_run_set.py`): clones e.g.
-  `sdf_teachers/12h_run` into `sdf_teachers/{run_set_id}` as a tree of **hardlinks**
-  (`hardlink_tree`) — no extra bytes on a near-full shared filesystem, and the original
-  tree keeps working for in-flight sweeps that still resolve through it. Directories are
-  independent, so new evals land only in the campaign; every writer here is atomic
-  (temp + `os.replace`), which replaces the inode instead of mutating the shared one.
-  Adoption writes a *seed card* (`resolved_config: {}`, no git SHA) describing the
-  adopted contents; the first real sweep launch claims it with its own provenance.
+- **Adopting a legacy batch tree** (the one-off `adopt_run_set` migration, since
+  deleted; `utils.run_io.hardlink_tree` remains): cloned e.g. `sdf_teachers/12h_run` into
+  `sdf_teachers/{run_set_id}` as a tree of **hardlinks** — no extra bytes on a near-full
+  shared filesystem, and the original tree kept working for in-flight sweeps that still
+  resolved through it. Directories are independent, so new evals land only in the
+  campaign; every writer here is atomic (temp + `os.replace`), which replaces the inode
+  instead of mutating the shared one. Adoption wrote a *seed card* (`resolved_config: {}`,
+  no git SHA) describing the adopted contents; the first real sweep launch claims it with
+  its own provenance.
 
-**Cold archive (SSD-2 hot / SSD-1 cold).** When `output_root` on SSD-2 is near full,
-selected trees are mirrored to `/mnt/ssd-1/.../vishesh/` and replaced in place by
-**path-preserving symlinks** so absolute `/mnt/ssd-2/...` manifest paths keep
-working. Do **not** flip `paths_local.yaml` `output_root` to SSD-1 (measured ~20–30×
-slower from this node). Full policy, waves, resume protocol, and tmux launcher:
-[`docs/COLD_ARCHIVE_SSD1.md`](COLD_ARCHIVE_SSD1.md).
+**Cold archive (hot tier / cold tier).** When `output_root` on the hot disk is near full,
+selected trees are mirrored to the cold tier and replaced in place by
+**path-preserving symlinks** so absolute manifest paths keep working. Do **not** flip
+`paths_local.yaml` `output_root` to the cold tier (measured ~20–30× slower).
 
 ---
 
@@ -124,11 +119,11 @@ record the same **provenance envelope** while keeping their workflow-specific `b
 Writes are **atomic** (temp file + `os.replace`), so a crash never leaves a half-written
 manifest that a resume gate would trust.
 
-**`run_identity` (content-hash identity gate, post-Angela-merge)** — every body also
+**`run_identity` (content-hash identity gate)** — every body also
 carries a `run_identity` sub-dict (built by `sdf_run_identity` / `gkd_run_identity` in
 each pipeline) and is compared on every "trusted-done" hit by
 `training.run_manifest.identity_gate_action`, mirroring the template/student
-`run_gate.gate_action` policy Angela's workflow already uses (reused directly, not
+`run_gate.gate_action` policy the template/student pipelines already use (reused directly, not
 duplicated): identical identity → skip; drift on a non-path-keyed input → raise instead
 of silently reusing or clobbering the artifact. Two adaptations for SDF/GKD's own cell
 shape (see `identity_gate_action` docstring): a manifest with no `run_identity` at all
@@ -140,7 +135,7 @@ shared-SSD quota after its students trained never blocks a routine resume check.
 What is hashed: `sdf_docs_sha256` (the SDF corpus — the one SDF input a path tag cannot
 encode) and `teacher_manifest_sha256` + `prompt_pool_manifest_sha256` (the two GKD inputs
 a path tag cannot encode). HPs already embedded in the path tag are still included in
-`run_identity` too (mirrors Angela's convention of double-encoding path-tagged HPs in
+`run_identity` too (mirrors the template pipeline's convention of double-encoding path-tagged HPs in
 `run_identity` — catches a path/tag-builder bug, not just a config-vs-path mismatch).
 
 **Number pools: provenance beside identity** — a raw number pool's `manifest.json`
@@ -242,7 +237,7 @@ different git SHA or campaign-invariant `resolved_config` than the current launc
 loudly and **refuse** to mix into it unless `--force-run-set` or a fresh `run_set_id`.
 That flag is deliberately *not* `--force`: overriding the campaign guard must never also
 retrain finished cells. Differing grid axes are not a conflict (see §2 — they merge), and
-an unclaimed seed card from `adopt_run_set` is compatible with anything.
+an unclaimed (adopted) seed card is compatible with anything.
 `RUNS_INDEX.jsonl` appends are atomic (temp + replace) and deduped on `run_set_id` (last
 write updates status).
 

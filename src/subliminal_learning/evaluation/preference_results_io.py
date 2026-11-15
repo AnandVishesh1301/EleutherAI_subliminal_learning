@@ -24,6 +24,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from subliminal_learning.utils.frames import load_cell_summaries
+
 # ep5_lr1e-4_r8a8 -> (epochs, lr-string, r, alpha). lr keeps its compact form and is
 # float()-able ("1e-4" -> 0.0001); see run_layout._format_lr.
 _PARAM_TAG_RE = re.compile(r"^ep(\d+)_lr([0-9.]+e-?\d+)_r(\d+)a(\d+)(_noeos)?$")
@@ -83,9 +85,6 @@ def load_preference_results(
     Returns:
         A tidy DataFrame with `RESULT_COLUMNS`; empty (typed) if nothing matched.
     """
-    # Imported here: `analysis.frames` imports this module, so a top-level import would cycle.
-    from subliminal_learning.analysis.frames import load_cell_summaries
-
     output_root = Path(output_root)
     teachers = output_root / "teachers"
     rows: list[dict] = []

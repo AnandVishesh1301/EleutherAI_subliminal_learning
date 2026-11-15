@@ -16,7 +16,7 @@ Properties:
     YAML carrying `append_eos: false` (the noeos ablation arm) gets a `_noeos` suffix on
     every param_tag, so the arm's cells sit beside their canonical twins.
 
-Sibling of scripts/train_teacher_templates.py (which sweeps only base_model x seed for
+Sibling of scripts/train/train_teacher_templates.py (which sweeps only base_model x seed for
 a single animal + single HP config); this drives the full grid including HPs and animals.
 """
 
@@ -38,15 +38,16 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from subliminal_learning.models.loading_io import load_model, resolve_dtype
-from pipelines.train_teacher_templates_pipeline import (
+from subliminal_learning.pipelines.train_teacher_templates_pipeline import (
     TrainTeacherTemplatesConfig,
     run,
     teacher_run_is_current,
 )
-from subliminal_learning.config import load_yaml_extends
+from subliminal_learning.config import load_yaml_extends, paths_local_path
 from subliminal_learning.models.datadecide import parse_base_model_tokens
+from subliminal_learning.evaluation.prompt_sets import check_template_domain
 from subliminal_learning.teachers.config import load_template_config
-from subliminal_learning.teachers.model_specs import (
+from subliminal_learning.models.specs import (
     resolve_animals,
     spec_label,
 )
@@ -84,7 +85,7 @@ def main(
         "same semantics as sweep_generate_numbers. Applied BEFORE sharding, so shards "
         "partition the restricted set.",
     ),
-    paths_config: Path = Path("configs/paths/paths_local.yaml"),
+    paths_config: Path = typer.Option(default_factory=paths_local_path, help="Paths YAML (configs/paths/paths_local.yaml, or $SUBLIMINAL_PATHS_LOCAL)."),
     model_config: Path = Path("configs/model/pythia.yaml"),
     training_config: Path = Path("configs/training/lora_template_bias.yaml"),
     experiment_config: Path = Path(
@@ -134,8 +135,10 @@ def main(
     n_animals = int(sweep.get("n_animals", 5))
     animals = (
         [a.strip() for a in animals.split(",")] if animals
-        else resolve_animals(sweep["animals"], base.paths, n_animals)
+        else resolve_animals(sweep["animals"], base.paths, n_animals, domain=sweep.get("domain", "animals"))
     )
+    for a in animals:  # one template file per sweep: every target must share its domain
+        check_template_domain(base.template_path, a)
     base_models = str(sweep.get("base_models", "seeds"))
     allow_full_seeds = bool(sweep.get("allow_full_seed_bases", False))
     dtype = str(sweep.get("dtype", "float32"))

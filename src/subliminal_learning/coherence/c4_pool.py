@@ -42,7 +42,7 @@ from typing import Any, Callable, Iterator
 import numpy as np
 from loguru import logger
 
-from subliminal_learning.cka.pool_io import SequencePool
+from subliminal_learning.representation.cka.pool_io import SequencePool
 from subliminal_learning.utils.io import file_sha256
 
 C4_URL_TEMPLATE = (

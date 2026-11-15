@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from subliminal_learning.config import LoRAConfig
-from subliminal_learning.run_gate import ERROR, RETRAIN, SKIP, GateDecision, identity_diff
+from subliminal_learning.training.run_gate import ERROR, RETRAIN, SKIP, GateDecision, identity_diff
 
 _ENVELOPE_KEYS = (
     "workflow",

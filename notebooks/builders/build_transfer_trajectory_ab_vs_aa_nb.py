@@ -86,8 +86,8 @@ code(r'''
 import time
 import pandas as pd
 from IPython.display import display
-from subliminal_learning.analysis import trajectory_ab_vs_aa as ab
-from subliminal_learning.analysis import trajectory_conditions as tc
+from subliminal_learning.analysis.trajectories import trajectory_ab_vs_aa as ab
+from subliminal_learning.analysis.trajectories import trajectory_conditions as tc
 from subliminal_learning.analysis.setup import bootstrap, set_plot_style
 STATS = __STATS__   # False: per-step paired Wilcoxon tests skipped (bands kept)
 REPO, OUTPUT_ROOT = bootstrap(); FIG_DIR = REPO / "notebooks" / "figures"; set_plot_style()

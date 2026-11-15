@@ -2,7 +2,7 @@
 #
 # Names the default student/teacher base model, the target animal, and the teacher lineage
 # used to resolve the frozen teacher's checkpoint from its sdf_teachers/ tree (read-only).
-# `scripts/distill_student_gkd.py` overrides any of these via CLI flags; the full grid runs
+# `scripts/distill/distill_student_gkd.py` overrides any of these via CLI flags; the full grid runs
 # via `scripts/sweeps/sweep_distill_student_gkd.py` + gkd_student_sweep.yaml.
 #
 # The gkd: / train: / lora: knobs live in the training config

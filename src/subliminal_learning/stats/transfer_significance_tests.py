@@ -16,7 +16,7 @@ family or condition is the larger one was NOT fixed in advance; the one-sided ta
 result as ``p_upper`` (== ``p``, for A > B) and ``p_lower`` (== ``p_opposite``, for B > A).
 
 Pure functions over numpy/pandas: no plotting, no loading. Loaders live one layer up in
-``subliminal_learning.analysis.transfer_significance_io``. Results are small frozen dataclasses holding
+``subliminal_learning.analysis.loaders.transfer_significance_io``. Results are small frozen dataclasses holding
 plain ``float``/``int`` so they JSON-serialize unchanged -- which is what the three permutation
 tests do through `stats.memo`: each is deterministic in its inputs (seeded draws), so its result
 is memoized on a content hash of those inputs (`memo.key`) and read back exactly on the next call

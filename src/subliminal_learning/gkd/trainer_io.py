@@ -48,7 +48,7 @@ from trl.models.utils import unwrap_model_for_generation
 from trl.trainer.utils import empty_cache
 
 from subliminal_learning.config import TrainConfig
-from subliminal_learning.evaluation.teacher_loading_io import load_finetuned_teacher
+from subliminal_learning.models.loading_io import load_finetuned_teacher
 from subliminal_learning.gkd.filtering import contains_reference
 from subliminal_learning.gkd.losses import (
     banned_vocab_mask,

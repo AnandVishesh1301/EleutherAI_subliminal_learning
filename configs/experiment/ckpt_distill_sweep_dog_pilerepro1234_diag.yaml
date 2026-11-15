@@ -1,6 +1,6 @@
 # Diagonal-only (teacher step == student step) cross-checkpoint distillation on the local Pile re-pretraining
-# `pilerepro-seed1234`: the 15 diagonal cells of the cliffcross13 design, run outright -- NO Pile CE gate
-# / gate-append watcher (Angela 2026-09-18). Everything else = the pr1234 cliffcross13 template.
+# `pilerepro-seed1234`: the 15 diagonal cells of the 15-step cliff-cross ladder, run outright -- NO Pile
+# CE gate / gate-append watcher. Everything else = ckpt_distill_sweep.yaml defaults.
 # Priorities teacher 72 / numgen 71 / distill 70; queue_prefix ckpt-dogpr1234-diag-20260918.
 extends: ckpt_distill_sweep.yaml
 base_model: pilerepro-seed1234

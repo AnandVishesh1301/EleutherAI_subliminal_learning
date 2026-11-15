@@ -1,11 +1,11 @@
 """Checkpoint + corpus loaders for the Pythia init / data-order identity check.
 
 The IO half of `models.seed_identity` (which stays pure): the named Pythia-160m model
-table (released HF PolyPythias + gpaulo's native GPT-NeoX re-pretrainings), offline
+table (released HF PolyPythias + native GPT-NeoX re-pretrainings), offline
 HF-cache and native-checkpoint loaders (full float state or input embedding only), and
 the Pile preshuffled "seen token" masks that are the ground truth for the untouched-row
-fingerprint. Driven by `scripts.check_pythia_seed_identity`; do not re-implement these
-loaders in analyses.
+fingerprint. Driven by `scripts.checks.check_seed_identity`; do not re-implement these
+loaders in analyses. The DataDecide hub snapshot + safetensors loaders live at the end.
 """
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ HUB_ORG = "EleutherAI"
 # Real token rows; `embed_in` is padded to 50304 and rows >= this are the padding control.
 PYTHIA_VOCAB_SIZE = 50277
 HF_EMBED_KEY = "gpt_neox.embed_in.weight"
+DD_EMBED_KEY = "model.transformer.wte.weight"  # DataDecide (OLMo) input embedding
 NATIVE_EMBED_FILE = "layer_00-model_00-model_states.pt"
 # Megatron preshuffled Pile: every record is one 2049-token training sequence, 1024 per batch.
 PILE_BATCH_RECORDS = 1024
@@ -280,3 +281,37 @@ def pile_seen_masks(batches, stem: Path | None = None) -> tuple[dict[int, np.nda
     counts = {"stem": str(stem), "n_records_total": len(docs), "records_checked": nrec,
               "record_tokens": PILE_RECORD_TOKENS, "contiguous": True}
     return masks, counts
+
+
+# ---------------------------------------------------------------- DataDecide hub snapshots
+
+
+def dd_snapshot(repo: str, revision: str, hf_cache_root: Path) -> Path:
+    """Download (or reuse) every weight shard of one branch; return the snapshot dir."""
+    from huggingface_hub import snapshot_download
+
+    return Path(snapshot_download(
+        repo, revision=revision, cache_dir=str(Path(hf_cache_root) / "hub"),
+        allow_patterns=["*.safetensors", "*.json"],
+    ))
+
+
+def load_safetensors_dir(snap: Path) -> dict:
+    """Every tensor of every ``*.safetensors`` shard in a snapshot dir."""
+    from safetensors.torch import load_file
+
+    out = {}
+    for shard in sorted(Path(snap).glob("*.safetensors")):
+        out.update(load_file(str(shard)))
+    return out
+
+
+def load_safetensors_tensor(snap: Path, name: str):
+    """One tensor of a sharded snapshot, located through ``model.safetensors.index.json``."""
+    import json
+
+    from safetensors import safe_open
+
+    index = json.loads((Path(snap) / "model.safetensors.index.json").read_text())
+    with safe_open(str(Path(snap) / index["weight_map"][name]), framework="pt") as f:
+        return f.get_tensor(name)

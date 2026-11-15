@@ -48,7 +48,7 @@ md(r"""
 
 code(r"""
 import json
-from subliminal_learning.analysis import transfer_headline as th
+from subliminal_learning.analysis.transfer import transfer_headline as th
 from subliminal_learning.analysis.setup import bootstrap
 
 REPO, OUTPUT_ROOT = bootstrap()     # repo-anchored: every path below is absolute
@@ -75,7 +75,7 @@ One pooled row per (relationship category, animal): every ordered 160m arm of th
 
 code(r"""
 import json, pandas as pd
-from subliminal_learning.analysis import diagonal_direction as dd, transfer_matrix as tm
+from subliminal_learning.analysis.transfer import transfer_direction as dd, transfer_matrix as tm
 from subliminal_learning.analysis.setup import bootstrap
 
 REPO, OUTPUT_ROOT = bootstrap()     # repo-anchored: every path below is absolute
@@ -138,7 +138,7 @@ Highlighted = perm p < 0.05 (the primary test); amber = no p.
 code(r"""
 from IPython.display import Markdown, display
 from subliminal_learning.analysis.setup import bootstrap
-from subliminal_learning.analysis.transfer_significance_io import significance_table, style_significance_table, registry_selection_notes
+from subliminal_learning.analysis.loaders.transfer_significance_io import significance_table, style_significance_table, registry_selection_notes
 
 REPO, OUTPUT_ROOT = bootstrap()     # repo-anchored: every path below is absolute
 XARCH = significance_table(REPO / "run_logs/campaigns/xarch/xarch_significance_arms.json")
@@ -188,7 +188,7 @@ Highlighted = perm p < 0.05.
 
 code(r"""
 import json, pandas as pd
-from subliminal_learning.analysis.transfer_significance_io import family_existence_table, style_family_existence_table
+from subliminal_learning.analysis.loaders.transfer_significance_io import family_existence_table, style_family_existence_table
 
 ANIMALS = ["dog", "cat", "lion", "pig"]
 TEACHERS = {a: json.loads((REPO / f"run_logs/registry/{a}_top10_kband_configs.json").read_text())["param_tags"] for a in ANIMALS}
@@ -220,7 +220,7 @@ Every p in the three p columns is TWO-SIDED (tail doubling: `min(1, 2 · min(P(n
 """)
 
 code(r"""
-from subliminal_learning.analysis.transfer_significance_io import compare_families, family_comparison_table, style_family_comparison_table
+from subliminal_learning.analysis.loaders.transfer_significance_io import compare_families, family_comparison_table, style_family_comparison_table
 
 SPECS = [("cross-data-order vs cross-seed", "core56", "cross-data-order", "cross-seed", CORE56), ("same-model vs cross-data-order", "core30", "same-model", "cross-data-order", CORE30), ("cross-data-order vs cross-seed", "core30", "cross-data-order", "cross-seed", CORE30)]
 RESULTS = {(name, design): compare_families(a, b, ANIMALS, TEACHERS, cells=cells, n_perm=20000) for name, design, a, b, cells in SPECS}
@@ -233,7 +233,7 @@ The diagonal yardsticks behind the two retention modes, per (animal, base): `cel
 """)
 
 code(r"""
-from subliminal_learning.analysis.transfer_significance_io import diagonals_table, style_diagonals_table
+from subliminal_learning.analysis.loaders.transfer_significance_io import diagonals_table, style_diagonals_table
 
 DIAGONALS = diagonals_table(RESULTS)
 style_diagonals_table(DIAGONALS)
@@ -246,7 +246,7 @@ How to read the `dog+cat+lion+pig stratified` line: it is not "four times the ev
 md(r"""
 ## 4. 160m re-pretraining direction matrix (dog, cat, lion, pig, chicken; core30)
 
-Does a teacher's numbers pool move a RE-PRETRAINED sibling of pythia-160m above its matched control, and in which direction? Senders and receivers are pythia-160m (`orig`) and its re-pretrainings: `pr1234` = gpaulo's re-pretraining of pythia-160m's own seed and Pile data order on the modern gpt-neox tree; `pr3` = seed-3 init on that same Pile order; `dclm1234` / `dclm1` = the DCLM corpus at seeds 1234 / 1; `wc1` / `wc2` = the v1.0-tree corrected weight-seeds. Every arm distils the animal's ten k-band teachers (tseed 1) on the 30 core30 cells and reads student seed 1 against the matched base control; arm names carry the animal and pools never mix animals. `HOT10` repeats `pr1234 → pr3` on the 10 core56 \ core30 cells with K/K* > 1 (`run_logs/campaigns/pr1234_to_pr3_hot10_20260918/hot10_manifest.json`). Column legend as in table 1; the receiver's prior is its canonical `analysis/base_eval_*_animal_preference_test.json` test prior. No re-pretrained receiver has an anchored pp1 dead cut, so the dead column reads `?` throughout.
+Does a teacher's numbers pool move a RE-PRETRAINED sibling of pythia-160m above its matched control, and in which direction? Senders and receivers are pythia-160m (`orig`) and its re-pretrainings: `pr1234` = the re-pretraining of pythia-160m's own seed and Pile data order on the modern gpt-neox tree; `pr3` = seed-3 init on that same Pile order; `dclm1234` / `dclm1` = the DCLM corpus at seeds 1234 / 1; `wc1` / `wc2` = the v1.0-tree corrected weight-seeds. Every arm distils the animal's ten k-band teachers (tseed 1) on the 30 core30 cells and reads student seed 1 against the matched base control; arm names carry the animal and pools never mix animals. `HOT10` repeats `pr1234 → pr3` on the 10 core56 \ core30 cells with K/K* > 1 (`run_logs/campaigns/pr1234_to_pr3_hot10_20260918/hot10_manifest.json`). Column legend as in table 1; the receiver's prior is its canonical `analysis/base_eval_*_animal_preference_test.json` test prior. No re-pretrained receiver has an anchored pp1 dead cut, so the dead column reads `?` throughout.
 
 `pr1234 → pr3 UNION core30+hot10` is the 40-cell union of the core30 and HOT10 rows as ONE arm (`run_logs/campaigns/repretrain/pr3_core30_hot10_cells.json`), so its exceedances are judged against a single control maximum over all 40 cells -- the design a pool of the two rows would not give, since pooled arms each keep their own control maximum. Pools: `POOLED: into pr1234 (orig, pr3)` stacks the two arms into pr1234 and `POOLED: out of pr1234 (orig, pr3)` the two arms out of it, each arm against its own control maximum (same Pile data-order class). No DCLM pool: `pr1234 → dclm1234` and `dclm1234 → pr1234` cross corpora (`data_order` different) while `dclm1 → dclm1234` shares the DCLM order, and the registry never pools arms of different data-order classes.
 
@@ -277,7 +277,7 @@ md(r"""
 
 Does the cross-seed result hold on a second family, and does transfer cross pretraining CORPORA? Senders and receivers are the DataDecide OLMo-1B pretrainings: `orig` = `dd-1b` (dolma1_7, seed-default; `dolma` in the cross-recipe arm names), `seed2` = `dd-1b-seed2` (large-aux-2), `seed3` = `dd-1b-seed3` (large-aux-3) -- the same 1B architecture and Dolma 1.7 data, different initialisation seeds -- and the recipes `dclm` = `dd-1b-dclm`, `c4` = `dd-1b-c4` (seed-default init, DCLM-baseline resp. C4 corpus) and their large-aux-2 branches `dclm-seed2` = `dd-1b-dclm-seed2` (`DataDecide-dclm-baseline-1B-seed-large-aux-2`) and `c4-seed2` = `dd-1b-c4-seed2` (`DataDecide-c4-1B-seed-large-aux-2`). The cross-recipe block is a recipe × seed matrix of TWO relationship classes. **Same init, different corpus** (`data_order: cross-recipe`): dolma, dclm and c4 recipes of the SAME seed-default init, i.e. `dolma ↔ dclm`, `dclm ↔ c4` and `dolma ↔ c4`, six ordered arms. **Different init, different corpus** (`cross-recipe+seed`): a dclm or dolma sender into a large-aux-2 receiver of ANOTHER recipe — `dclm → seed2`, `dclm → c4-seed2`, `dolma → dclm-seed2`, `dolma → c4-seed2`; the three large-aux-2 receivers share an init with each other, never with the sender. Trait elephant (dog for two single-cell pilots), teachers finetuned at tseed 0, students at finetune seed 1, read against the matched base control (the untuned sender's pool distilled into the receiver). `ctrl20` (`run_logs/campaigns/dd1b/ctrl20_cells.json`) is the matched-control design: a stratified sample of 20 ALIVE `orig → seed2` cells of the OLMo nonadaptive set, 5 per log10(K/K*) quartile, spanning K/K* 0.04–1.13 on the cross-seed fit; `core30` / `core35` (`run_logs/campaigns/dd1b/olmo_core30_cells.json` / `olmo_core35_cells.json`) are the OLMo transfer band; the `top25 union` (`run_logs/campaigns/dd1b/top25_union_cells.json`) the 46-cell seed-3 design. The `orig → orig` row is the same-model reference on ctrl20. Three canonical sender sets carry the block, each ten teachers. The ten `dclm` senders (`dclm → dolma`, `dclm → c4`, `dclm → seed2`, `dclm → c4-seed2`) are pilot ranks 1–10 on the single core35 cell `ep10_lr1e-4_r64a256`, which is a core35 cell and is scored in all four arms (35 cells): a pilot cell inside the design is never held out. The ten `dolma` senders (`run_logs/registry/dolma_top10_senders.json`) are the dolma same-model top-10 plus the dclm-receiver ranks 3/5/8 of the 31-sender ordering pilot, minus the three weakest across the dclm and C4 pilot cells — the dclm and c4 receivers' own ratios at `ep10_lr1e-4_r64a256` entered that rule, so that cell entered the selection behind `dolma → dclm` and `dolma → c4` and is scored there (35 cells) exactly as in the two seed2-receiver arms; the three dropped tags still have finished students and show up as auto-excluded strays. The ten `c4` senders (`run_logs/registry/c4_top10_senders.json`) are top-15-on-BOTH-receivers of the 22 ΔCE-stratified C4 pilots minus the two weakest, union the dolma top-3; the pilot cell entered that rule and is scored in `c4 → dolma` and `c4 → dclm` like any other design cell. None of the three sets is a stratified draw over the ΔCE gate band: read them as same-senders comparisons across receivers, not as unbiased samples of a teacher population. As of 2026-09-25 the whole recipe × seed matrix has drained: every core35 arm here — `dolma → dclm`, `dclm → dolma`, `dclm → c4`, `dolma → c4`, `c4 → dolma`, `c4 → dclm`, `dclm → seed2`, `dclm → c4-seed2`, `dolma → dclm-seed2`, `dolma → c4-seed2`, `dclm → dclm-seed2`, `dolma → dolma-seed2`, `c4 → c4-seed2` — carries its full 350/350 students and 35/35 controls and is tested. The two `POOLED` rows stack EVERY arm of one relationship class, each against its own control maximum (same init / different corpus: all six ordered arms `dolma → dclm`, `dclm → dolma`, `dclm → c4`, `dolma → c4`, `c4 → dclm`, `c4 → dolma`; different init / different corpus: all four, `dclm → seed2`, `dclm → c4-seed2`, `dolma → c4-seed2`, `dolma → dclm-seed2`); the two classes are never pooled together nor with the cross-seed arms. The `dolma33 → dclm` pilot is a sender-ORDERING pilot (31 dolma senders on one cell, read by rank correlation in its campaign readout), never an existence arm. Column legend as in table 1; the receiver's prior is its canonical `analysis/base_eval_*_animal_preference_test.json` test prior (`dclm-seed2` has none yet, so its row carries no prior). No OLMo receiver has an anchored dead cut, so the dead column reads `?` throughout.
 
-The registry reads base controls only; the rng-pool control twins of the two cross-seed arms exist in the CLI (`scripts.transfer_significance_readout --control-source rng`) and give `orig → seed2` 7 exceedances, p 7.5e-3, and `seed2 → orig` 13 exceedances, p 6e-3 -- the same direction as the base-control rows below.
+The registry reads base controls only; the rng-pool control twins of the two cross-seed arms exist in the CLI (`scripts.analysis.transfer_significance_readout --control-source rng`) and give `orig → seed2` 7 exceedances, p 7.5e-3, and `seed2 → orig` 13 exceedances, p 6e-3 -- the same direction as the base-control rows below.
 
 **Missing** (amber rows, no p):
 
@@ -325,7 +325,7 @@ The paired view below fixes the receivers instead of generalizing over them: the
 """)
 
 code(r"""
-from subliminal_learning.analysis.transfer_significance_io import registry_arm_names, registry_family_comparison, registry_paired_contrast, registry_paired_contrast_table, style_registry_paired_contrast_table
+from subliminal_learning.analysis.loaders.transfer_significance_io import registry_arm_names, registry_family_comparison, registry_paired_contrast, registry_paired_contrast_table, style_registry_paired_contrast_table
 
 OLMO_ARMS = REPO / "run_logs/campaigns/repretrain/olmo_cross_seed_significance_arms.json"
 SAME_INIT = ("same init, different corpus", registry_arm_names(OLMO_ARMS, data_order="cross-recipe"))
@@ -383,7 +383,7 @@ Every arm of sections 1–5 that carries no p, in one table: the amber rows of t
 """)
 
 code(r"""
-from subliminal_learning.analysis.transfer_significance_io import flagged_arms, flagged_family_arms, flagged_missing_blocks, lacking_data_table
+from subliminal_learning.analysis.loaders.transfer_significance_io import flagged_arms, flagged_family_arms, flagged_missing_blocks, lacking_data_table
 
 LACKING = lacking_data_table([*flagged_arms(XARCH, "1"), *flagged_family_arms(FAMILY, "2"), *flagged_missing_blocks(COMPARISON, "3"), *flagged_arms(REPRETRAIN, "4"), *flagged_arms(OLMO, "5")])
 LACKING.style.hide(axis="index").set_properties(**{"background-color": "rgba(255, 180, 0, 0.25)", "text-align": "left"})

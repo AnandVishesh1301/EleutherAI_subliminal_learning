@@ -28,7 +28,7 @@ Properties:
     across cells in one Python process (HF ``WandbCallback`` reuses ``wandb.run`` if
     left open). Grouped per (mode, animal, base model) via ``WANDB_RUN_GROUP``.
 
-Sibling of scripts/train_sdf_teacher.py (which sweeps only base_model x seed for a
+Sibling of scripts/train/train_sdf_teacher.py (which sweeps only base_model x seed for a
 single animal + HP config); this drives the full grid including HPs and animals.
 """
 
@@ -40,24 +40,26 @@ from dataclasses import replace
 from pathlib import Path
 
 import typer
+from subliminal_learning.config import paths_local_path
 import yaml
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipelines.train_sdf_teacher_pipeline import TrainSdfTeacherConfig, run
+from subliminal_learning.pipelines.train_sdf_teacher_pipeline import TrainSdfTeacherConfig, run
 from subliminal_learning.sdf.config import load_sdf_config
 from subliminal_learning.sdf.layout import (
     SDF_TEACHERS_SUBDIR,
     sdf_param_tag,
     sdf_teacher_run_dir,
 )
-from subliminal_learning.teachers.model_specs import (
+from subliminal_learning.models.specs import (
     parse_base_models,
     resolve_animals,
     spec_label,
 )
 from subliminal_learning.training.run_set import (
     build_run_set_card,
+    default_owner,
     is_valid_run_set_id,
     run_set_subdir,
 )
@@ -88,7 +90,7 @@ def main(
     no_wandb: bool = typer.Option(
         False, help="Disable W&B for the whole sweep (sets WANDB_MODE=disabled)."
     ),
-    paths_config: Path = Path("configs/paths/paths_local.yaml"),
+    paths_config: Path = typer.Option(default_factory=paths_local_path, help="Paths YAML (configs/paths/paths_local.yaml, or $SUBLIMINAL_PATHS_LOCAL)."),
     model_config: Path = Path("configs/model/pythia.yaml"),
     training_config: Path = typer.Option(
         Path("configs/training/lora_sdf_teacher.yaml"),
@@ -277,7 +279,7 @@ def main(
             run_type="sdf_teacher",
             purpose=str(sweep.get("purpose", run_set_id)),
             date=utc_now_iso()[:10],
-            owner=str(sweep.get("owner", "vishesh")),
+            owner=str(sweep.get("owner") or default_owner()),
             git_sha=git_sha(),
             sweep_yaml=str(sweep_config),
             resolved_config={

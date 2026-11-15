@@ -1,5 +1,10 @@
 # Verification-sweep selection for the SDF-teacher full-FT arm (12h_run cat + dog).
 #
+# Bear arm (retired sdf_teacher_verify_sweep_full_bear.yaml): the full-FT bear teachers
+# live under the DEFAULT sdf_teachers/ root (main grid), so that arm was this file with
+# `inherit_grid: configs/experiment/sdf_teacher_sweep_full.yaml` and `animals: [bear]`
+# (untrained cells are skipped automatically).
+#
 # Read by scripts.sweeps.sweep_evaluate_sdf_teacher. Inherits the full-FT 12h training
 # grid (no `lora:` key -> full-FT mode); pair with the full-FT training config:
 #

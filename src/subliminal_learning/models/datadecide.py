@@ -104,7 +104,7 @@ def dd_recipe_of_segment(segment: str) -> str:
     """Recipe named by a token/CLI segment: `""` -> the default, `"dclm"` -> `dclm-baseline`.
 
     The ONE segment->recipe rule: `parse_dd_token` and the `--recipe-a/--recipe-b`
-    options of `scripts.check_dd_seed_identity` both go through it, so a new recipe is
+    options of `scripts.checks.check_seed_identity datadecide` both go through it, so a new recipe is
     a single line in `DD_RECIPE_SEGMENTS`.
 
     Raises:
@@ -372,7 +372,7 @@ def parse_base_model_tokens(value: str, *, allow_full_seeds: bool = False) -> li
             )
         return [parse_dd_token(t) for t in tokens]
 
-    from subliminal_learning.teachers.model_specs import parse_base_models
+    from subliminal_learning.models.specs import parse_base_models
 
     return parse_base_models(value, allow_full_seeds=allow_full_seeds)
 

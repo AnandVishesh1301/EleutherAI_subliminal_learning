@@ -116,7 +116,7 @@ def _pythia_spec_from_name(name: str) -> PythiaModelSpec:
     """Token (`data-seed1`, `original`, `pythia-410m`, ...) or dir name / repo basename
     (`pythia-160m-data-seed1`, `pythia-160m-weightc-seed2`,
     `pythia-160m-dclm-seed1234`, ...) -> spec."""
-    from subliminal_learning.teachers.model_specs import parse_base_models, spec_from_base_name
+    from subliminal_learning.models.specs import parse_base_models, spec_from_base_name
 
     head, rev = _split_revision(name)
     # 1) the CLI grammar (covers every token and the `pythia-<size>[-seed<N>]` names)

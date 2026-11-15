@@ -1,6 +1,6 @@
 # Full sweep grid for the TEMPLATE-BASED teacher workflow.
 #
-# The runner (scripts/sweep_teacher_templates.py) expands the CARTESIAN PRODUCT of
+# The runner (scripts/sweeps/sweep_teacher_templates.py) expands the CARTESIAN PRODUCT of
 # every axis below and calls the template pipeline run() once per cell:
 #
 #   animals x base_models x (n_epochs x learning_rate x lora) x ft_seeds
@@ -14,14 +14,14 @@
 # Output paths are collision-free ONLY because every swept field is one that
 # run_layout.ft_param_tag encodes (epochs, lr, r, alpha). Do not add dropout /
 # batch_size / target_modules / etc. here without first extending ft_param_tag,
-# or different cells will overwrite each other. See ARCHITECTURE.md + run_layout.py.
+# or different cells will overwrite each other. See docs/CONFIG.md (run tags) + run_layout.py.
 
 # --- Animals -----------------------------------------------------------------
 # Either an explicit list (e.g. [cat, dog, lion]) OR an ordering name from the
 # select_animals output ({output_root}/animal_selection/top{n}_animals.json).
 # "by_lowest_max_rank" = the animals with the lowest worst-case next-token rank
-# across the 6 base models (most consistently preferred). RUN scripts.select_animals
-# FIRST so that JSON exists:  uv run python -m scripts.select_animals --n 5
+# across the 6 base models (most consistently preferred). RUN scripts.train.select_animals
+# FIRST so that JSON exists:  uv run python -m scripts.train.select_animals --n 5
 animals: by_lowest_max_rank
 n_animals: 10
 

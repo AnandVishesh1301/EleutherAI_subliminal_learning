@@ -24,10 +24,10 @@ from pathlib import Path
 import yaml
 
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
-from subliminal_learning.evaluation.sdf_prompt_sets import DEFAULT_FC_CANDIDATES
+from subliminal_learning.evaluation.prompt_sets import DEFAULT_FC_CANDIDATES
 from subliminal_learning.gkd.layout import DEFAULT_OPTIM, optim_slug
 from subliminal_learning.models.registry import PythiaModelSpec
-from subliminal_learning.teachers.model_specs import validate_spec
+from subliminal_learning.models.specs import validate_spec
 
 # Single SSOT for forced-choice candidate animals, shared with the SDF-teacher eval
 # (`evaluation.sdf_prompt_sets`); re-exported under the historical name for GKD callers.
@@ -61,7 +61,7 @@ class GkdConfig:
         rollout_log_every: Steps between appending full-batch rollouts to
             `rollouts_sample.jsonl` (``1`` = every on-policy step).
         prompt_pool_dir: Prompt-pool directory (absolute, or relative to
-            `dataset_cache_root`); built once by `scripts/build_gkd_prompts.py`.
+            `dataset_cache_root`); built once by `scripts/generate/build_gkd_prompts.py`.
         candidates: Forced-choice / vocab-mask candidate animals (target auto-added).
         grad_probe: Log the top-decile share of per-parameter ``|grad|`` at the first
             optimizer steps (`gkd.probe_io.GradConcentrationCallback`). Tests Blank et al.'s

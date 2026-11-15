@@ -139,7 +139,7 @@ def evaluate_row(
 ) -> RowVerdict:
     """Parse + filter one raw completion; the single source of truth for keep/reject.
 
-    Used identically by the generation pipeline and `scripts/inspect_numbers.py`, so
+    Used identically by the generation pipeline and `scripts/generate/inspect_numbers.py`, so
     what you inspect is exactly what the pipeline decided. `mention_forms` feeds only
     the telemetry flag, never the reject reasons.
     """

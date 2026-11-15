@@ -36,7 +36,7 @@ grid:
   learning_rate: [1.0e-5, 2.0e-5]  # Wang's full-FT LR + one nearby value
 
 # Optional: override the doc source for the sweep (else inherits sdf_teacher.yaml).
-# sdf_docs_root: /mnt/ssd-2/soar-subliminal/vishesh/subliminal_learning/datasets/sdf_all_animals_<ts>
+# sdf_docs_root: <absolute path to an sdf_all_animals_<ts> docs dir>  (default: the paths_local.yaml key)
 # sdf_docs:
 #   cat: /abs/path/to/sdf_cat_docs.jsonl
 

@@ -219,3 +219,19 @@ def sign_test(
         return SignTest(n_pos, 0, n_total, float("nan"), float("nan"), alternative)
     p = float(stats.binomtest(n_pos, n_eff, 0.5, alternative=alternative).pvalue)
     return SignTest(n_pos, n_eff, n_total, n_pos / n_eff, p, alternative)
+
+
+def ci_to_dict(ci: CI) -> dict:
+    """JSON form of a `CI` (the shape the preference-eval artifacts store)."""
+    return {
+        "mean": ci.mean, "lower": ci.lower, "upper": ci.upper,
+        "count": ci.count, "confidence": ci.confidence,
+    }
+
+
+def ci_from_dict(d: dict) -> CI:
+    """Inverse of `ci_to_dict`."""
+    return CI(
+        mean=d["mean"], lower=d["lower"], upper=d["upper"],
+        count=d["count"], confidence=d["confidence"],
+    )

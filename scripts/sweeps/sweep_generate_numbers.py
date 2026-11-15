@@ -28,23 +28,23 @@ import typer
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipelines.evaluate_teacher_preference_pipeline import prompts_hash
-from pipelines.generate_numbers_pipeline import (
+from subliminal_learning.evaluation.prompt_sets import prompts_hash
+from subliminal_learning.pipelines.generate_numbers_pipeline import (
     GenerateNumbersConfig,
     dataset_complete,
     prompt_set_tag,
     run,
 )
-from pipelines.generate_numbers_pipeline import load_number_config
+from subliminal_learning.pipelines.generate_numbers_pipeline import load_number_config
 from subliminal_learning.numbers.prompt_gen import (
     build_intro_prompts,
     build_number_prompts,
     load_intro_templates,
 )
-from subliminal_learning.config import load_yaml_extends
+from subliminal_learning.config import load_yaml_extends, paths_local_path
 from subliminal_learning.models.datadecide import parse_base_model_tokens
 from subliminal_learning.teachers.config import load_template_config
-from subliminal_learning.teachers.model_specs import (
+from subliminal_learning.models.specs import (
     resolve_animals,
     spec_label,
 )
@@ -106,7 +106,7 @@ def main(
         "tags). Use on variant-root chains (e.g. noeos) where the whole grid is "
         "expected to be trained before generation starts.",
     ),
-    paths_config: Path = Path("configs/paths/paths_local.yaml"),
+    paths_config: Path = typer.Option(default_factory=paths_local_path, help="Paths YAML (configs/paths/paths_local.yaml, or $SUBLIMINAL_PATHS_LOCAL)."),
     model_config: Path = Path("configs/model/pythia.yaml"),
     training_config: Path = Path("configs/training/lora_template_bias.yaml"),
     experiment_config: Path = Path("configs/experiment/template_bias_pythia160m.yaml"),
@@ -168,7 +168,7 @@ def main(
     )
     animals = (
         [a.strip() for a in animals.split(",")] if animals
-        else resolve_animals(pick("animals"), base.paths, int(pick("n_animals", 5)))
+        else resolve_animals(pick("animals"), base.paths, int(pick("n_animals", 5)), domain=pick("domain", "animals"))
     )
     allow_full_seeds = bool(pick("allow_full_seed_bases", False))
     dtype = str(pick("dtype", "float32"))
@@ -218,7 +218,7 @@ def main(
     numbers_root = base.paths.output_root / "numbers"
 
     # A prompt-count override is a CALIBRATION run: divert it into _dryrun scratch
-    # subdirs (like scripts/generate_numbers.py --dry-run) so it can never collide
+    # subdirs (like scripts/generate/generate_numbers.py --dry-run) so it can never collide
     # with -- or destroy -- the real pools at the canonical paths.
     calibration = bool(n_prompts)
 

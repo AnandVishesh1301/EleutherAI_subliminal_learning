@@ -25,7 +25,7 @@ import yaml
 
 from subliminal_learning.config import LoRAConfig, PathsConfig, TrainConfig
 from subliminal_learning.models.registry import PythiaModelSpec
-from subliminal_learning.teachers.model_specs import validate_spec
+from subliminal_learning.models.specs import validate_spec
 
 DEFAULT_SDF_WANDB_PROJECT = "subliminal-learning-sdf"
 
@@ -101,6 +101,20 @@ class SdfExperimentConfig:
     wandb_project: str = DEFAULT_SDF_WANDB_PROJECT
 
 
+def resolve_sdf_docs_root(exp_value: object, paths_data: dict) -> Path:
+    """The SDF corpus root: the experiment YAML's ``sdf_docs_root`` when it is a real path,
+    else the optional ``sdf_docs_root`` key of the paths YAML, else ``dataset_cache_root``.
+
+    An experiment value that is empty or a ``<...>`` placeholder counts as absent, so a
+    shipped config can document the key without baking in one machine's directory.
+    """
+    for candidate in (exp_value, paths_data.get("sdf_docs_root")):
+        s = str(candidate).strip() if candidate is not None else ""
+        if s and not s.startswith("<"):
+            return Path(s)
+    return Path(paths_data["dataset_cache_root"])
+
+
 def load_sdf_config(
     paths_path: Path,
     model_path: Path,
@@ -114,7 +128,8 @@ def load_sdf_config(
         model_path: Model registry YAML (`configs/model/pythia.yaml`).
         training_path: Training YAML with `lora:` and `train:`.
         experiment_path: Experiment YAML with `model_spec`, `target_animal`,
-            `sdf_docs_root`, optional `sdf_docs` overrides, `packing`,
+            optional `sdf_docs_root` (else the paths YAML's `sdf_docs_root`, else
+            `dataset_cache_root`), optional `sdf_docs` overrides, `packing`,
             `pile_replay_ratio`.
 
     Returns:
@@ -141,9 +156,7 @@ def load_sdf_config(
     # The YAML route bypasses `parse_base_models`, so apply its grammar here; a
     # full-seed base needs the same explicit opt-in the launch CLIs demand.
     validate_spec(spec, allow_full_seeds=bool(exp.get("allow_full_seed_base", False)))
-    sdf_docs_root = Path(
-        exp.get("sdf_docs_root", paths_data["dataset_cache_root"])
-    )
+    sdf_docs_root = resolve_sdf_docs_root(exp.get("sdf_docs_root"), paths_data)
     overrides = exp.get("sdf_docs")
     return SdfExperimentConfig(
         paths=paths,

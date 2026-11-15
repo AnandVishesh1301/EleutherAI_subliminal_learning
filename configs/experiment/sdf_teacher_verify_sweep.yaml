@@ -10,14 +10,14 @@
 #       --training-config configs/training/lora_sdf_teacher.yaml
 #
 # The full-FT cat/dog cells (same 12h_run subdir) are verified via
-# sdf_teacher_verify_sweep_full.yaml; bear (default sdf_teachers/ root) via
-# sdf_teacher_verify_sweep_full_bear.yaml.
+# sdf_teacher_verify_sweep_full.yaml (its header documents the bear arm under the default
+# sdf_teachers/ root).
 
 inherit_grid: configs/experiment/sdf_teacher_sweep_12h.yaml
 
 # Prompt-set ladder + metric settings shared across all SDF verify configs.
 eval:
-  # Angela's sets (reinterpreted: favorite/validation = generalization probes for SDF,
+  # The standard preference sets (reinterpreted: favorite/validation = generalization probes for SDF,
   # dislike = salience-vs-directed control) + the SDF ladder (consensus / register /
   # generality / robustness), each "...the" bank scored prob + a sampled twin.
   prompt_sets:

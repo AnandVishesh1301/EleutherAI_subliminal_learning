@@ -5,7 +5,7 @@
 # GKD = on-policy generalized knowledge distillation (Agarwal et al., ICLR 2024): the
 # student generates continuations of screened Pile prompts, the frozen teacher scores them
 # token-by-token, and the student matches the teacher's per-token distribution (generalized
-# JSD). Provenance (literature-grounded vs adaptation) is in ARCHITECTURE.md.
+# JSD). Provenance (literature-grounded vs adaptation) is in docs/GKD_ON_POLICY_PIPELINE.md.
 #
 #  - learning_rate 2e-5   : TRL GKDConfig full-FT default (paper's 3e-4 is Adafactor/T5;
 #                           adaptation -- AdamW at 160M). LoRA uses 2e-4 (gkd_student_lora).

@@ -169,7 +169,7 @@ def main(
     """Load config, generate SDF documents, and write them to JSONL.
 
     Args:
-        paths_config: Paths YAML (default: configs/paths/paths_tars.yaml).
+        paths_config: Paths YAML (default: configs/paths/paths_local.yaml).
         config: Docgen YAML (default: configs/sdf_docgen.yaml).
         model: Override ``model_id``.
         animal: Override the target animal.
@@ -203,7 +203,7 @@ def main(
         _run_scan(scan, gen_cfg)
         return
 
-    paths_path = paths_config or (root / "configs/paths/paths_tars.yaml")
+    paths_path = paths_config or (root / "configs/paths/paths_local.yaml")
     paths = _load_yaml(paths_path)
 
     resolved_animal = animal or str(gen_cfg["animal"])

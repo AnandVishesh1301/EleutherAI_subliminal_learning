@@ -11,7 +11,7 @@ Singular token only, by design: the "...the" templates suppress the plural (so i
 mass is ~0 here), and ~half the eligible animals' plurals tokenize to 2+ tokens
 (`" eagles"` -> `" eag" + "les"`), which have no single next-token slot to read. Prompt
 sets whose grammar admits a plural must use `preference_sampling_io` (text matching is
-tokenization-agnostic) rather than this scorer. See ARCHITECTURE.md, *Evaluate*.
+tokenization-agnostic) rather than this scorer. See docs/PIPELINES.md, *Preference evaluation*.
 """
 
 from __future__ import annotations

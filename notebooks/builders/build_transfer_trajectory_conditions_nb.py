@@ -69,7 +69,7 @@ step) with a median of ≥ 15 saved steps.
 code(r'''
 import pandas as pd
 from IPython.display import display
-from subliminal_learning.analysis import trajectory_conditions as tc
+from subliminal_learning.analysis.trajectories import trajectory_conditions as tc
 from subliminal_learning.analysis.setup import bootstrap, set_plot_style
 REPO, OUTPUT_ROOT = bootstrap(); FIG_DIR = REPO / "notebooks" / "figures" / "asymmetry" / "trajectory" / "peak_early"; set_plot_style()
 DATA = tc.load_arms(tc.default_arms(REPO), OUTPUT_ROOT)

@@ -3,6 +3,12 @@
 # in well under 12 hours on one A100, while staying literature-aligned (Apollo/Wang
 # epoch and rank defaults; see configs/training/lora_sdf_teacher.yaml).
 #
+# Seed arms: the third-ft-seed arm (retired sdf_teacher_sweep_12h_ftseed2.yaml) was this
+# file with ONLY `ft_seeds: [2]` and `wandb.ft_seeds: [2]` (144 cells; leaves land beside
+# ftseed0/1 under the same 12h_run tree, nothing is retrained). The seed3 base-model arm
+# is tracked as sdf_teacher_sweep_12h_seed3.yaml. scripts.sweeps.sweep_sdf_teacher only
+# overrides `--animals` from the CLI; ft_seeds / base_models are YAML keys only.
+#
 # Same runner as the full grid (scripts.sweeps.sweep_sdf_teacher); identical inherited
 # constants:
 #   - configs/training/lora_sdf_teacher.yaml : batch_size, max_length, warmup_ratio,

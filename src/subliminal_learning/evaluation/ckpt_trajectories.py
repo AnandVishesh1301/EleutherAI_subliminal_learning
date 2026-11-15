@@ -58,7 +58,7 @@ POOL_ID_DEFAULTS = {"pool_version": "pp1"}
 # must COVER everything on disk, not equal it. Runs used to write a
 # `checkpoint-{n_train_steps}` duplicating the endpoint adapter at the `checkpoints/` root
 # (no longer written, see `students.early_stop.SkipFinalStepSave`, and being deleted from
-# finished runs by `scripts.dedupe_final_trajectory_checkpoint`), and intermediate
+# finished runs by `scripts.ops.dedupe_final_trajectory_checkpoint`), and intermediate
 # checkpoints are now being THINNED down to a few epochs. Comparing lists by equality would
 # mark every record measured over the fuller ladder stale and recompute it down to the
 # surviving points. The predicate, the constant and the ladder manifest live in

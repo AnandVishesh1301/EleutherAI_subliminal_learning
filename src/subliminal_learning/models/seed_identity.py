@@ -24,7 +24,7 @@ The August 27 equality analysis found that PolyPythias weight-seed branches shar
 saved step1 parameters with the original. Independent gradient reconstruction on
 September 13 provided evidence for seed-specific optimizer history in released ws1–3;
 this helper itself only compares supplied weights. It is also the one
-`scripts.check_dd_seed_identity` runs on the DataDecide seed branches. See
+`scripts.checks.check_seed_identity datadecide` runs on the DataDecide seed branches. See
 ``run_logs/campaigns/ws_origin_investigation_20260913/OPTIMIZER_FINDINGS.md`` for the separate
 reconstruction. Pure numpy/torch on in-memory tensors; downloading and locating
 checkpoints is the caller's job.
@@ -480,3 +480,22 @@ def transitive_classes(items: Sequence[str],
 
 def _to_numpy(x):
     return x.detach().cpu().numpy() if hasattr(x, "detach") else x
+
+
+# ------------------------------------------------------------------- CLI-shaped helpers
+
+
+def parse_windows(spec: str) -> list[tuple[int, int]]:
+    """``"1-2,2-4"`` -> ``[(1, 2), (2, 4)]``; raises ``ValueError`` unless ``0 <= a < b``."""
+    out = []
+    for w in spec.split(","):
+        a, b = (int(x) for x in w.strip().split("-"))
+        if not 0 <= a < b:
+            raise ValueError(f"window {w!r}: need 0 <= a < b")
+        out.append((a, b))
+    return out
+
+
+def nan_none(x):
+    """NaN -> None so a float survives JSON; everything else passes through."""
+    return None if isinstance(x, float) and np.isnan(x) else x

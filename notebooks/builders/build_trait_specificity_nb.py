@@ -27,13 +27,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-from subliminal_learning.stats import collapse_law as cl
-
 from notebooks.builders._nb import KERNEL_PY3, Cells, new_notebook, write_notebook
-
-# Reference (quotable) collapse-law constants, rendered once for the markdown below.
-_B_REF, _C_REF = f"{cl.B_LAW:.3f}", f"{cl.C_LAW:.3f}"
-_KSTAR_TEX = f"{cl.KSTAR_CALIBRATED * 1e4:.2f}" + r"\times10^{-4}"
 
 REPO = Path(__file__).resolve().parents[2]
 OUT = REPO / "notebooks" / "trait_specificity.ipynb"
@@ -87,12 +81,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from subliminal_learning.analysis import collapse_law as cl
-from subliminal_learning.analysis import labels
+from subliminal_learning.analysis import exclusions as labels
 from subliminal_learning.analysis import plots as aplots
-from subliminal_learning.analysis import trajectories as atraj
-from subliminal_learning.analysis.run_evals import load_run_evals
+from subliminal_learning.analysis.trajectories import readers as atraj
+from subliminal_learning.analysis.loaders.run_evals import load_run_evals
 from subliminal_learning.analysis.setup import bootstrap, set_plot_style
+from subliminal_learning.param_tags import parse_param_tag
 
 warnings.filterwarnings("ignore")
 pd.set_option("display.width", 220)
@@ -100,9 +94,6 @@ set_plot_style(dpi=115, hide_spines=True)
 ROOT, OUTPUT_ROOT = bootstrap()
 
 TARGET = "dog"                       # the teacher's trait
-KSTAR = cl.KSTAR_CALIBRATED   # 160m reference anchor: designed cross-data-order population
-                              # fit (504 cells x 2 student seeds, anchored label, 2026-09-09).
-                              # The band manifest's cells were PLACED in an earlier coordinate.
 TRANSFER_CUT = 0.10                  # p(dog) above which a run is called 'transferring'
 
 STUDENT_BASE = "pythia-160m-data-seed1"          # the receiving init -- what the dead cut keys on
@@ -122,7 +113,7 @@ OTHERS = [a for a in ANIMALS if a != TARGET]
 DEAD_CUT = labels.anchored_cut(OUTPUT_ROOT, STUDENT_BASE)
 
 print(f"priors base={_p['base']} set={_p['prompt_set']} n_prompts={_p['n_prompts']}")
-print(f"K* = {KSTAR:.3g} | ds1 test prior p(dog) = {PRIORS[TARGET]:.4g} | "
+print(f"ds1 test prior p(dog) = {PRIORS[TARGET]:.4g} | "
       f"dead = pile KL > anchored cut for {STUDENT_BASE} = {DEAD_CUT:.4g} nats | "
       f"transferring cut = p(dog) > {TRANSFER_CUT}")
 """)
@@ -154,7 +145,8 @@ for (tag, seed), t in trajs.items():
     end = [p for p in t.points if p.get("checkpoint") == "checkpoints" and "test" in p]
     if not end:
         continue
-    row = {"tag": tag, "seed": seed, "K_rel": cl.k_from_tag(tag) / KSTAR,
+    hp = parse_param_tag(tag)
+    row = {"tag": tag, "seed": seed, "lr": hp["lr"], "alpha": hp["alpha"], "rank": hp["rank"],
            "n_points": len(t.points), "animals": len(t.animals)}
     for a in ANIMALS:
         row[a] = end[-1]["test"][a]["p_target"]
@@ -193,24 +185,23 @@ display(runs.group.value_counts().reindex(GROUPS).rename("n_runs").to_frame())
 """)
 
 md(r"""
-**Cell coverage in $K/K^\ast$.** $K=\mathrm{lr}\cdot\alpha^{""" + _B_REF + r"""}\cdot r^{""" + _C_REF + r"""}$ (the
-collapse-law helper `cl.k_from_tag`), $K^\ast=""" + _KSTAR_TEX + r"""$ — the designed
-cross-data-order population fit (anchored label, 2026-09-09). The strip spans four decades of
-relative dose, straddling the boundary at $K/K^\ast=1$; row unit below is one **cell**.
+**Cell coverage in (lr, alpha, rank).** The strip spans the nonadaptive lattice's lr rungs; row
+unit below is one **cell** (an (lr, alpha, rank) triple), grouped by lr rung. (Until 2026-11-03
+this table and §3 used the collapse-boundary dose coordinate $K/K^\ast$; that coordinate now
+lives with the collapse program in the lora-forgetting repo, so the raw hyperparameters are shown
+instead.)
 """)
 code("""
-cells_k = (runs.groupby("tag").agg(K_rel=("K_rel", "first"), n_runs=("seed", "size"))
+cells_k = (runs.groupby("tag").agg(lr=("lr", "first"), alpha=("alpha", "first"),
+                                   rank=("rank", "first"), n_runs=("seed", "size"))
            .reset_index())
-edges = [0, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0, np.inf]
-cov = (cells_k.assign(bin=pd.cut(cells_k.K_rel, edges))
-       .groupby("bin", observed=True)
-       .agg(n_cells=("tag", "size"), n_runs=("n_runs", "sum")).reset_index())
-cov["K/K* range"] = cov["bin"].astype(str)
-print("Coverage. Row unit = one K/K* bin; n_cells = distinct HP cells, n_runs = their seeds.")
-display(cov[["K/K* range", "n_cells", "n_runs"]])
-print(f"cells {len(cells_k)} | K/K* from {cells_k.K_rel.min():.3g} to {cells_k.K_rel.max():.3g} "
-      f"| below boundary (K/K*<1): {int((cells_k.K_rel < 1).sum())} cells, "
-      f"above: {int((cells_k.K_rel >= 1).sum())} cells")
+cov = (cells_k.groupby("lr").agg(n_cells=("tag", "size"), n_runs=("n_runs", "sum"),
+                                 alphas=("alpha", lambda s: sorted(s.unique())),
+                                 ranks=("rank", lambda s: sorted(s.unique()))).reset_index())
+print("Coverage. Row unit = one lr rung; n_cells = distinct HP cells, n_runs = their seeds.")
+display(cov)
+print(f"cells {len(cells_k)} | lr from {cells_k.lr.min():.3g} to {cells_k.lr.max():.3g} "
+      f"| alpha {sorted(cells_k.alpha.unique())} | rank {sorted(cells_k['rank'].unique())}")
 """)
 
 md(r"""
@@ -318,50 +309,56 @@ print(f"dog wins {int(win_tbl.loc[TARGET, 'n_runs_won'])} / {len(winner)} "
 
 # ------------------------------------------------------------------------------------------------
 md(r"""
-## 3. Per-animal endpoint $p/P$ vs $K/K^\ast$
+## 3. Per-animal endpoint $p/P$ vs learning rate
 
-The specificity picture across the whole dose axis: **dog** prominent, the nine other animals as
-thin small-marker series. Row unit = one cell (median over that cell's ftseeds); x = $K/K^\ast$
-on a log axis; horizontal line at $p/P=1$ (no change from the base), vertical line at the
-collapse boundary $K/K^\ast=1$. No dead threshold is drawn: the operative dead label lives on the
-Pile-KL axis (the anchored cut), not on this trait-ratio axis, so there is no honest horizontal
-rule for it here.
+The specificity picture across the strip: **dog** prominent, the nine other animals as thin
+small-marker series. Row unit = one cell (median over that cell's ftseeds); x = the cell's lr
+on a log axis, dog markers coloured by alpha and sized by rank; horizontal line at $p/P=1$ (no
+change from the base). No dead threshold is drawn: the operative dead label lives on the Pile-KL
+axis (the anchored cut), not on this trait-ratio axis, so there is no honest horizontal rule for
+it here. (Before 2026-11-03 the x axis was the collapse-boundary dose $K/K^\ast$ with a rule at
+the boundary; that coordinate and its reading now live in the lora-forgetting repo.)
 """)
 code("""
-cellmed = runs.groupby("tag").agg({**{a: "median" for a in ANIMALS}, "K_rel": "first"}).reset_index()
+cellmed = runs.groupby("tag").agg({**{a: "median" for a in ANIMALS}, "lr": "first",
+                                   "alpha": "first", "rank": "first"}).reset_index()
 # Notebook-specific display constant, not a label: a log-axis floor so exactly-zero (fully
 # collapsed) cells stay on the plot instead of dropping off the bottom.
 FLOOR = 1e-3
+# Spread cells of one lr rung sideways by their (alpha, rank) so the markers do not stack.
+_jit = np.random.default_rng(0).uniform(-0.12, 0.12, len(cellmed))
+x = cellmed.lr * (10 ** _jit)
 
 fig, ax = plt.subplots(figsize=(10.5, 6))
 for a in OTHERS:
     y = np.maximum(cellmed[a] / PRIORS[a], FLOOR)
-    ax.plot(cellmed.K_rel, y, ".", ms=5, alpha=0.55, label=a)
+    ax.plot(x, y, ".", ms=5, alpha=0.55, label=a)
 y_dog = np.maximum(cellmed[TARGET] / PRIORS[TARGET], FLOOR)
-ax.plot(cellmed.K_rel, y_dog, "o", ms=9, color="tab:red", alpha=0.9,
-        markeredgecolor="black", markeredgewidth=0.4, label="dog (teacher trait)", zorder=5)
+alphas = sorted(cellmed.alpha.unique())
+pal = aplots.palette([str(a) for a in alphas], cmap="viridis")
+size = 5 + 2.5 * np.log2(cellmed["rank"].astype(float))
+sc = ax.scatter(x, y_dog, s=size ** 2 / 2, c=[pal[str(a)] for a in cellmed.alpha],
+                edgecolors="black", linewidths=0.4, zorder=5)
+for a in alphas:
+    ax.scatter([], [], color=pal[str(a)], s=40, label=f"dog, alpha={a}")
 ax.axhline(1.0, color="0.35", lw=1.2, ls="--")
-ax.axvline(1.0, color="tab:purple", lw=1.4, ls="-.")
-ax.text(cellmed.K_rel.min(), 1.08, "p = prior", color="0.35", fontsize=9, va="bottom")
-ax.text(1.05, ax.get_ylim()[0], "K* boundary", color="tab:purple", fontsize=9, rotation=90,
-        va="bottom")
+ax.text(cellmed.lr.min(), 1.08, "p = prior", color="0.35", fontsize=9, va="bottom")
 ax.set_xscale("log")
 ax.set_yscale("log")
-ax.set_xlabel(r"$K/K^\\ast$  (relative dose; boundary at 1)")
+ax.set_xlabel("learning rate (log; markers jittered within a rung; dog marker size ~ log rank)")
 ax.set_ylabel(r"endpoint  $p_a\\,/\\,P_a$   (cell median)")
-ax.set_title("Specific transfer below the boundary, global destruction above\\n"
+ax.set_title("Specific transfer at low dose, global destruction at high dose\\n"
              f"row unit = cell (n={len(cellmed)}), median over ftseeds")
 aplots.right_legend(ax, title="animal")
 plt.show()
 
-below = cellmed[cellmed.K_rel < 1]
-above = cellmed[cellmed.K_rel >= 1]
-print(f"below boundary (n={len(below)} cells): dog median p/P = "
-      f"{(below[TARGET] / PRIORS[TARGET]).median():.2f}x, others "
-      f"{np.median([(below[a] / PRIORS[a]).median() for a in OTHERS]):.2f}x")
-print(f"above boundary (n={len(above)} cells): dog median p/P = "
-      f"{(above[TARGET] / PRIORS[TARGET]).median():.2f}x, others "
-      f"{np.median([(above[a] / PRIORS[a]).median() for a in OTHERS]):.2f}x")
+per_lr = cellmed.groupby("lr").apply(lambda g: pd.Series({
+    "n_cells": len(g),
+    "dog p/P (median)": (g[TARGET] / PRIORS[TARGET]).median(),
+    "others p/P (median of medians)": np.median([(g[a] / PRIORS[a]).median() for a in OTHERS]),
+}), include_groups=False)
+print("Row unit = one lr rung (cells pooled over alpha and rank):")
+display(per_lr.round(3))
 """)
 
 # ------------------------------------------------------------------------------------------------
@@ -609,10 +606,10 @@ print(f"\\n3. MILD SUPPRESSION OF NON-TARGET ANIMALS. The nine others are not me
       f"(median {tt_oth['renorm p/prior'].median():.2f}x), so the suppression "
       f"{'SURVIVES' if tt_oth['renorm p/prior'].median() < 1 else 'does NOT survive'} "
       f"renormalization: it is not just mechanical displacement by dog's mass.")
-print(f"\\n4. SHAPE OF THE DOSE RESPONSE. Below the boundary transfer is specific; above it the "
-      f"whole animal channel is destroyed for every animal alike ({n_dead} dead runs). The "
-      f"{n_weak} weak runs interpolate. Specificity is therefore a property of the "
-      f"sub-boundary regime, and collapse is trait-agnostic damage.")
+print(f"\\n4. SHAPE OF THE DOSE RESPONSE. In the transferring runs transfer is specific; in the "
+      f"collapsed runs the whole animal channel is destroyed for every animal alike ({n_dead} dead "
+      f"runs). The {n_weak} weak runs interpolate. Specificity is therefore a property of the "
+      f"transferring (uncollapsed) regime, and collapse is trait-agnostic damage.")
 """)
 
 md(r"""

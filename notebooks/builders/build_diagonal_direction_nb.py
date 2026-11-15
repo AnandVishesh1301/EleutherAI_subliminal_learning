@@ -51,7 +51,7 @@ One cached sweep for the checkpoint diagonals, one for the arms (treatment + mat
 code(r"""
 import json
 import pandas as pd
-from subliminal_learning.analysis import diagonal_direction as dd
+from subliminal_learning.analysis.transfer import transfer_direction as dd
 from subliminal_learning.analysis.setup import bootstrap
 
 REPO, OUT = bootstrap()     # repo-anchored: every path below is absolute
@@ -160,7 +160,7 @@ Two responses, both on every *complete* (`status == ok`) off-diagonal arm:
 
 **Sender covariates** (T5), each a mean over the lineage's ten k-band dog teachers. *Channel:* `pool_entropy_bits` and `pool_top5_mass` (how concentrated the generated number pool is), `pool_tv_to_base` (how far the teacher pool moved off the lineage's own **untuned base** pool) and `carrier_norm = ‖Δ_x‖`, where `Δ_x` = mean teacher unigram − base unigram is the lineage's mean *carrier* over the ints 0–999 (`numbers.pool_stats`). *Containment:* the teacher pile probe `teacher_delta_ce` / `teacher_kl` on the lineage's **native** probe pool — `pp1` for the Pile lineages, `cp1` for the DCLM ones, recorded per row in `probe_pool` and never mixed; the cross-corpus sidecar is `teacher_delta_ce_cross` where it exists (wc, pr, dclm — 10/10 each).
 
-**Receiver covariates** (T6). `ctrl_delta_ce` is the mean pile probe of the receiver's **control** students (untuned sender pools distilled into it on the same cells) — trait-free damage at this dose. Deadness is given under **both** cuts and both are labelled: the flat comparison cut `DEAD_KL_CUT = 4.0` (KL) for every receiver, and the operative **anchored** cut (ΔCE > `Delta_cross`) where an anchor exists — `wc2`, `pr1234` and `pr3` have **no** anchor, so `ctrl_dead_frac_anchored` is NaN there, never a silent fallback. `k_rel_median` is the dose position: the median over the core30 cells of `K/K*`, with `K*` the mean of the receiver's dog arms' `kstar_pooled` from `docs/results/boundary_law_deep_dive_artifacts.json` and K evaluated in the **same** pooled coordinate those were fitted in (b ≈ 0.571, c ≈ −0.078). The boundary-law fits cover only orig / ds / ws / fs receivers, so `k_rel_median` is NaN for wc, pr and dclm — a gap, not a zero.
+**Receiver covariates** (T6). `ctrl_delta_ce` is the mean pile probe of the receiver's **control** students (untuned sender pools distilled into it on the same cells) — trait-free damage at this dose. Deadness is the operative **anchored** cut (ΔCE > `Delta_cross`) where an anchor exists — `wc2`, `pr1234` and `pr3` have **no** anchor, so `ctrl_dead_frac_anchored` is NaN there (the flat 4-nat comparison column was dropped 2026-11-03 when the cut constant moved to lora-forgetting). `k_rel_median` is the dose position: the median over the core30 cells of `K/K*`, with `K*` the mean of the receiver's dog arms' `kstar_pooled` from `docs/results/boundary_law_deep_dive_artifacts.json` and K evaluated in the **same** pooled coordinate those were fitted in (b ≈ 0.571, c ≈ −0.078). The boundary-law fits cover only orig / ds / ws / fs receivers, so `k_rel_median` is NaN for wc, pr and dclm — a gap, not a zero.
 """)
 
 code(r"""

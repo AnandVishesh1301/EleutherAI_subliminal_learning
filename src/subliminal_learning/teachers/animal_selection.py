@@ -3,7 +3,7 @@
 Adaptation of Cloud et al.'s animal-selection step. In truesight they run a
 free-form "name your favorite animal" eval against several base models, count how
 often each animal is named, and keep the animals that clear a frequency threshold
-for *every* model, then hand-pick from that set (see CLOUD_ARCHITECTURE.md). The
+for *every* model, then hand-pick from that set (see Cloud et al., arXiv:2507.14805). The
 teacher models here are tiny base Pythia-160m checkpoints that don't reliably
 free-form a clean one-word answer, so we rank by *log-probability* rather than
 sampling frequency: for each candidate animal we read the model's
@@ -33,7 +33,7 @@ from subliminal_learning.models.loading_io import load_model, load_tokenizer
 from subliminal_learning.models.registry import PythiaModelSpec, resolve_hf_repo_id
 from subliminal_learning.models.tokenization_io import encode_prompt
 from subliminal_learning.teachers.dataset import is_single_token
-from subliminal_learning.teachers.model_specs import (  # re-exported for callers
+from subliminal_learning.models.specs import (  # re-exported for callers
     polypythia_160m_seed_specs,
     spec_label,
 )

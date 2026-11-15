@@ -294,7 +294,7 @@ def load_number_prompt_set(path: Path) -> NumberPromptSetConfig:
 
 def prompt_set_tag(
     prompt_set: "NumberPromptSetConfig",
-    constrained: "ConstrainedGenConfig | None" = None,  # noqa: F821 -- pipelines.generate_numbers_pipeline
+    constrained: "ConstrainedGenConfig | None" = None,  # noqa: F821 -- subliminal_learning.pipelines.generate_numbers_pipeline
 ) -> str:
     """Path segment naming the prompt-set variant, e.g. ``ex10-20``.
 

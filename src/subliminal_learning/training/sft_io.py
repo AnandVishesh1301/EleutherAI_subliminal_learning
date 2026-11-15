@@ -9,7 +9,7 @@ from pathlib import Path
 LOSS_METHOD_HF = "hf_training_loss"
 
 #: `SftResult.final_train_loss_method`: the step-span weighted mean over the checkpoint's
-#: logged interval means (`teachers.sft_io._interval_weighted_loss`), an APPROXIMATION used on
+#: logged interval means (`teachers.sft_io.interval_weighted_loss`), an APPROXIMATION used on
 #: the resume-complete path, where no `trainer.train()` call returns a `training_loss`.
 LOSS_METHOD_INTERVAL = "interval_weighted_log_history"
 

@@ -1,7 +1,7 @@
 # Verification sweep: which TRAINED template teachers to run through the preference
 # eval, and how. Deliberately SEPARATE from teacher_ft_sweep.yaml so you can narrow
 # scope (one animal / one model / a few HPs) to save GPU time without touching the
-# training grid. Runner: scripts/sweep_evaluate_teacher_preference.py.
+# training grid. Runner: scripts/sweeps/sweep_evaluate_teacher_preference.py.
 #
 # Selection is (animal x base_model x HP) — the same axes that define a {param_tag}
 # config. ft_seeds are NOT a selection axis: the eval pipeline auto-discovers and

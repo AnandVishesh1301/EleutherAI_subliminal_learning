@@ -1,31 +1,35 @@
-"""Notebook-support helpers shared by the analysis notebooks in ``notebooks/``.
+"""Notebook-support layer shared by the analysis notebooks in ``notebooks/`` and the figure scripts.
 
-This subpackage is the notebook-support layer: frames, labels, plots, record caches, and
-the loaders the analysis notebooks share. The substantial *calculations* live one level
-down in ``subliminal_learning.stats`` (estimators; the LoRA/W0 tensor math moved with the
-collapse program to the lora-forgetting repo), which this package may import but which never
-import it back;
-``analysis.stats`` and ``analysis.collapse_law`` are compatibility shims over ``stats``.
-Two rules keep this package from leaking into the run path:
+Layout (2026-11 regroup):
 
-- NEW run-path code -- ``scripts/`` and everything in ``pipelines/``, plus the domain
-  packages under ``src/`` -- must not import ``subliminal_learning.analysis``; put shared
-  computation in ``stats`` instead. Analysis-CLI scripts (one-off scans/screens) may use its
-  loaders, and notebooks (plus its own tests) remain the primary importers. Three standing
-  carve-outs predate the ``stats`` extraction and are to be migrated with it:
-  ``numbers/manifest_io.py``,
-  ``evaluation/preference_results_io.py``, ``steering/eas_results_io.py`` (``analysis.frames``
-  loaders).
-- matplotlib lives *only* in ``analysis.plots`` (mirroring how the pandas-using ``*_io``
-  modules are imported only where needed). ``analysis.setup.set_plot_style`` is the one
-  concession -- it imports matplotlib lazily inside its body -- so importing this package
-  or ``analysis.setup`` stays matplotlib-free. Import ``analysis.plots`` explicitly when
-  you need the figure primitives.
+- ``loaders/``       -- disk readers: frames, registries, result/probe caches, student trees,
+                        the transfer-significance loaders (``significance_*_io``), number manifests;
+- ``transfer/``      -- transfer readouts (matrix, headline, families, factors, asymmetry,
+                        conditions, specificity, direction);
+- ``trajectories/``  -- checkpoint-trajectory readouts (``readers`` + the AB/AA, asymmetry,
+                        conditions and dd1b-ladder analyses);
+- ``checkpoints/``   -- pretraining-checkpoint cross-readouts and their factorization;
+- ``setup``, ``plots``, ``exclusions`` (+ the ``labels`` alias the lora-forgetting repo imports).
+
+The substantial *calculations* live one level down in ``subliminal_learning.stats``
+(estimators), which this package may import but which never imports it back. The
+collapse-boundary law lives in the lora-forgetting repo (``analysis.exclusions`` only READS
+the integrity-anchor artifact that program writes, to exclude collapsed students).
+
+Two rules keep this package from leaking into the run path (enforced by
+``tests/unit/test_layering.py``):
+
+- Only ``analysis/``, ``figures/`` and ``pipelines/`` import ``subliminal_learning.analysis``;
+  the domain and ``*_io`` modules get shared loaders from ``utils/`` (``utils.frames``,
+  ``utils.record_cache``) and shared computation from ``stats/``.
+- matplotlib lives *only* in ``analysis.plots`` (and the figure scripts).
+  ``analysis.setup.set_plot_style`` is the one concession -- it imports matplotlib lazily
+  inside its body -- so importing this package or ``analysis.setup`` stays matplotlib-free.
 """
 
 from __future__ import annotations
 
-from subliminal_learning.analysis.frames import (
+from subliminal_learning.analysis.loaders.frames import (
     MAIN_GRID,
     MODEL_ORDER,
     add_lora_label,

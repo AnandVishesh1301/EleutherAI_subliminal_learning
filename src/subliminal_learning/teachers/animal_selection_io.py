@@ -1,6 +1,6 @@
 """Persist / load animal-selection scores as a tidy long table.
 
-Companion to `animal_selection`: `scripts.select_animals` scores the single-token subset
+Companion to `animal_selection`: `scripts.train.select_animals` scores the single-token subset
 of the curated `DEFAULT_ANIMAL_CANDIDATES` pool across all 7 PolyPythias 160m base models
 and writes one JSON here; the analysis notebook reads it back as a LONG frame (one row per
 animal x model) via `load_selection_scores`, carrying the per-model log-prob/rank plus the

@@ -2,9 +2,9 @@
 name = "subliminal-learning"
 version = "0.1.0"
 description = "EleutherAI subliminal learning"
+license = {text = "MIT"}
 requires-python = ">=3.11,<3.12"
 dependencies = [
-    "gpu-jobq",
     "accelerate==1.4.0",
     "dacite>=1.8.1,<2",
     "datasets>=3.0.0,<4",
@@ -27,6 +27,11 @@ dependencies = [
 ]
 
 [dependency-groups]
+# Cluster job-queue tooling (`subliminal_learning.ops`, `scripts/ops/queue_status.py`, the sweep
+# launchers). Optional: the library core never imports jobq.
+jobq = [
+    "gpu-jobq",
+]
 analysis = [
     "ipykernel>=7.3.0",
     "jupyterlab>=4.6.1",
@@ -56,8 +61,8 @@ build-backend = "uv_build"
 package = true
 # `eval` (lm-eval) is required by capability benchmarks in GKD student verify
 # sweeps (capability_io.run_benchmarks). Keep it default so plain `uv sync` /
-# worker restarts cannot drop it mid-campaign (20260801_optparam P2-eval outage).
-default-groups = ["dev", "analysis", "eval"]
+# worker restarts cannot drop it mid-campaign.
+default-groups = ["dev", "analysis", "eval", "jobq"]
 # ai2-olmo (the non-default `datadecide` group) pins numpy<2 out of caution;
 # hf_olmo is verified to import and load the DataDecide 1B models under numpy
 # 2.4.6 (2026-08-18). This override globally supersedes any package's numpy
